@@ -8,6 +8,7 @@ import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
 import { createMotionDirector } from './motion-director';
+import { createAutoMotion } from './auto-motion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import './usami.css';
 
@@ -49,7 +50,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, lastIdleActive }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -157,7 +158,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller }) {
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
         reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); }
       };
-      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [], meshList: manifest.meshes, manifest });
+      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [], blink: morphs.has('blink') || (vrm?.expressionManager?.expressions?.some(e => e.expressionName === 'blink') ?? false), meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
     const resize = () => {
       camera.aspect = element.clientWidth / element.clientHeight;
@@ -169,7 +170,21 @@ function Avatar({ source, sourceType, sourceName, onReport, controller }) {
     resize();
     const clock = new THREE.Clock();
     let frame;
-    const draw = () => { frame = requestAnimationFrame(draw); const delta = Math.min(clock.getDelta(), .1); mixer?.update(delta); vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera); };
+    const draw = () => {
+      frame = requestAnimationFrame(draw);
+      const delta = Math.min(clock.getDelta(), .1);
+      const state = auto?.current?.update?.();
+      if (state?.blink !== undefined && blinkMode?.current) {
+        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue('blink', state.blink);
+        else morphList.filter(item => item.name === 'blink').forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink; });
+      }
+      if (state && state.idleActive !== lastIdleActive?.current) {
+        lastIdleActive.current = state.idleActive;
+        if (state.idleActive) controller.current?.idle?.();
+        else controller.current?.stop?.();
+      }
+      mixer?.update(delta); vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera);
+    };
     draw();
     return () => {
       disposed = true;
@@ -220,10 +235,18 @@ export function Usami() {
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
+  const auto = useRef(null);
+  const blinkMode = useRef(null);
+  const lastIdleActive = useRef(false);
+  const poke = () => auto.current?.notifyActivity();
   const reportModel = useCallback(value => {
     setReport(value);
     if (value.animations) setSelectedClip(String(Math.max(0, value.animations.findIndex(clip => clip.boneTracks && !clip.excludedTracks))));
     director.current = value?.manifest ? createMotionDirector({ controller: controller.current, capabilities: { ...value.manifest, customIdle: value.customIdle !== false, customWave: value.customWave !== false } }) : null;
+    // Automatic life (blink + idle) only for 3D models with a manifest; Live2D brings its own rig.
+    blinkMode.current = value?.expressions?.includes('blink') ? 'expression' : value?.morphs?.includes('blink') ? 'morph' : null;
+    auto.current = value?.manifest && (value.blink || value.customIdle !== false) ? createAutoMotion({ blink: Boolean(value.blink), idle: value.customIdle !== false }) : null;
+    lastIdleActive.current = false;
   }, []);
   useEffect(() => () => { if (source.startsWith('blob:')) URL.revokeObjectURL(source); }, [source]);
   const loadFile = event => {
@@ -249,6 +272,7 @@ export function Usami() {
       if (!response.ok) throw new Error(data?.error || 'Falha na conversa.');
       if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new Error('Resposta inválida do servidor.');
       const results = director.current?.execute(data.actions)?.results || [];
+      if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
@@ -277,7 +301,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} lastIdleActive={lastIdleActive} />}
     <header><span className="brand">USAMI <small>companion</small></span><span className="status"><i />{busy ? 'pensando' : quiet ? 'modo tranquilo' : 'em repouso'}</span><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></header>
     <div className="welcome"><span>UM MOMENTO COM</span><h1>Usami</h1><p>Um lugar tranquilo para estar, conversar e descobrir.</p></div>
     <div className="controls">
@@ -296,9 +320,9 @@ export function Usami() {
       <dl>{Object.entries({Formato:report.format,Meshes:report.meshes,Bones:report.bones,Triângulos:report.triangles,Animações:report.animations.length,'Morph targets':report.morphs.length,Expressões:report.expressions.length}).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
       {report.live2d && <p>Live2D ativo: o modelo usa os parâmetros, a física e o idle criados pela riggadora. Arraste o cursor sobre ela para o olhar acompanhar.</p>}
       {report.format === 'FBX' && <p>{sourceName.toLowerCase() === 'felis.fbx' ? 'Felis: usando as texturas-base locais quando disponíveis. Os shaders e efeitos do Unity não são reproduzidos.' : 'FBX em teste: texturas externas e materiais do Unity podem não acompanhar este arquivo.'}</p>}
-      {!report.live2d && <><h3>Movimentos personalizados</h3><p>Testes para o rig Autumn. O idle é contínuo; o aceno dura alguns segundos. Não estão ligados às respostas da IA.</p><div className="rig-actions"><button disabled={!report.customIdle} onClick={() => controller.current?.idle()}>Iniciar idle</button><button disabled={!report.customWave} onClick={() => controller.current?.wave()}>Acenar</button><button onClick={() => controller.current?.stop()}>Parar movimentos</button></div>{(!report.customIdle || !report.customWave) && <p>Alguns ossos necessários não foram encontrados neste modelo.</p>}
+      {!report.live2d && <><h3>Movimentos personalizados</h3><p>Testes para o rig Autumn. O idle é contínuo; o aceno dura alguns segundos. Não estão ligados às respostas da IA.</p><div className="rig-actions"><button disabled={!report.customIdle} onClick={() => { controller.current?.idle(); poke(); }}>Iniciar idle</button><button disabled={!report.customWave} onClick={() => { controller.current?.wave(); poke(); }}>Acenar</button><button onClick={() => controller.current?.stop()}>Parar movimentos</button></div>{(!report.customIdle || !report.customWave) && <p>Alguns ossos necessários não foram encontrados neste modelo.</p>}
       <h3>Meshes</h3>{meshList.length ? <>{meshList.map(mesh => <label className="rig-label" key={mesh.name}>{mesh.name} {mesh.skinned ? '(rig)' : '(sem rig)'}<input type="checkbox" checked={isMeshVisible(mesh)} onChange={() => toggleMesh(mesh)} /></label>)}<div className="rig-actions"><button onClick={resetMeshes}>Restaurar visibilidade padrão</button></div><p>Modelos sem esqueleto começam ocultos; desmarque para esconder acessórios ou mostre o que quiser.</p></> : <p>Nenhuma mesh presente.</p>}
-      <h3>Animações</h3>{report.animations.length ? <><label className="rig-label">Clip<select value={selectedClip} onChange={e => setSelectedClip(e.target.value)}>{report.animations.map((clip,i) => <option key={i} value={i}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label><p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p><div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => controller.current?.play(Number(selectedClip))}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div></> : <p>Este modelo não contém clips.</p>}
+      <h3>Animações</h3>{report.animations.length ? <><label className="rig-label">Clip<select value={selectedClip} onChange={e => setSelectedClip(e.target.value)}>{report.animations.map((clip,i) => <option key={i} value={i}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label><p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p><div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => { controller.current?.play(Number(selectedClip)); poke(); }}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div></> : <p>Este modelo não contém clips.</p>}
       <h3>Ossos</h3><p>Rotação local limitada; iniciar uma animação pode sobrescrever o ajuste.</p><label className="rig-label">Osso<select value={boneIndex} onChange={e => {setBoneIndex(Number(e.target.value));setAngle(0);}}>{report.boneNames.map(b => <option key={b.index} value={b.index}>{b.name} [{b.index}]</option>)}</select></label><label className="rig-label">Eixo<select value={axis} onChange={e => {setAxis(e.target.value);setAngle(0);}}><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label><label className="rig-label">Rotação: {angle}°<input type="range" min="-45" max="45" value={angle} onChange={e => {const value=Number(e.target.value);setAngle(value);controller.current?.bone(boneIndex,axis,value);}} /></label>
       <h3>Morph targets</h3>{report.morphs.length ? report.morphs.map(name => <label className="rig-label" key={name}>{name}: {Math.round((morphValues[name] || 0)*100)}%<input type="range" min="0" max="1" step=".01" value={morphValues[name] || 0} onChange={e => {const value=Number(e.target.value);setMorphValues(old => ({...old,[name]:value}));controller.current?.morph(name,value);}} /></label>) : <p>Nenhum morph target encontrado.</p>}
       <button className="upload" onClick={() => {controller.current?.reset();setAngle(0);setMorphValues({});}}>Restaurar pose inicial</button></>}
