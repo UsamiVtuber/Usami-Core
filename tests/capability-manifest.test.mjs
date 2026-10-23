@@ -44,3 +44,13 @@ test('default: skinned visível, resto oculto; prefs por nome vencem', () => {
 test('summarizeCapabilities filters expression names', () => {
   assert.deepEqual(summarizeCapabilities({ expressions: ['happy', '', 42] }).expressions, ['happy']);
 });
+
+test('summarizeCapabilities omite tilt quando customTilt é false', () => {
+  const summary = summarizeCapabilities({ customTilt: false, customIdle: true, customWave: true });
+  assert.deepEqual(summary.gestures, ['idle', 'wave']);
+});
+
+test('summarizeCapabilities inclui tilt por padrão e quando customTilt é true', () => {
+  assert.deepEqual(summarizeCapabilities({ customIdle: false, customWave: false }).gestures, ['tilt']);
+  assert.deepEqual(summarizeCapabilities({ customTilt: true, customIdle: false, customWave: false }).gestures, ['tilt']);
+});

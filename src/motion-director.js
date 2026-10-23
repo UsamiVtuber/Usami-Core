@@ -30,6 +30,7 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
   const accessoryNames = new Set((manifest.meshes ?? []).filter(mesh => mesh && mesh.skinned === false).map(mesh => mesh.name));
   const idleAvailable = manifest.customIdle !== false;
   const waveAvailable = manifest.customWave !== false;
+  const tiltAvailable = manifest.customTilt !== false;
 
   const verbs = new Set(DIRECTOR_VERBS);
 
@@ -53,7 +54,7 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
       }
     } else if (verb === 'gesture') {
       const name = GESTURE_NAMES.includes(action?.name) ? action.name : null;
-      const available = name === 'idle' ? idleAvailable : name === 'wave' ? waveAvailable : true;
+      const available = name === 'idle' ? idleAvailable : name === 'wave' ? waveAvailable : tiltAvailable;
       if (!name || !available) reason = 'gesture unavailable on this model';
       else {
         applied = name === 'tilt' ? controller.gesture('tilt') === true : name === 'wave' ? controller.wave() === true : controller.idle() === true;

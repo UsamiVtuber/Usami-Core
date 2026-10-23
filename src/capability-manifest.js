@@ -64,7 +64,7 @@ export function summarizeCapabilities(manifest) {
     morphs: (manifest.morphs ?? []).slice(0, 60).filter(name => typeof name === 'string' && name.length > 0),
     expressions: (manifest.expressions ?? []).slice(0, 20).filter(name => typeof name === 'string' && name.length > 0),
     meshes: (manifest.meshes ?? []).slice(0, 100).map(mesh => ({ name: mesh?.name, accessory: mesh?.skinned === false })).filter(mesh => typeof mesh.name === 'string' && mesh.name.length > 0),
-    gestures: ['tilt', ...(manifest.customIdle ? ['idle'] : []), ...(manifest.customWave ? ['wave'] : [])],
+    gestures: [...(manifest.customTilt !== false ? ['tilt'] : []), ...(manifest.customIdle ? ['idle'] : []), ...(manifest.customWave ? ['wave'] : [])],
   };
 }
 

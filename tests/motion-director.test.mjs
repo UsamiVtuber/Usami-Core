@@ -104,6 +104,15 @@ test('gesto indisponível no modelo sem idle', () => {
   assert.equal(result.reason, 'gesture unavailable on this model');
 });
 
+test('tilt indisponível quando customTilt é false', () => {
+  const controller = makeController();
+  const director = createMotionDirector({ controller, capabilities: { ...capabilities, customTilt: false }, cooldowns: { play_clip: 0, gesture: 0, set_mesh_visible: 0, set_expression: 0 } });
+  const result = director.execute([{ type: 'gesture', name: 'tilt' }]).results[0];
+  assert.deepEqual(controller.calls, []);
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'gesture unavailable on this model');
+});
+
 test('meshes só acessório e com cooldown próprio', () => {
   const controller = makeController();
   let clock = 1000;
