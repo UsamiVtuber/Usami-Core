@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyReply, createChatHandler, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
+import { classifyReply, createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -71,6 +71,30 @@ test('sanitizeActions elimina verbs desconhecidos e limita a 5', () => {
   assert.deepEqual(sanitizeActions('não array'), []);
   assert.deepEqual(sanitizeActions([null, undefined]), []);
   assert.deepEqual(sanitizeActions([{ type: 'set_expression', name: 'happy', weight: 0.8 }]), [{ type: 'set_expression', name: 'happy', weight: 0.8 }]);
+});
+
+test('filterActionsByCatalog descarta ações fora do catálogo anunciado', () => {
+  const capabilities = { gestures: [], clips: ['Dance'], morphs: ['smile'], expressions: ['happy'] };
+  const actions = [
+    { type: 'gesture', name: 'tilt' },
+    { type: 'gesture', name: 'wave' },
+    { type: 'play_clip', name: 'Dance' },
+    { type: 'play_clip', name: 'Inexistente' },
+    { type: 'set_morph', name: 'smile' },
+    { type: 'set_expression', name: 'happy' },
+    { type: 'set_mesh_visible', name: 'Hat', visible: false },
+    { type: 'set_expression', name: 'unknown' },
+  ];
+  assert.deepEqual(filterActionsByCatalog(actions, capabilities), [
+    { type: 'play_clip', name: 'Dance' },
+    { type: 'set_morph', name: 'smile' },
+    { type: 'set_expression', name: 'happy' },
+    { type: 'set_mesh_visible', name: 'Hat', visible: false },
+  ]);
+  // sem capabilities (ou catálogo ausente no objeto) → mantém tudo
+  assert.deepEqual(filterActionsByCatalog(actions, null), actions);
+  assert.deepEqual(filterActionsByCatalog(actions, {}), actions);
+  assert.deepEqual(filterActionsByCatalog('não array', capabilities), []);
 });
 
 test('sanitizeCapabilities normaliza resumo do cliente', () => {
@@ -193,6 +217,22 @@ test('handler: 200 classifies the reply when capabilities include expressions', 
   const data = JSON.parse(res.body);
   assert.equal(data.reply, 'olá');
   assert.equal(data.gesture, 'tilt');
+  assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
+  assert.equal(calls, 2);
+});
+
+test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return jsonResponse(calls === 1 ? '{"reply":"olá","gesture":"tilt","actions":[]}' : '{"actions":[{"type":"gesture","name":"tilt"},{"type":"set_expression","name":"happy","weight":0.5}]}');
+  };
+  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
+  const res = mockRes();
+  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy'], gestures: [] } }) }), res);
+  assert.equal(res.statusCode, 200);
+  const data = JSON.parse(res.body);
+  assert.equal(data.reply, 'olá');
   assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
   assert.equal(calls, 2);
 });

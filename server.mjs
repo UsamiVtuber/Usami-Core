@@ -60,6 +60,20 @@ export function sanitizeActions(raw) {
   });
 }
 
+export function filterActionsByCatalog(actions, capabilities) {
+  const known = (list) => (!Array.isArray(list) ? null : new Set(list));
+  const sets = capabilities ? {
+    gesture: known(capabilities.gestures),
+    play_clip: known(capabilities.clips),
+    set_morph: known(capabilities.morphs),
+    set_expression: known(capabilities.expressions),
+  } : {};
+  return (Array.isArray(actions) ? actions : []).filter(action => {
+    const set = sets[action?.type];
+    return set ? set.has(action?.name) : true; // sem catálogo conhecido → mantém
+  });
+}
+
 export function systemFor(capabilities) {
   const base = DEFAULT_SYSTEM;
   if (!capabilities) return base;
@@ -217,6 +231,7 @@ export function createChatHandler(options = {}) {
     } catch {
       // classifier failure keeps parsed.actions
     }
+    actions = filterActionsByCatalog(actions, capabilities);
     return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions });
   };
 }
