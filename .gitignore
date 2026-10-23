@@ -1,0 +1,13 @@
+# Dependências e build
+node_modules/
+dist/
+
+# Backup local
+_backup/
+
+# Modelos e runtime de terceiros (licenças não verificadas; mantidos apenas localmente)
+public/models/
+public/live2d/
+
+# Arquivos de ambiente (chaves nunca entram no repositório)
+.env
