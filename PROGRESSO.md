@@ -10,6 +10,7 @@
 - Backend de chat refatorado e testável (`server.mjs`): validação de origem/CORS (localhost + same-origin em produção), content-type, tamanho de corpo, chave ausente, timeout e parsing do provedor. Testes em `tests/chat-server.test.mjs`. Scripts npm: `test`, `test:unit`, `test:chat`, `test:sites`.
 - Director local (`src/motion-director.js`): filtro determinístico entre LLM e avatar. Whitelist de ações (`play_clip`, `gesture`, `set_morph`, `set_mesh_visible`, `set_expression`), cooldowns por verbo, apenas acessórios mudam de visibilidade, clamp 0..1 nos morphs e limite de 5 ações por turno. `server.mjs` injeta o resumo das capacidades (via `sanitizeCapabilities`) no prompt de sistema e devolve `actions` (whitelist via `sanitizeActions`); o cliente (`Usami.jsx`) executa as ações pelo director. Testes em `tests/motion-director.test.mjs`; confirmado ponta a ponta no dev (Live2D).
 - Classificador por frase (Etapa 3): após a resposta do chat, o backend faz uma 2ª chamada (`classifyReply`) que sugere até 3 reações coerentes (expressões, gestos, clips, morphs) a partir do catálogo do modelo; resultado deduplicado/sanitizado e mesclado nas `actions`. Sem catálogo relevante (ex.: Live2D só-gestos), a 2ª chamada não acontece. O controller VRM aplica expressões via `expressionManager.setValue`; Live2D permanece stub.
+- Vida automática (Etapa 4): `src/auto-motion.js` agenda piscadas (2–6 s, rampa triangular) e idle automático após 30 s sem atividade. O Avatar aplica blink via expressão VRM `blink` (fallback: morph `blink`) e alterna o idi idle no rAF; chat/gestos/clips do painel contam como atividade. Live2D não participa (SDK demo tem blink próprio).
 - Manifesto de capacidades (`src/capability-manifest.js`): meshes (rig, triângulos, materiais, morphs), bones, clips, expressões e bounds serializáveis. Painel de rig agora lista as meshes com controle de visibilidade persistido por modelo em `localStorage` (`src/mesh-preferences.js`). Testes próprios incluídos.
 
 ## Limitações
@@ -26,7 +27,9 @@
 
 1. Classificador por frase (estilo Jev/motion-engine) em paralelo ao LLM principal, com FACS para VRM e canais de rosto.
 2. Inspeção detalhada de capacidades, controle de expressões e testes com um VRM válido.
-3. Blink, idle e look-at automáticos enquanto o director cuida de gestos maiores.
+4. Vida automática: blink e idle automáticos implementados; falta look-at.
+5. Testar ponta a ponta com um VRM válido (expressões e blinks reais).
+6. Timing por frase no cliente (ações reagindo conforme a fala).
 
 ## Execução
 
