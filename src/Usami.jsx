@@ -28,7 +28,7 @@ function Live2DAvatar({ controller, onReport }) {
         const app = LAppDelegate.getInstance();
         app.initialize();
         app.run();
-        controller.current = { gesture: () => false, stop: () => false, reset: () => false };
+        controller.current = { gesture: () => false, stop: () => false, reset: () => false, setExpression: () => false };
         onReport({ format: 'Live2D Cubism 3', meshes: '—', bones: 'Parâmetros 2D', triangles: '—', animations: [{ name: 'daiji (idle)', boneTracks: 0, excludedTracks: 0 }], morphs: [], expressions: Array.from({ length: 11 }, (_, index) => `expression${index + 1}`), live2d: true, customIdle: true, customWave: false, meshList: [] });
       } catch (error) {
         onReport({ error: `Não foi possível inicializar o Cubism: ${error.message}` });
@@ -144,6 +144,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller }) {
         wave() { gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
         setMorph(name, value) { morph(name, value); },
+        setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; vrm.expressionManager.setValue(name, weight); return true; },
         morph(name, value) { morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; }); },
         bone(index, axis, value) {
           const bone = boneList[index]; if (!bone) return;
