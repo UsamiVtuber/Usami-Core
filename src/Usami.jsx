@@ -50,7 +50,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, lastIdleActive }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -108,6 +108,15 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       const scale = 2.25 / Math.max(size.y, .001);
       avatar.scale.setScalar(scale);
       avatar.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+      if (vrm?.humanoid) {
+        const setArm = (name, sign) => {
+          const node = vrm.humanoid.getNormalizedBoneNode?.(name);
+          if (node) node.rotation.z += sign * THREE.MathUtils.degToRad(65);
+        };
+        setArm('leftUpperArm', 1);
+        setArm('rightUpperArm', -1);
+        vrm.humanoid.update?.();
+      }
       let meshes = 0, bones = 0, triangles = 0;
       const morphs = new Set();
       const boneList = [];
@@ -123,7 +132,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       });
       mixer = new THREE.AnimationMixer(avatar);
       const animations = (loaded.animations || []).map(clip => inspectAnimation(clip, avatar));
-      const manifest = buildCapabilityManifest(avatar, animations, vrm?.expressionManager?.expressions?.map(e => e.expressionName) || []);
+      const expressionNames = vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [];
+      const detectedBlink = detectBlinkName(expressionNames, morphs);
+      const manifest = buildCapabilityManifest(avatar, animations, expressionNames);
       const preferences = loadMeshPrefs(sourceName);
       const visibility = resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : preferences).slice();
       manifest.meshes.forEach((mesh, index) => { const meshObject = findMesh(avatar, mesh, manifest.meshes); if (meshObject) meshObject.visible = visibility[index]; });
@@ -144,7 +155,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         idle() { gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
         wave() { gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
-        setMorph(name, value) { morph(name, value); },
+        setMorph(name, value) { this.morph(name, value); },
         setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; vrm.expressionManager.setValue(name, weight); return true; },
         morph(name, value) { morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; }); },
         bone(index, axis, value) {
@@ -158,7 +169,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
         reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); }
       };
-      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [], blink: morphs.has('blink') || (vrm?.expressionManager?.expressions?.some(e => e.expressionName === 'blink') ?? false), meshList: manifest.meshes, manifest });
+      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, customTilt: boneList.some(bone => bone.name === 'DEF-spine006'), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
     const resize = () => {
       camera.aspect = element.clientWidth / element.clientHeight;
@@ -174,9 +185,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       frame = requestAnimationFrame(draw);
       const delta = Math.min(clock.getDelta(), .1);
       const state = auto?.current?.update?.();
-      if (state?.blink !== undefined && blinkMode?.current) {
-        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue('blink', state.blink);
-        else morphList.filter(item => item.name === 'blink').forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink; });
+      if (state?.blink !== undefined && blinkMode?.current && blinkName?.current) {
+        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, state.blink);
+        else morphList.filter(item => item.name === blinkName.current).forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink; });
       }
       if (state && state.idleActive !== lastIdleActive?.current) {
         lastIdleActive.current = state.idleActive;
@@ -215,10 +226,20 @@ function findMesh(avatar, target, meshes) {
   return result;
 }
 
+function detectBlinkName(expressions, morphs) {
+  if (expressions.includes('blink')) return 'blink';
+  for (const candidate of ['blink', 'blinking', 'blinking_l', 'blinking_r', 'eye_close', 'closed_eye']) {
+    const morph = [...morphs].find(name => name.toLowerCase() === candidate);
+    if (morph) return morph;
+  }
+  return null;
+}
+
 export function Usami() {
   const [source, setSource] = useState('/live2d/Resources/youling/youling.model3.json');
   const [sourceType, setSourceType] = useState('live2d');
   const [sourceName, setSourceName] = useState('youling.model3.json');
+  const [modelPath, setModelPath] = useState('');
   const [report, setReport] = useState(null);
   const [meshPrefs, setMeshPrefs] = useState({});
   const [panel, setPanel] = useState(false);
@@ -237,14 +258,16 @@ export function Usami() {
   const director = useRef(null);
   const auto = useRef(null);
   const blinkMode = useRef(null);
+  const blinkName = useRef(null);
   const lastIdleActive = useRef(false);
   const poke = () => auto.current?.notifyActivity();
   const reportModel = useCallback(value => {
     setReport(value);
     if (value.animations) setSelectedClip(String(Math.max(0, value.animations.findIndex(clip => clip.boneTracks && !clip.excludedTracks))));
-    director.current = value?.manifest ? createMotionDirector({ controller: controller.current, capabilities: { ...value.manifest, customIdle: value.customIdle !== false, customWave: value.customWave !== false } }) : null;
+    director.current = value?.manifest ? createMotionDirector({ controller: controller.current, capabilities: { ...value.manifest, customIdle: value.customIdle !== false, customWave: value.customWave !== false, customTilt: value.customTilt !== false } }) : null;
     // Automatic life (blink + idle) only for 3D models with a manifest; Live2D brings its own rig.
-    blinkMode.current = value?.expressions?.includes('blink') ? 'expression' : value?.morphs?.includes('blink') ? 'morph' : null;
+    blinkName.current = value?.blinkName ?? null;
+    blinkMode.current = blinkName.current ? (blinkName.current === 'blink' && value?.expressions?.includes('blink') ? 'expression' : 'morph') : null;
     auto.current = value?.manifest && (value.blink || value.customIdle !== false) ? createAutoMotion({ blink: Boolean(value.blink), idle: value.customIdle !== false }) : null;
     lastIdleActive.current = false;
   }, []);
@@ -259,13 +282,24 @@ export function Usami() {
     setSource(URL.createObjectURL(file));
     event.target.value = '';
   };
+  const loadFromPath = path => {
+    const target = (path || '').trim();
+    const dot = target.lastIndexOf('.');
+    const extension = dot < 0 ? '' : target.slice(dot).toLowerCase();
+    if (!target || !['.glb', '.gltf', '.vrm', '.fbx'].includes(extension)) return;
+    setReport(null);
+    setBoneIndex(0); setAngle(0); setMorphValues({}); setSelectedClip('0');
+    setSourceType(extension === '.fbx' ? 'fbx' : 'gltf');
+    setSourceName(target.split('/').pop());
+    setSource(target);
+  };
   const sendMessage = async event => {
     event.preventDefault();
     if (busy || !text.trim()) return;
     setBusy(true);
     setMessage('Usami está pensando…');
     try {
-      const manifest = report?.manifest ? { ...report.manifest, customIdle: report.customIdle !== false, customWave: report.customWave !== false } : null;
+      const manifest = report?.manifest ? { ...report.manifest, customIdle: report.customIdle !== false, customWave: report.customWave !== false, customTilt: report.customTilt !== false } : null;
       const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, capabilities: manifest ? summarizeCapabilities(manifest) : undefined }) });
       let data = null;
       try { data = await response.json(); } catch { throw new Error('Resposta inválida do servidor.'); }
@@ -301,7 +335,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} lastIdleActive={lastIdleActive} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} />}
     <header><span className="brand">USAMI <small>companion</small></span><span className="status"><i />{busy ? 'pensando' : quiet ? 'modo tranquilo' : 'em repouso'}</span><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></header>
     <div className="welcome"><span>UM MOMENTO COM</span><h1>Usami</h1><p>Um lugar tranquilo para estar, conversar e descobrir.</p></div>
     <div className="controls">
@@ -316,7 +350,7 @@ export function Usami() {
       </div>
       <div className="hint">SUA COMPANHIA, NO SEU RITMO</div>
     </div>
-    {panel && <div className="scrim" onClick={() => setPanel(false)}><aside onClick={event => event.stopPropagation()}><div className="panel-head"><div><span className="eyebrow">LABORATÓRIO</span><h2>Avatar & rig</h2></div><button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button></div><p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p><input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/><button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button><h3>Inspeção do modelo</h3>{!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
+    {panel && <div className="scrim" onClick={() => setPanel(false)}><aside onClick={event => event.stopPropagation()}><div className="panel-head"><div><span className="eyebrow">LABORATÓRIO</span><h2>Avatar & rig</h2></div><button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button></div><p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p><input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/><button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button><label className="rig-label">Modelo local (public/)<input placeholder="/models/exemplo.vrm" value={modelPath} onChange={e => setModelPath(e.target.value)} /></label><div className="rig-actions"><button onClick={() => loadFromPath(modelPath)}>Carregar caminho</button></div><p>Arquivos grandes não cabem no upload; caminhos servidos por /public. Ex.: /models/shiro.vrm</p><h3>Inspeção do modelo</h3>{!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
       <dl>{Object.entries({Formato:report.format,Meshes:report.meshes,Bones:report.bones,Triângulos:report.triangles,Animações:report.animations.length,'Morph targets':report.morphs.length,Expressões:report.expressions.length}).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
       {report.live2d && <p>Live2D ativo: o modelo usa os parâmetros, a física e o idle criados pela riggadora. Arraste o cursor sobre ela para o olhar acompanhar.</p>}
       {report.format === 'FBX' && <p>{sourceName.toLowerCase() === 'felis.fbx' ? 'Felis: usando as texturas-base locais quando disponíveis. Os shaders e efeitos do Unity não são reproduzidos.' : 'FBX em teste: texturas externas e materiais do Unity podem não acompanhar este arquivo.'}</p>}
