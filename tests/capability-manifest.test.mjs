@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { buildCapabilityManifest, defaultMeshVisibility, resolveMeshVisibility } from '../src/capability-manifest.js';
+import { buildCapabilityManifest, defaultMeshVisibility, resolveMeshVisibility, summarizeCapabilities } from '../src/capability-manifest.js';
 import { inspectAnimation } from '../src/animation-utils.js';
 
 const rig = () => {
@@ -39,4 +39,8 @@ test('default: skinned visível, resto oculto; prefs por nome vencem', () => {
   assert.deepEqual(resolveMeshVisibility(manifest, { Hat: true }), [true, true]);
   assert.deepEqual(resolveMeshVisibility(manifest, { Body: false }), [false, false]);
   assert.deepEqual(resolveMeshVisibility(manifest, { Desconhecida: true }), [true, false]);
+});
+
+test('summarizeCapabilities filters expression names', () => {
+  assert.deepEqual(summarizeCapabilities({ expressions: ['happy', '', 42] }).expressions, ['happy']);
 });

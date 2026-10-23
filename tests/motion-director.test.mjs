@@ -9,6 +9,7 @@ const capabilities = {
     { name: 'DEF-MainAction', boneTracks: 5, excludedTracks: 3 },
   ],
   morphs: ['smile', 'blink'],
+  expressions: ['happy', 'sad'],
   meshes: [
     { name: 'Body', skinned: true },
     { name: 'Hat', skinned: false },
@@ -27,6 +28,7 @@ function makeController({ failGesture = false } = {}) {
     idle: () => (!failGesture && (calls.push(['idle']), true)),
     wave: () => (!failGesture && (calls.push(['wave']), true)),
     setMorph: (name, value) => { shown[name] = value; calls.push(['setMorph', name, value]); },
+    setExpression: (name, weight) => { calls.push(['setExpression', name, weight]); return true; },
     setMeshVisible: (name, visible) => { shown[name] = visible; calls.push(['setMeshVisible', name, visible]); },
     shown,
   };
@@ -123,4 +125,44 @@ test('limite de ações por turno e chamadas brutas aceitas', () => {
   assert.deepEqual(controller.calls.slice(0, 2), [['setMorph', 'smile', 1], ['setMorph', 'blink', 1]]);
   assert.equal(overflow, 1);
   assert.equal(results.length, 2);
+});
+
+test('set_expression applies catalog expressions with clamped weight', () => {
+  const controller = makeController();
+  let clock = 1000;
+  const director = createMotionDirector({ controller, capabilities, now: () => clock });
+  const first = director.execute([{ type: 'set_expression', name: 'happy' }]);
+  assert.deepEqual(controller.calls, [['setExpression', 'happy', 1]]);
+  assert.equal(first.results[0].applied, true);
+  clock += 4000;
+  const second = director.execute([{ type: 'set_expression', name: 'happy', weight: 2 }]);
+  assert.deepEqual(controller.calls[1], ['setExpression', 'happy', 1]);
+  assert.equal(second.results[0].applied, true);
+  clock += 4000;
+  const third = director.execute([{ type: 'set_expression', name: 'sad', weight: 'abc' }]);
+  assert.equal(third.results[0].applied, false);
+  assert.equal(third.results[0].reason, 'bad value');
+  clock += 4000;
+  const fourth = director.execute([{ type: 'set_expression', name: 'angry' }]);
+  assert.equal(fourth.results[0].applied, false);
+  assert.equal(fourth.results[0].reason, 'not in catalog');
+});
+
+test('set_expression is refused when the controller lacks setExpression', () => {
+  const director = createMotionDirector({ controller: { gesture: () => true }, capabilities, now });
+  const result = director.execute([{ type: 'set_expression', name: 'happy' }]).results[0];
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'model refused');
+});
+
+test('set_expression honors the default cooldown', () => {
+  const controller = makeController();
+  let clock = 1000;
+  const director = createMotionDirector({ controller, capabilities, now: () => clock });
+  const first = director.execute([{ type: 'set_expression', name: 'happy' }]);
+  assert.equal(first.results[0].applied, true);
+  clock = 1500;
+  const second = director.execute([{ type: 'set_expression', name: 'sad' }]);
+  assert.equal(second.results[0].applied, false);
+  assert.equal(second.results[0].reason, 'cooldown');
 });

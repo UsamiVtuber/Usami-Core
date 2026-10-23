@@ -5,8 +5,8 @@
 export const DEFAULT_MAX_ACTIONS = 5;
 
 const GESTURE_NAMES = ['tilt', 'wave', 'idle'];
-export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible'];
-export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, set_mesh_visible: 800 };
+export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
+export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, set_mesh_visible: 800, set_expression: 3000 };
 const MESH_COOLDOWN_PER_TARGET = 4000;
 
 const cooldownVerbs = new Set(Object.keys(DEFAULT_COOLDOWNS));
@@ -25,6 +25,7 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
   const clipNames = new Set(allClips.map(clip => clip?.name).filter(Boolean));
   const playableClips = new Set(allClips.filter(clip => clip?.boneTracks > 0 && !clip?.excludedTracks).map(clip => clip.name));
   const morphNames = new Set(manifest.morphs ?? []);
+  const expressionNames = new Set((manifest.expressions ?? []).filter(name => typeof name === 'string'));
   const meshNames = new Set((manifest.meshes ?? []).map(mesh => mesh?.name).filter(Boolean));
   const accessoryNames = new Set((manifest.meshes ?? []).filter(mesh => mesh && mesh.skinned === false).map(mesh => mesh.name));
   const idleAvailable = manifest.customIdle !== false;
@@ -67,7 +68,15 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
         controller.setMorph?.(name, value);
         applied = true;
       }
-    } else {
+    } else if (verb === 'set_expression') {
+      const name = typeof action?.name === 'string' ? action.name : '';
+      const rawWeight = action?.weight;
+      const weight = rawWeight === undefined ? 1 : clamp01(rawWeight);
+      if (!expressionNames.has(name)) reason = 'not in catalog';
+      else if (weight === null) reason = 'bad value';
+      else if (!controller || typeof controller.setExpression !== 'function') reason = 'model refused';
+      else { controller.setExpression(name, weight); applied = true; }
+    } else if (verb === 'set_mesh_visible') {
       const name = typeof action?.name === 'string' ? action.name : '';
       const nextVisible = action?.visible === false ? false : true;
       const lastAt = lastMesh.get(name) ?? -Infinity;
