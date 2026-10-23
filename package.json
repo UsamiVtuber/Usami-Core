@@ -8,7 +8,7 @@
     "api": "node server.mjs",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test:unit": "node --test tests/animation-utils.test.mjs tests/custom-motion.test.mjs tests/capability-manifest.test.mjs tests/mesh-preferences.test.mjs tests/motion-director.test.mjs",
+    "test:unit": "node --test tests/animation-utils.test.mjs tests/custom-motion.test.mjs tests/capability-manifest.test.mjs tests/mesh-preferences.test.mjs tests/motion-director.test.mjs tests/auto-motion.test.mjs",
     "test:chat": "node --test tests/chat-server.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "test": "npm run test:unit && npm run test:chat && npm run test:sites"
