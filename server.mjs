@@ -9,7 +9,7 @@ const DEFAULT_SYSTEM = 'Você é Usami, uma companion acolhedora, curiosa e natu
 
 const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 
-const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible'];
+const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
 
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
   if (!origin) return true;
@@ -44,6 +44,7 @@ export function sanitizeCapabilities(input) {
     clips: names(input.clips, 40),
     morphs: names(input.morphs, 60),
     meshes,
+    expressions: names(input.expressions, 20),
     gestures: names(input.gestures, 5, ['tilt', 'idle', 'wave']),
   };
 }
@@ -54,6 +55,7 @@ export function sanitizeActions(raw) {
     const base = { type: action.type, name: typeof action.name === 'string' ? action.name.slice(0, 60) : action.name };
     if (action.type === 'set_morph') base.value = action.value;
     if (action.type === 'set_mesh_visible') base.visible = action.visible;
+    if (action.type === 'set_expression') base.weight = action.weight;
     return base;
   });
 }
@@ -81,6 +83,36 @@ export function parseProviderRaw(raw) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
   return { ok: true, reply: result.reply.trim(), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions) };
+}
+
+export const CLASSIFIER_SYSTEM = 'Você é um classificador de reações de avatar. Dada uma frase e um catálogo de ações possíveis, responda SOMENTE JSON: {"actions":[{"type":"gesture","name":"tilt"|"wave"|"idle"},{"type":"set_expression","name":"<expression>","weight":0 a 1},{"type":"play_clip","name":"<clip>"},{"type":"set_morph","name":"<morph>","value":0 a 1}]} com no máximo 3 ações. Priorize coerência com a frase. Se nada fizer sentido, responda {"actions":[]}. Ações devem existir no catálogo.'.trim();
+
+export async function classifyReply({ fetchImpl = globalThis.fetch, key, model, reply, capabilities, timeoutMs = 20000 }) {
+  if (!key || typeof reply !== 'string' || !reply.trim() || !capabilities) return null;
+  // Gestures alone (e.g. Live2D avatars) do not justify a second model call.
+  if (!capabilities.expressions?.length && !capabilities.clips?.length && !capabilities.morphs?.length) return null;
+  const catalog = {};
+  if (capabilities.expressions?.length) catalog.expressions = capabilities.expressions;
+  if (capabilities.clips?.length) catalog.clips = capabilities.clips;
+  if (capabilities.morphs?.length) catalog.morphs = capabilities.morphs;
+  if (capabilities.gestures?.length) catalog.gestures = capabilities.gestures;
+  const response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, max_tokens: 200, temperature: 0, messages: [{ role: 'system', content: CLASSIFIER_SYSTEM }, { role: 'user', content: 'Frase: ' + reply.trim() + '\nCatálogo: ' + JSON.stringify(catalog) }] }),
+    signal: AbortSignal.timeout(timeoutMs),
+  }).catch(() => null);
+  if (!response || !response.ok) return null;
+  const data = await response.json().catch(() => null);
+  const raw = data?.choices?.[0]?.message?.content;
+  if (typeof raw !== 'string') return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.trim().replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, ''));
+  } catch {
+    return null;
+  }
+  return Array.isArray(parsed?.actions) ? sanitizeActions(parsed.actions) : null;
 }
 
 export function createChatHandler(options = {}) {
@@ -175,7 +207,17 @@ export function createChatHandler(options = {}) {
       return send(parsed.status, { error: parsed.error });
     }
 
-    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions: parsed.actions ?? [] });
+    let actions = parsed.actions ?? [];
+    try {
+      const classified = await classifyReply({ fetchImpl, key, model, reply: parsed.reply, capabilities });
+      if (classified) {
+        const seen = new Set(classified.map(action => action.type + ':' + action.name));
+        actions = sanitizeActions([...classified, ...actions.filter(action => !seen.has(action.type + ':' + action.name))]);
+      }
+    } catch {
+      // classifier failure keeps parsed.actions
+    }
+    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions });
   };
 }
 

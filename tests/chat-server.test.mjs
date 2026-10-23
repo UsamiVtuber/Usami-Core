@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createChatHandler, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
+import { classifyReply, createChatHandler, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -70,6 +70,7 @@ test('sanitizeActions elimina verbs desconhecidos e limita a 5', () => {
   assert.equal(sanitized[3].name.length, 60);
   assert.deepEqual(sanitizeActions('não array'), []);
   assert.deepEqual(sanitizeActions([null, undefined]), []);
+  assert.deepEqual(sanitizeActions([{ type: 'set_expression', name: 'happy', weight: 0.8 }]), [{ type: 'set_expression', name: 'happy', weight: 0.8 }]);
 });
 
 test('sanitizeCapabilities normaliza resumo do cliente', () => {
@@ -79,6 +80,7 @@ test('sanitizeCapabilities normaliza resumo do cliente', () => {
     morphs: ['smile', 7],
     meshes: [{ name: 'Body' }, { name: 'Hat', accessory: true }, { name: '' }, 9, 'not object'],
     gestures: ['tilt', 'idle', 'wave', 'coisa demais'],
+    expressions: ['happy', 42, 'long'.repeat(80), ''],
     aliens: ['x'],
   });
   assert.equal(sanitized.format.length, 40);
@@ -86,6 +88,7 @@ test('sanitizeCapabilities normaliza resumo do cliente', () => {
   assert.deepEqual(sanitized.morphs, ['smile']);
   assert.deepEqual(sanitized.meshes, [{ name: 'Body', accessory: false }, { name: 'Hat', accessory: true }]);
   assert.deepEqual(sanitized.gestures, ['tilt', 'idle', 'wave']);
+  assert.deepEqual(sanitized.expressions, ['happy', 'long'.repeat(15)]);
   assert.equal(sanitizeCapabilities(null), null);
   assert.equal(sanitizeCapabilities('x'), null);
   assert.deepEqual(sanitizeCapabilities({}).clips, []);
@@ -94,6 +97,29 @@ test('sanitizeCapabilities normaliza resumo do cliente', () => {
 test('systemFor embute capabilities no prompt', () => {
   assert.ok(systemFor(null).length > 0);
   assert.ok(systemFor({ clips: ['Dance'] }).includes('"Dance"'));
+});
+
+test('classifyReply gates the second model call and survives provider failures', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return jsonResponse('{"actions":[{"type":"set_expression","name":"happy","weight":0.7}]}');
+  };
+  const classified = await classifyReply({ fetchImpl, key: 'key', model: 'model', reply: 'que bom te ver hoje', capabilities: { expressions: ['happy'], gestures: ['tilt'] } });
+  assert.deepEqual(classified, [{ type: 'set_expression', name: 'happy', weight: 0.7 }]);
+  assert.equal(calls, 1);
+
+  let gestureCalls = 0;
+  const gestureFetch = async () => {
+    gestureCalls++;
+    return jsonResponse('{"actions":[]}');
+  };
+  const gestureOnly = await classifyReply({ fetchImpl: gestureFetch, key: 'key', model: 'model', reply: 'oi', capabilities: { gestures: ['tilt', 'wave'] } });
+  assert.equal(gestureOnly, null);
+  assert.equal(gestureCalls, 0);
+
+  const failed = await classifyReply({ fetchImpl: async () => { throw new Error('boom'); }, key: 'key', model: 'model', reply: 'oi', capabilities: { expressions: ['happy'] } });
+  assert.equal(failed, null);
 });
 
 test('handler: 404 para método/rota incorretos', async () => {
@@ -142,13 +168,33 @@ test('handler: 503 sem chave', async () => {
 });
 
 test('handler: 200 com resposta válida', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('{"reply":"olá","gesture":"tilt"}') });
+  let calls = 0;
+  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => { calls++; return jsonResponse('{"reply":"olá","gesture":"tilt"}'); } });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 200);
   const data = JSON.parse(res.body);
   assert.equal(data.reply, 'olá');
   assert.equal(data.gesture, 'tilt');
+  assert.deepEqual(data.actions, []);
+  assert.equal(calls, 1);
+});
+
+test('handler: 200 classifies the reply when capabilities include expressions', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return jsonResponse(calls === 1 ? '{"reply":"olá","gesture":"tilt","actions":[]}' : '{"actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
+  };
+  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
+  const res = mockRes();
+  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy'], gestures: ['tilt'] } }) }), res);
+  assert.equal(res.statusCode, 200);
+  const data = JSON.parse(res.body);
+  assert.equal(data.reply, 'olá');
+  assert.equal(data.gesture, 'tilt');
+  assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
+  assert.equal(calls, 2);
 });
 
 test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
