@@ -10,7 +10,13 @@ import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities }
 import { createMotionDirector } from './motion-director';
 import { createAutoMotion } from './auto-motion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
+import { createVrmIdleSway } from './vrm-idle-sway';
+import { planVisemes } from './visemes';
+import { curateExpressions } from './expressions-catalog';
 import './usami.css';
+
+// Viseme morph names exposed by the VRM avatar (capital I).
+const VISEME_NAMES = ['a', 'I', 'u', 'e', 'o'];
 
 function Live2DAvatar({ controller, onReport }) {
   const host = useRef(null);
@@ -50,7 +56,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -67,7 +73,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const light = new THREE.DirectionalLight(0xffebd8, 2);
     light.position.set(2, 4, 4);
     scene.add(light);
-    let mixer, vrm, customMotion, disposed = false, gesture = null;
+    let mixer, vrm, customMotion, disposed = false, gesture = null, sway = null, swayBase = null;
     const localTextures = [];
     const loader = sourceType === 'fbx' ? new FBXLoader() : new GLTFLoader();
     if (sourceType !== 'fbx') loader.register(parser => new VRMLoaderPlugin(parser));
@@ -116,6 +122,15 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         setArm('leftUpperArm', 1);
         setArm('rightUpperArm', -1);
         vrm.humanoid.update?.();
+      }
+      if (vrm?.humanoid) {
+        // Subtle idle sway (breath + lateral) driven through normalized nodes;
+        // raw-bone motions (customMotion, director bone()) live in the other tree.
+        sway = createVrmIdleSway();
+        swayBase = ['spine', 'chest', 'neck'].map(part => {
+          const node = vrm.humanoid.getNormalizedBoneNode?.(part);
+          return node ? { part, node, x: node.rotation.x, z: node.rotation.z } : null;
+        }).filter(Boolean);
       }
       let meshes = 0, bones = 0, triangles = 0;
       const morphs = new Set();
@@ -194,6 +209,24 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         if (state.idleActive) controller.current?.idle?.();
         else controller.current?.stop?.();
       }
+      if (sway && swayBase?.length) {
+        const pose = sway.update();
+        for (const base of swayBase) {
+          if (base.part === 'chest') base.node.rotation.x = base.x + (pose.breath - .5) * .05;
+          else if (base.part === 'spine') base.node.rotation.z = base.z + pose.swayX * .04;
+          else if (base.part === 'neck') base.node.rotation.z = base.z + pose.swayZ * .03;
+        }
+      }
+      if (lips?.current?.items?.length) {
+        const elapsed = performance.now() - (lipsAnchor?.current || 0);
+        let active = null;
+        for (const item of lips.current.items) { if (elapsed >= item.at && elapsed < item.at + item.hold) { active = item; break; } }
+        for (const name of VISEME_NAMES) {
+          const value = active?.name === name ? 1 : 0;
+          morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; });
+        }
+        if (elapsed > (lips.current.totalMs || 0) + 200) lips.current = null;
+      }
       mixer?.update(delta); vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera);
     };
     draw();
@@ -260,6 +293,8 @@ export function Usami() {
   const blinkMode = useRef(null);
   const blinkName = useRef(null);
   const lastIdleActive = useRef(false);
+  const lips = useRef(null);
+  const lipsAnchor = useRef(0);
   const poke = () => auto.current?.notifyActivity();
   const reportModel = useCallback(value => {
     setReport(value);
@@ -309,6 +344,8 @@ export function Usami() {
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
+      lips.current = planVisemes(data.reply);
+      lipsAnchor.current = performance.now();
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
       setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
@@ -335,7 +372,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} />}
     <header><span className="brand">USAMI <small>companion</small></span><span className="status"><i />{busy ? 'pensando' : quiet ? 'modo tranquilo' : 'em repouso'}</span><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></header>
     <div className="welcome"><span>UM MOMENTO COM</span><h1>Usami</h1><p>Um lugar tranquilo para estar, conversar e descobrir.</p></div>
     <div className="controls">
@@ -358,6 +395,7 @@ export function Usami() {
       <h3>Meshes</h3>{meshList.length ? <>{meshList.map(mesh => <label className="rig-label" key={mesh.name}>{mesh.name} {mesh.skinned ? '(rig)' : '(sem rig)'}<input type="checkbox" checked={isMeshVisible(mesh)} onChange={() => toggleMesh(mesh)} /></label>)}<div className="rig-actions"><button onClick={resetMeshes}>Restaurar visibilidade padrão</button></div><p>Modelos sem esqueleto começam ocultos; desmarque para esconder acessórios ou mostre o que quiser.</p></> : <p>Nenhuma mesh presente.</p>}
       <h3>Animações</h3>{report.animations.length ? <><label className="rig-label">Clip<select value={selectedClip} onChange={e => setSelectedClip(e.target.value)}>{report.animations.map((clip,i) => <option key={i} value={i}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label><p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p><div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => { controller.current?.play(Number(selectedClip)); poke(); }}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div></> : <p>Este modelo não contém clips.</p>}
       <h3>Ossos</h3><p>Rotação local limitada; iniciar uma animação pode sobrescrever o ajuste.</p><label className="rig-label">Osso<select value={boneIndex} onChange={e => {setBoneIndex(Number(e.target.value));setAngle(0);}}>{report.boneNames.map(b => <option key={b.index} value={b.index}>{b.name} [{b.index}]</option>)}</select></label><label className="rig-label">Eixo<select value={axis} onChange={e => {setAxis(e.target.value);setAngle(0);}}><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label><label className="rig-label">Rotação: {angle}°<input type="range" min="-45" max="45" value={angle} onChange={e => {const value=Number(e.target.value);setAngle(value);controller.current?.bone(boneIndex,axis,value);}} /></label>
+      <h3>Expressões</h3>{(() => { const curated = curateExpressions(report.expressions || []).curated; return curated.length ? <div className="rig-actions">{curated.map(item => <button key={item.name} onClick={() => { controller.current?.setExpression?.(item.name, 1); setTimeout(() => controller.current?.setExpression?.(item.name, 0), 3000); poke(); }}>{item.name}</button>)}</div> : <p>Nenhuma expressão no modelo.</p>; })()}
       <h3>Morph targets</h3>{report.morphs.length ? report.morphs.map(name => <label className="rig-label" key={name}>{name}: {Math.round((morphValues[name] || 0)*100)}%<input type="range" min="0" max="1" step=".01" value={morphValues[name] || 0} onChange={e => {const value=Number(e.target.value);setMorphValues(old => ({...old,[name]:value}));controller.current?.morph(name,value);}} /></label>) : <p>Nenhum morph target encontrado.</p>}
       <button className="upload" onClick={() => {controller.current?.reset();setAngle(0);setMorphValues({});}}>Restaurar pose inicial</button></>}
     </>}<p className="disclaimer">Teste inicial de texto com OpenRouter. Voz ainda não está integrada. O teste de clips reproduz apenas canais identificados nos ossos.</p></aside></div>}
