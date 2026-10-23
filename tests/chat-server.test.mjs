@@ -237,6 +237,30 @@ test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
   assert.equal(calls, 2);
 });
 
+test('handler: classifier catalog carries only curated expressions', async () => {
+  let calls = 0;
+  let classifierBody = null;
+  const fetchImpl = async (_url, options) => {
+    calls++;
+    if (calls === 1) return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[]}');
+    classifierBody = JSON.parse(options.body);
+    return jsonResponse('{"actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
+  };
+  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
+  const res = mockRes();
+  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy', '---------', 'x'.repeat(50), 'sad'], gestures: ['tilt'] } }) }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls, 2);
+  const catalogMessage = classifierBody.messages[1].content;
+  // sanitizeCapabilities não filtra lixo (tudo passa com <= 60 chars); o curador sim.
+  assert.ok(!catalogMessage.includes('---------'), 'catálogo não deve conter nome de símbolos');
+  assert.ok(!catalogMessage.includes('x'.repeat(50)), 'catálogo não deve conter nome acima do limite do curador');
+  assert.ok(catalogMessage.includes('happy'));
+  assert.ok(catalogMessage.includes('sad'));
+  const data = JSON.parse(res.body);
+  assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
+});
+
 test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
   const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
   const res = mockRes();

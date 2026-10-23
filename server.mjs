@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { curateExpressions } from './src/expressions-catalog.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -106,7 +107,8 @@ export async function classifyReply({ fetchImpl = globalThis.fetch, key, model, 
   // Gestures alone (e.g. Live2D avatars) do not justify a second model call.
   if (!capabilities.expressions?.length && !capabilities.clips?.length && !capabilities.morphs?.length) return null;
   const catalog = {};
-  if (capabilities.expressions?.length) catalog.expressions = capabilities.expressions;
+  const curatedExpressions = capabilities.expressions?.length ? curateExpressions(capabilities.expressions).curated.map(item => item.name) : [];
+  if (curatedExpressions.length) catalog.expressions = curatedExpressions;
   if (capabilities.clips?.length) catalog.clips = capabilities.clips;
   if (capabilities.morphs?.length) catalog.morphs = capabilities.morphs;
   if (capabilities.gestures?.length) catalog.gestures = capabilities.gestures;
