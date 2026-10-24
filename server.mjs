@@ -2,7 +2,6 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { curateExpressions } from './src/expressions-catalog.js';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
@@ -117,37 +116,6 @@ export function parseProviderRaw(raw) {
   return { ok: true, reply: result.reply.trim(), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions) };
 }
 
-export const CLASSIFIER_SYSTEM = 'Você é um classificador de reações de avatar. Dada uma frase e um catálogo de ações possíveis, responda SOMENTE JSON: {"actions":[{"type":"gesture","name":"tilt"|"wave"|"idle"},{"type":"set_expression","name":"<expression>","weight":0 a 1},{"type":"play_clip","name":"<clip>"},{"type":"set_morph","name":"<morph>","value":0 a 1}]} com no máximo 3 ações. Priorize coerência com a frase. Se nada fizer sentido, responda {"actions":[]}. Ações devem existir no catálogo.'.trim();
-
-export async function classifyReply({ fetchImpl = globalThis.fetch, key, model, reply, capabilities, timeoutMs = 20000 }) {
-  if (!key || typeof reply !== 'string' || !reply.trim() || !capabilities) return null;
-  // Gestures alone (e.g. Live2D avatars) do not justify a second model call.
-  if (!capabilities.expressions?.length && !capabilities.clips?.length && !capabilities.morphs?.length) return null;
-  const catalog = {};
-  const curatedExpressions = capabilities.expressions?.length ? curateExpressions(capabilities.expressions).curated.map(item => item.name) : [];
-  if (curatedExpressions.length) catalog.expressions = curatedExpressions;
-  if (capabilities.clips?.length) catalog.clips = capabilities.clips;
-  if (capabilities.morphs?.length) catalog.morphs = capabilities.morphs;
-  if (capabilities.gestures?.length) catalog.gestures = capabilities.gestures;
-  const response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, max_tokens: 200, temperature: 0, messages: [{ role: 'system', content: CLASSIFIER_SYSTEM }, { role: 'user', content: 'Frase: ' + reply.trim() + '\nCatálogo: ' + JSON.stringify(catalog) }] }),
-    signal: AbortSignal.timeout(timeoutMs),
-  }).catch(() => null);
-  if (!response || !response.ok) return null;
-  const data = await response.json().catch(() => null);
-  const raw = data?.choices?.[0]?.message?.content;
-  if (typeof raw !== 'string') return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw.trim().replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, ''));
-  } catch {
-    return null;
-  }
-  return Array.isArray(parsed?.actions) ? sanitizeActions(parsed.actions) : null;
-}
-
 export function createChatHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
@@ -240,17 +208,7 @@ export function createChatHandler(options = {}) {
       return send(parsed.status, { error: parsed.error });
     }
 
-    let actions = parsed.actions ?? [];
-    try {
-      const classified = await classifyReply({ fetchImpl, key, model, reply: parsed.reply, capabilities });
-      if (classified) {
-        const seen = new Set(classified.map(action => action.type + ':' + action.name));
-        actions = sanitizeActions([...classified, ...actions.filter(action => !seen.has(action.type + ':' + action.name))]);
-      }
-    } catch {
-      // classifier failure keeps parsed.actions
-    }
-    actions = filterActionsByCatalog(actions, capabilities);
+    const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
     return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions });
   };
 }

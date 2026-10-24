@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyReply, createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
+import { createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -123,29 +123,6 @@ test('systemFor embute capabilities no prompt', () => {
   assert.ok(systemFor({ clips: ['Dance'] }).includes('"Dance"'));
 });
 
-test('classifyReply gates the second model call and survives provider failures', async () => {
-  let calls = 0;
-  const fetchImpl = async () => {
-    calls++;
-    return jsonResponse('{"actions":[{"type":"set_expression","name":"happy","weight":0.7}]}');
-  };
-  const classified = await classifyReply({ fetchImpl, key: 'key', model: 'model', reply: 'que bom te ver hoje', capabilities: { expressions: ['happy'], gestures: ['tilt'] } });
-  assert.deepEqual(classified, [{ type: 'set_expression', name: 'happy', weight: 0.7 }]);
-  assert.equal(calls, 1);
-
-  let gestureCalls = 0;
-  const gestureFetch = async () => {
-    gestureCalls++;
-    return jsonResponse('{"actions":[]}');
-  };
-  const gestureOnly = await classifyReply({ fetchImpl: gestureFetch, key: 'key', model: 'model', reply: 'oi', capabilities: { gestures: ['tilt', 'wave'] } });
-  assert.equal(gestureOnly, null);
-  assert.equal(gestureCalls, 0);
-
-  const failed = await classifyReply({ fetchImpl: async () => { throw new Error('boom'); }, key: 'key', model: 'model', reply: 'oi', capabilities: { expressions: ['happy'] } });
-  assert.equal(failed, null);
-});
-
 test('handler: 404 para método/rota incorretos', async () => {
   const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
   const res = mockRes();
@@ -204,11 +181,11 @@ test('handler: 200 com resposta válida', async () => {
   assert.equal(calls, 1);
 });
 
-test('handler: 200 classifies the reply when capabilities include expressions', async () => {
+test('handler: 200 applies the actions returned by the LLM in a single call', async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    return jsonResponse(calls === 1 ? '{"reply":"olá","gesture":"tilt","actions":[]}' : '{"actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
+    return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
   };
   const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
   const res = mockRes();
@@ -218,14 +195,14 @@ test('handler: 200 classifies the reply when capabilities include expressions', 
   assert.equal(data.reply, 'olá');
   assert.equal(data.gesture, 'tilt');
   assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
 });
 
 test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    return jsonResponse(calls === 1 ? '{"reply":"olá","gesture":"tilt","actions":[]}' : '{"actions":[{"type":"gesture","name":"tilt"},{"type":"set_expression","name":"happy","weight":0.5}]}');
+    return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[{"type":"gesture","name":"tilt"},{"type":"set_expression","name":"happy","weight":0.5}]}');
   };
   const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
   const res = mockRes();
@@ -234,31 +211,7 @@ test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
   const data = JSON.parse(res.body);
   assert.equal(data.reply, 'olá');
   assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
-  assert.equal(calls, 2);
-});
-
-test('handler: classifier catalog carries only curated expressions', async () => {
-  let calls = 0;
-  let classifierBody = null;
-  const fetchImpl = async (_url, options) => {
-    calls++;
-    if (calls === 1) return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[]}');
-    classifierBody = JSON.parse(options.body);
-    return jsonResponse('{"actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
-  };
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
-  const res = mockRes();
-  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy', '---------', 'x'.repeat(50), 'sad'], gestures: ['tilt'] } }) }), res);
-  assert.equal(res.statusCode, 200);
-  assert.equal(calls, 2);
-  const catalogMessage = classifierBody.messages[1].content;
-  // sanitizeCapabilities não filtra lixo (tudo passa com <= 60 chars); o curador sim.
-  assert.ok(!catalogMessage.includes('---------'), 'catálogo não deve conter nome de símbolos');
-  assert.ok(!catalogMessage.includes('x'.repeat(50)), 'catálogo não deve conter nome acima do limite do curador');
-  assert.ok(catalogMessage.includes('happy'));
-  assert.ok(catalogMessage.includes('sad'));
-  const data = JSON.parse(res.body);
-  assert.deepEqual(data.actions, [{ type: 'set_expression', name: 'happy', weight: 0.5 }]);
+  assert.equal(calls, 1);
 });
 
 test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
