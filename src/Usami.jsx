@@ -15,7 +15,7 @@ import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
-import { planVisemes } from './visemes';
+import { createAudioLipSync } from './audio-lipsync';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import './usami.css';
 
@@ -81,7 +81,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate, emotionEngine, vrmGestures }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -221,6 +221,11 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       // Etapa 3: o engine de emoções só existe para VRMs com expressionManager
       // (Live2D/GLB ficam sem — o chat cai no fallback das actions do LLM).
       if (vrm?.expressionManager) emotionEngine.current = createEmotionEngine({ driver: expressionDriver });
+      // Etapa 5: lip-sync dirigido pelo áudio real. O layer nasce sem elemento —
+      // speakReply faz o attach do HTMLAudioElement reutilizado e o grafo Web Audio
+      // (AudioContext + AnalyserNode) só é criado de forma preguiçosa, no primeiro
+      // update com áudio pronto. Sem Web Audio o layer se desativa sozinho.
+      audioLipSync.current = createAudioLipSync({ morphTargets: morphList.filter(m => VISEME_NAMES.includes(m.name)) });
       controller.current = {
         gesture(name) {
           // Etapa 4: layer do humanoid (VRM) primeiro — wave/tilt/idle em nós
@@ -253,7 +258,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         },
         setMeshVisible(name, visible) { avatar.traverse(object => { if (object.isMesh && object.name === name) object.visible = Boolean(visible); }); },
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
-        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); }
+        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); audioLipSync.current?.clear(); }
       };
       onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable || Boolean(vrmGestures.current?.available.idle), customWave: customMotion.waveAvailable || Boolean(vrmGestures.current?.available.wave), customTilt: boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
@@ -295,16 +300,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       vrmGestures.current?.update();
       // Ease the gaze toward the pointer target (frame-rate independent smoothing).
       if (lookTarget) lookTarget.position.lerp(lookDesired, 1 - Math.exp(-delta * 8));
-      if (lips?.current?.items?.length) {
-        const elapsed = (performance.now() - (lipsAnchor?.current || 0)) * (lipsRate?.current || 1);
-        let active = null;
-        for (const item of lips.current.items) { if (elapsed >= item.at && elapsed < item.at + item.hold) { active = item; break; } }
-        for (const name of VISEME_NAMES) {
-          const value = active?.name === name ? 1 : 0;
-          morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; });
-        }
-        if (elapsed > (lips.current.totalMs || 0) + 200) lips.current = null;
-      }
+      // Etapa 5: a boca segue o áudio real — RMS contínuo do AnalyserNode com a
+      // rampa 30/80 ms, sem timeline textual. Fallback gracioso embutido no layer.
+      audioLipSync.current?.update();
       mixer?.update(delta); vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera);
     };
     draw();
@@ -313,6 +311,13 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       controller.current = null;
       emotionEngine.current = null;
       if (vrmGestures) vrmGestures.current = null;
+      // Fecha o AudioContext e descarta o layer. O HTMLAudioElement do TTS foi
+      // consumido pelo MediaElementSource deste contexto (um elemento só pode
+      // ser roteado uma vez na vida), então a referência cai também — a próxima
+      // fala cria um elemento novo em speakReply e o áudio continua audível.
+      audioLipSync.current?.reset();
+      audioLipSync.current = null;
+      if (ttsAudio?.current) { try { ttsAudio.current.pause(); } catch {} ttsAudio.current = null; }
       cancelAnimationFrame(frame);
       observer.disconnect();
       canvas.removeEventListener('pointermove', onPointerMove);
@@ -397,9 +402,7 @@ export function Usami() {
   const blinkMode = useRef(null);
   const blinkName = useRef(null);
   const lastIdleActive = useRef(false);
-  const lips = useRef(null);
-  const lipsAnchor = useRef(0);
-  const lipsRate = useRef(1);
+  const audioLipSync = useRef(null);
   const ttsAudio = useRef(null);
   const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
@@ -486,14 +489,9 @@ export function Usami() {
     }
   };
   const speakReply = async (reply, styleId = 'neutral') => {
-    // Mute: never request /api/tts — go straight to the silent lip-sync mimic,
-    // the same fallback the catch block below performs when audio is missing.
-    if (voiceOffRef.current) {
-      lips.current = planVisemes(reply);
-      lipsRate.current = quiet ? .8 : 1;
-      lipsAnchor.current = performance.now();
-      return;
-    }
+    // Mute: nunca pede /api/tts — a boca fica fechada (fallback mudo), o mesmo
+    // comportamento do catch abaixo quando o áudio não chega.
+    if (voiceOffRef.current) return;
     try {
       const response = await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply, styleId }) });
       const type = response.headers.get('content-type') || '';
@@ -503,17 +501,16 @@ export function Usami() {
       const audio = ttsAudio.current;
       audio.src = url;
       audio.playbackRate = quiet ? .8 : 1;
-      lips.current = planVisemes(reply);
-      lipsRate.current = 1;
-      lipsAnchor.current = performance.now();
-      audio.onloadedmetadata = () => { if (lips.current?.totalMs > 0 && audio.duration > 0) lipsRate.current = Math.min(3, Math.max(.5, audio.duration * 1000 / lips.current.totalMs)) * (quiet ? .8 : 1); };
-      audio.onplay = () => { lipsAnchor.current = performance.now(); };
       audio.onended = () => { URL.revokeObjectURL(url); };
       await audio.play();
+      // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
+      // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
+      // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
+      // áudio pronto. Sem duração do servidor, sem timeline textual.
+      audioLipSync.current?.attach(audio);
     } catch {
-      lips.current = planVisemes(reply);
-      lipsRate.current = quiet ? .8 : 1;
-      lipsAnchor.current = performance.now();
+      // Fallback mudo (áudio indisponível): a boca apenas fica fechada.
+      audioLipSync.current?.clear();
     }
   };
   const awardXP = gains => {
@@ -622,10 +619,9 @@ export function Usami() {
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
       if (spoken) {
+        // Call mode: speechSynthesis não passa pelo Web Audio (não existe
+        // HTMLAudioElement) — mantém o fallback mudo decidido na etapa 5.
         speakSpoken(data.reply);
-        lips.current = planVisemes(data.reply);
-        lipsRate.current = quiet ? .8 : .98;
-        lipsAnchor.current = performance.now();
       } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions));
       addTurn('assistant', data.reply, spoken ? 'voice' : 'text');
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
@@ -657,7 +653,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} emotionEngine={emotionEngine} vrmGestures={vrmGestures} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} />}
     <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
