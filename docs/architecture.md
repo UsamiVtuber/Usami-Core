@@ -49,9 +49,29 @@ cobertos por testes, mas continuam experimentais até terem a mesma paridade
 operacional do handler ativo. Não trocar a rota de produção por ele apenas
 porque os testes unitários passam.
 
-## Próxima integração no Nyarch
+## Integração Nyarch via SSH
 
-O n8n roda remotamente no Nyarch via Docker/SSH. A primeira integração deve
-escrever somente em uma área explícita de automações do vault Obsidian, por
-exemplo `Inbox/Automations/`; ele não deve receber acesso irrestrito ao vault
-nem a credenciais do runtime da Usami.
+O projeto opera em ambiente híbrido Windows + Nyarch Linux, com comunicação via
+SSH tunnel. O n8n roda remotamente no Nyarch via Docker/SSH.
+
+### Túnel SSH
+
+Para acessar o n8n (porta 5678) do Windows:
+
+```bash
+ssh -N -L 5678:127.0.0.1:5678 luke@10.42.0.1
+```
+
+- `-N`: apenas encaminha portas, sem executar comando remoto
+- `-L 5678:127.0.0.1:5678`: túnel local → porta 5678 no Nyarch
+- `luke@10.42.0.1`: usuário e IP do Nyarch Linux
+
+Após estabelecer o túnel, o n8n fica acessível em `http://localhost:5678`.
+
+### Workflow Obsidian
+
+O workflow **"Usami - Obsidian Inbox"** (`/workflow/NnWm0PoOh4IBjtQS`) recebe
+eventos da Usami e salva notas no vault Obsidian. A integração deve escrever
+somente em uma área explícita de automações, por exemplo `Inbox/Automations/`;
+ele não deve receber acesso irrestrito ao vault nem a credenciais do runtime da
+Usami.
