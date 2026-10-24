@@ -59,6 +59,46 @@ async function speak(handler) {
   return res;
 }
 
+test('handler: gemini voz desenhada (prefixo voice_) envia voiceConfig.voice e devolve WAV RIFF', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return geminiAudioResponse();
+  };
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'voice_cewhmedkmma9' }),
+  });
+  const res = await speak(handler);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['Content-Type'], 'audio/wav');
+  assert.equal(res.body.subarray(0, 4).toString('ascii'), 'RIFF');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-3\.8-flash-tts:generateContent$/);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, 'voice_cewhmedkmma9');
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig, undefined);
+});
+
+test('handler: gemini voz pré-pronta mantém prebuiltVoiceConfig (regressão)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return geminiAudioResponse();
+  };
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiVoice: 'Kore' }),
+  });
+  const res = await speak(handler);
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, GEMINI_URL_RE);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, undefined);
+});
+
 test('handler: 200 devolve áudio e envia text/model_id com xi-api-key', async () => {
   const calls = [];
   const fetchImpl = async (url, options) => {

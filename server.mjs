@@ -326,6 +326,8 @@ export function createTtsHandler(options = {}) {
   const geminiUrl = (options.geminiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const timeoutMs = options.timeoutMs || 30000;
   const cache = options.cache ? (options.cacheStore || createFileTtsCache({ directory: options.cacheDir || process.env.USAMI_TTS_CACHE_DIR || 'data/tts-cache' })) : null;
+  // vozes desenhadas (Voice Design/Replication) no gemini usam ids com prefixo voice_
+  const CUSTOM_VOICE_PREFIX = 'voice_';
 
   return async function handleTts(req, res) {
     const send = (status, data) => {
@@ -422,7 +424,12 @@ export function createTtsHandler(options = {}) {
             contents: [{ parts: [{ text: instruction + parsedBody.text }] }],
             generationConfig: {
               responseModalities: ['AUDIO'],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: geminiVoice } } },
+              // voz desenhada (voice_*) vai em voiceConfig.voice; pré-pronta permanece em prebuiltVoiceConfig
+              speechConfig: {
+                voiceConfig: geminiVoice.startsWith(CUSTOM_VOICE_PREFIX)
+                  ? { voice: geminiVoice }
+                  : { prebuiltVoiceConfig: { voiceName: geminiVoice } },
+              },
             },
           }),
           signal: AbortSignal.timeout(timeoutMs),
