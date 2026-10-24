@@ -3,12 +3,13 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Send, Settings, Moon, X, Upload, Volume2, Info } from 'lucide-react';
+import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, Info } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
 import { createMotionDirector } from './motion-director';
 import { createAutoMotion } from './auto-motion';
+import { createExpressionDriver } from './expression-driver';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
 import { planVisemes } from './visemes';
@@ -17,6 +18,27 @@ import './usami.css';
 
 // Viseme morph names exposed by the VRM avatar (capital I).
 const VISEME_NAMES = ['a', 'I', 'u', 'e', 'o'];
+
+// Intimacy meters (visual-novel style bond): XP per interaction, cumulative level thresholds, localStorage persistence.
+const INTIMACY_KEY = 'usami.intimidade.v1';
+const METER_KEYS = ['carinho', 'humor', 'companhia'];
+const LEVELS = [0, 25, 60, 110, 180];
+const LAUGHTER_PATTERN = /kkk|haha|rsrs|😂|🤣|risada/i;
+const levelFor = xp => LEVELS.reduce((level, threshold, index) => xp >= threshold ? index + 1 : level, 1);
+const meterProgress = xp => {
+  const level = levelFor(xp);
+  if (level >= LEVELS.length) return 1;
+  const base = LEVELS[level - 1];
+  return Math.min(1, Math.max(0, (xp - base) / (LEVELS[level] - base)));
+};
+const loadIntimacy = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(INTIMACY_KEY) || 'null') || {};
+    const clamp = value => Math.min(999, Math.max(0, Math.floor(Number(value) || 0)));
+    return { carinho: clamp(saved.carinho), humor: clamp(saved.humor), companhia: clamp(saved.companhia) };
+  } catch { return { carinho: 0, humor: 0, companhia: 0 }; }
+};
+const formatCallTime = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 
 function Live2DAvatar({ controller, onReport }) {
   const host = useRef(null);
@@ -56,7 +78,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -73,7 +95,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const light = new THREE.DirectionalLight(0xffebd8, 2);
     light.position.set(2, 4, 4);
     scene.add(light);
-    let mixer, vrm, customMotion, disposed = false, gesture = null, sway = null, swayBase = null;
+    let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null;
     const localTextures = [];
     const loader = sourceType === 'fbx' ? new FBXLoader() : new GLTFLoader();
     if (sourceType !== 'fbx') loader.register(parser => new VRMLoaderPlugin(parser));
@@ -155,6 +177,12 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       manifest.meshes.forEach((mesh, index) => { const meshObject = findMesh(avatar, mesh, manifest.meshes); if (meshObject) meshObject.visible = visibility[index]; });
       const initialRotations = boneList.map(bone => bone.quaternion.clone());
       customMotion = createCustomMotion(boneList);
+      // O driver é o dono único dos pesos de expressão: rampa + TTL evitam que
+      // as expressões aplicadas pelo chat/painel fiquem "vazadas" no VRM.
+      expressionDriver = createExpressionDriver({
+        setRaw: (name, weight) => vrm?.expressionManager?.setValue(name, weight),
+        blinkName: detectedBlink,
+      });
       controller.current = {
         gesture(name) {
           if (name !== 'tilt') return false;
@@ -171,7 +199,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         wave() { gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
         setMorph(name, value) { this.morph(name, value); },
-        setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; vrm.expressionManager.setValue(name, weight); return true; },
+        setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; return expressionDriver?.set(name, weight, { ttlMs: 4000 }) ?? false; },
         morph(name, value) { morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; }); },
         bone(index, axis, value) {
           const bone = boneList[index]; if (!bone) return;
@@ -182,7 +210,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         },
         setMeshVisible(name, visible) { avatar.traverse(object => { if (object.isMesh && object.name === name) object.visible = Boolean(visible); }); },
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
-        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); }
+        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); }
       };
       onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, customTilt: boneList.some(bone => bone.name === 'DEF-spine006'), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
@@ -204,6 +232,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, state.blink);
         else morphList.filter(item => item.name === blinkName.current).forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink; });
       }
+      expressionDriver?.update();
       if (state && state.idleActive !== lastIdleActive?.current) {
         lastIdleActive.current = state.idleActive;
         if (state.idleActive) controller.current?.idle?.();
@@ -218,7 +247,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         }
       }
       if (lips?.current?.items?.length) {
-        const elapsed = performance.now() - (lipsAnchor?.current || 0);
+        const elapsed = (performance.now() - (lipsAnchor?.current || 0)) * (lipsRate?.current || 1);
         let active = null;
         for (const item of lips.current.items) { if (elapsed >= item.at && elapsed < item.at + item.hold) { active = item; break; } }
         for (const name of VISEME_NAMES) {
@@ -268,6 +297,20 @@ function detectBlinkName(expressions, morphs) {
   return null;
 }
 
+function BondMeters({ intimacy, values }) {
+  return <div className="bond-meters">
+    {METER_KEYS.map(key => {
+      const xp = Math.min(999, Math.max(0, intimacy[key] || 0));
+      const level = levelFor(xp);
+      return <div className="bond-meter" key={key}>
+        <span className="bond-head"><span>{key}</span><span className="bond-hearts" aria-hidden="true"><b>{'♥'.repeat(level)}</b>{'♡'.repeat(LEVELS.length - level)}</span></span>
+        <span className="bond-track"><i style={{ width: `${Math.round(meterProgress(xp) * 100)}%` }} /></span>
+        {values ? <span className="bond-value">{xp} XP · nível {level}</span> : null}
+      </div>;
+    })}
+  </div>;
+}
+
 export function Usami() {
   const [source, setSource] = useState('/live2d/Resources/youling/youling.model3.json');
   const [sourceType, setSourceType] = useState('live2d');
@@ -286,6 +329,10 @@ export function Usami() {
   const [morphValues, setMorphValues] = useState({});
   const [selectedClip, setSelectedClip] = useState('0');
   const [busy, setBusy] = useState(false);
+  const [call, setCall] = useState(false);
+  const [callSeconds, setCallSeconds] = useState(0);
+  const [intimacy, setIntimacy] = useState(loadIntimacy);
+  const [bondOpen, setBondOpen] = useState(false);
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
@@ -295,6 +342,17 @@ export function Usami() {
   const lastIdleActive = useRef(false);
   const lips = useRef(null);
   const lipsAnchor = useRef(0);
+  const lipsRate = useRef(1);
+  const ttsAudio = useRef(null);
+  const recognitionRef = useRef(null);
+  const callActiveRef = useRef(false);
+  const callStartRef = useRef(0);
+  const ptVoiceRef = useRef(null);
+  const speakingRef = useRef(false);
+  const busyRef = useRef(false);
+  const submitRef = useRef(null);
+  const recognitionSupported = typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
+  const synthesisSupported = typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function';
   const poke = () => auto.current?.notifyActivity();
   const reportModel = useCallback(value => {
     setReport(value);
@@ -307,6 +365,21 @@ export function Usami() {
     lastIdleActive.current = false;
   }, []);
   useEffect(() => () => { if (source.startsWith('blob:')) URL.revokeObjectURL(source); }, [source]);
+  useEffect(() => {
+    if (!synthesisSupported) return undefined;
+    const pickVoice = () => {
+      const voices = window.speechSynthesis.getVoices() || [];
+      ptVoiceRef.current = voices.find(voice => /^pt[-_]br/i.test(voice.lang || '')) || voices.find(voice => /^pt/i.test(voice.lang || '')) || null;
+    };
+    pickVoice();
+    window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', pickVoice);
+  }, [synthesisSupported]);
+  useEffect(() => {
+    if (!call) return undefined;
+    const timer = setInterval(() => setCallSeconds(seconds => seconds + 1), 1000);
+    return () => clearInterval(timer);
+  }, [call]);
   const loadFile = event => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -328,14 +401,125 @@ export function Usami() {
     setSourceName(target.split('/').pop());
     setSource(target);
   };
-  const sendMessage = async event => {
-    event.preventDefault();
-    if (busy || !text.trim()) return;
+  const styleIdForActions = actions => {
+    const expression = actions?.find(action => action?.type === 'set_expression')?.name?.toLowerCase?.() || '';
+    if (/happy|joy|smile|fun|glad|laugh/.test(expression)) return 'happy';
+    if (/sad|cry|sorrow|tear/.test(expression)) return 'sad';
+    if (/angry|mad|rage|annoy/.test(expression)) return 'angry';
+    if (/surprise|shock|wow|amaze/.test(expression)) return 'surprised';
+    if (/relax|calm|sleepy|tired|content/.test(expression)) return 'relaxed';
+    return 'neutral';
+  };
+  const speakReply = async (reply, styleId = 'neutral') => {
+    try {
+      const response = await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply, styleId }) });
+      const type = response.headers.get('content-type') || '';
+      if (!response.ok || !type.includes('audio/')) throw new Error('tts-status-' + response.status);
+      const url = URL.createObjectURL(await response.blob());
+      if (!ttsAudio.current) ttsAudio.current = new Audio();
+      const audio = ttsAudio.current;
+      audio.src = url;
+      audio.playbackRate = quiet ? .8 : 1;
+      lips.current = planVisemes(reply);
+      lipsRate.current = 1;
+      lipsAnchor.current = performance.now();
+      audio.onloadedmetadata = () => { if (lips.current?.totalMs > 0 && audio.duration > 0) lipsRate.current = Math.min(3, Math.max(.5, audio.duration * 1000 / lips.current.totalMs)) * (quiet ? .8 : 1); };
+      audio.onplay = () => { lipsAnchor.current = performance.now(); };
+      audio.onended = () => { URL.revokeObjectURL(url); };
+      await audio.play();
+    } catch {
+      lips.current = planVisemes(reply);
+      lipsRate.current = quiet ? .8 : 1;
+      lipsAnchor.current = performance.now();
+    }
+  };
+  const awardXP = gains => {
+    setIntimacy(previous => {
+      const next = {};
+      let changed = false;
+      METER_KEYS.forEach(key => {
+        next[key] = Math.min(999, Math.max(0, Math.floor((previous[key] || 0) + (gains?.[key] || 0))));
+        if (next[key] !== (previous[key] || 0)) changed = true;
+      });
+      if (!changed) return previous;
+      try { localStorage.setItem(INTIMACY_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const gainsFor = (content, duringCall) => {
+    const gains = { carinho: 1 };
+    if (LAUGHTER_PATTERN.test(content)) gains.humor = 2;
+    if (content.length > 120 || duringCall) gains.companhia = 2;
+    return gains;
+  };
+  const speakSpoken = reply => {
+    if (!synthesisSupported) return;
+    const synthesis = window.speechSynthesis;
+    try { synthesis.cancel(); } catch {}
+    const utterance = new SpeechSynthesisUtterance(String(reply || '').slice(0, 400));
+    utterance.lang = 'pt-BR';
+    const voices = synthesis.getVoices() || [];
+    const voice = ptVoiceRef.current || voices.find(item => /^pt[-_]br/i.test(item.lang || '')) || voices.find(item => /^pt/i.test(item.lang || ''));
+    if (voice) utterance.voice = voice;
+    utterance.rate = quiet ? .8 : .98;
+    utterance.pitch = quiet ? .95 : 1;
+    utterance.onstart = () => { speakingRef.current = true; };
+    const releaseMic = () => { speakingRef.current = false; };
+    utterance.onend = releaseMic;
+    utterance.onerror = releaseMic;
+    synthesis.speak(utterance);
+  };
+  const endCall = reason => {
+    if (!callActiveRef.current) return;
+    callActiveRef.current = false;
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    try { recognition?.abort(); } catch {}
+    if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
+    speakingRef.current = false;
+    const minutes = Math.max(0, Math.floor((Date.now() - callStartRef.current) / 60000));
+    if (minutes > 0) awardXP({ companhia: minutes });
+    setCall(false);
+    setMessage(reason || 'Chamada encerrada.');
+  };
+  const startCall = () => {
+    if (call) return;
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) { setMessage('Reconhecimento de voz indisponível neste navegador. Use Chrome ou Edge.'); return; }
+    const recognition = new Recognition();
+    recognition.lang = 'pt-BR';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = event => {
+      if (speakingRef.current) return;
+      let final = '';
+      for (let index = event.resultIndex; index < event.results.length; index++) if (event.results[index].isFinal) final += event.results[index][0].transcript;
+      const heard = final.trim();
+      if (heard) submitRef.current?.(heard, { spoken: true });
+    };
+    recognition.onerror = event => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') endCall('Não foi possível acessar o microfone. Verifique a permissão do navegador.');
+      else if (event.error === 'audio-capture') endCall('Nenhum microfone encontrado.');
+      else if (event.error === 'network') endCall('Falha de rede no reconhecimento de voz.');
+    };
+    recognition.onend = () => { if (callActiveRef.current) { try { recognition.start(); } catch { endCall(); } } };
+    recognitionRef.current = recognition;
+    try { recognition.start(); } catch { setMessage('Não foi possível iniciar o microfone.'); return; }
+    callActiveRef.current = true;
+    callStartRef.current = Date.now();
+    setCallSeconds(0);
+    setCall(true);
+  };
+  const submitMessage = async (content, { spoken = false } = {}) => {
+    const value = String(content || '').trim();
+    if (!value || busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
+    awardXP(gainsFor(value, spoken));
     setMessage('Usami está pensando…');
     try {
       const manifest = report?.manifest ? { ...report.manifest, customIdle: report.customIdle !== false, customWave: report.customWave !== false, customTilt: report.customTilt !== false } : null;
-      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, capabilities: manifest ? summarizeCapabilities(manifest) : undefined }) });
+      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: value, capabilities: manifest ? summarizeCapabilities(manifest) : undefined }) });
       let data = null;
       try { data = await response.json(); } catch { throw new Error('Resposta inválida do servidor.'); }
       if (!response.ok) throw new Error(data?.error || 'Falha na conversa.');
@@ -344,14 +528,21 @@ export function Usami() {
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
-      lips.current = planVisemes(data.reply);
-      lipsAnchor.current = performance.now();
+      if (spoken) {
+        speakSpoken(data.reply);
+        lips.current = planVisemes(data.reply);
+        lipsRate.current = quiet ? .8 : .98;
+        lipsAnchor.current = performance.now();
+      } else speakReply(data.reply, styleIdForActions(data.actions));
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
-      setText('');
+      if (!spoken) setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
-    finally { setBusy(false); }
+    finally { busyRef.current = false; setBusy(false); }
   };
+  useEffect(() => { submitRef.current = submitMessage; });
+  const sendMessage = event => { event.preventDefault(); submitMessage(text); };
   const meshList = report?.meshList || [];
+  const topLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
   const defaultVisible = mesh => sourceType === 'fbx' ? true : mesh.skinned;
   const isMeshVisible = mesh => meshPrefs[mesh.name] ?? defaultVisible(mesh);
   const toggleMesh = mesh => {
@@ -368,24 +559,23 @@ export function Usami() {
     setMeshPrefs({});
     controller.current?.applyDefaultVisibility();
   };
-  return <main className="stage">
+  return <main className={'stage' + (quiet ? ' companion' : '')}>
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} />}
-    <header><span className="brand">USAMI <small>companion</small></span><span className="status"><i />{busy ? 'pensando' : quiet ? 'modo tranquilo' : 'em repouso'}</span><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></header>
-    <div className="welcome"><span>UM MOMENTO COM</span><h1>Usami</h1><p>Um lugar tranquilo para estar, conversar e descobrir.</p></div>
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} />}
+    <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? `chamada · ${formatCallTime(callSeconds)}` : busy ? 'pensando' : quiet ? 'modo companion' : 'em repouso'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     <div className="controls">
       {message && <p className="notice" role="status">{message}</p>}
       {chat && <><div className="privacy-note">Ao enviar, sua mensagem será compartilhada com a OpenRouter e o provedor selecionado.</div><form className="composer" onSubmit={sendMessage}><input value={text} onChange={event => setText(event.target.value)} placeholder="Escreva uma mensagem..." aria-label="Mensagem" maxLength={2000} /><button aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button></form></>}
       <div className="dock">
-        <button className="round" onClick={() => setMessage('A conversa por voz ainda não está disponível. Nenhum microfone foi ativado.')} aria-label="Microfone indisponível"><Mic size={19}/></button>
+        <button className="round" disabled={call || !recognitionSupported} onClick={() => setMessage('Inicie uma chamada para falar com a Usami.')} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador. Use Chrome ou Edge.' : call ? 'O microfone já está ativo na chamada.' : 'Inicie uma chamada pelo botão do telefone.'} aria-label="Microfone"><Mic size={19}/></button>
+        <button className={'round' + (call ? ' hangup' : '')} onClick={() => (call ? endCall() : startCall())} aria-label={call ? 'Encerrar chamada' : 'Iniciar chamada de voz'} aria-pressed={call}>{call ? <PhoneOff size={19}/> : <Phone size={19}/>}</button>
         <button className={'round '+(chat?'selected':'')} onClick={() => { setChat(!chat); setMessage(''); }} aria-label={chat?'Fechar campo de texto':'Abrir campo de texto'} aria-expanded={chat}><Keyboard size={19}/></button>
-        <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo tranquilo" aria-pressed={quiet}><Moon size={19}/></button>
+        <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
         <button className="round" onClick={() => setMessage('A reprodução de áudio ainda não está disponível.')} aria-label="Áudio indisponível"><Volume2 size={19}/></button>
         <button className="round" onClick={() => setPanel(true)} aria-label="Detalhes do avatar"><Info size={19}/></button>
       </div>
-      <div className="hint">SUA COMPANHIA, NO SEU RITMO</div>
     </div>
     {panel && <div className="scrim" onClick={() => setPanel(false)}><aside onClick={event => event.stopPropagation()}><div className="panel-head"><div><span className="eyebrow">LABORATÓRIO</span><h2>Avatar & rig</h2></div><button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button></div><p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p><input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/><button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button><label className="rig-label">Modelo local (public/)<input placeholder="/models/exemplo.vrm" value={modelPath} onChange={e => setModelPath(e.target.value)} /></label><div className="rig-actions"><button onClick={() => loadFromPath(modelPath)}>Carregar caminho</button></div><p>Arquivos grandes não cabem no upload; caminhos servidos por /public. Ex.: /models/shiro.vrm</p><h3>Inspeção do modelo</h3>{!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
       <dl>{Object.entries({Formato:report.format,Meshes:report.meshes,Bones:report.bones,Triângulos:report.triangles,Animações:report.animations.length,'Morph targets':report.morphs.length,Expressões:report.expressions.length}).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
@@ -398,6 +588,6 @@ export function Usami() {
       <h3>Expressões</h3>{(() => { const curated = curateExpressions(report.expressions || []).curated; return curated.length ? <div className="rig-actions">{curated.map(item => <button key={item.name} onClick={() => { controller.current?.setExpression?.(item.name, 1); setTimeout(() => controller.current?.setExpression?.(item.name, 0), 3000); poke(); }}>{item.name}</button>)}</div> : <p>Nenhuma expressão no modelo.</p>; })()}
       <h3>Morph targets</h3>{report.morphs.length ? report.morphs.map(name => <label className="rig-label" key={name}>{name}: {Math.round((morphValues[name] || 0)*100)}%<input type="range" min="0" max="1" step=".01" value={morphValues[name] || 0} onChange={e => {const value=Number(e.target.value);setMorphValues(old => ({...old,[name]:value}));controller.current?.morph(name,value);}} /></label>) : <p>Nenhum morph target encontrado.</p>}
       <button className="upload" onClick={() => {controller.current?.reset();setAngle(0);setMorphValues({});}}>Restaurar pose inicial</button></>}
-    </>}<p className="disclaimer">Teste inicial de texto com OpenRouter. Voz ainda não está integrada. O teste de clips reproduz apenas canais identificados nos ossos.</p></aside></div>}
+    </>}<h3>Intimidade</h3><BondMeters intimacy={intimacy} values /><p className="disclaimer">Teste inicial de texto com OpenRouter. A chamada de voz usa o reconhecimento e a síntese de voz do navegador. O teste de clips reproduz apenas canais identificados nos ossos.</p></aside></div>}
   </main>;
 }
