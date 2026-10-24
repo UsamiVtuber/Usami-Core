@@ -44,8 +44,8 @@ test('parseChatBody: valida mensagem', () => {
 });
 
 test('parseProviderRaw: JSON válido e fence', () => {
-  assert.deepEqual(parseProviderRaw('{"reply":"olá","gesture":"tilt"}'), { ok: true, reply: 'olá', gesture: 'tilt', actions: [] });
-  assert.deepEqual(parseProviderRaw('```json\n{"reply":"oi","gesture":"neutral","actions":[{"type":"gesture","name":"wave"}]}\n```'), { ok: true, reply: 'oi', gesture: 'neutral', actions: [{ type: 'gesture', name: 'wave' }] });
+  assert.deepEqual(parseProviderRaw('{"reply":"olá","gesture":"tilt"}'), { ok: true, reply: 'olá', gesture: 'tilt', actions: [], remember: null });
+  assert.deepEqual(parseProviderRaw('```json\n{"reply":"oi","gesture":"neutral","actions":[{"type":"gesture","name":"wave"}]}\n```'), { ok: true, reply: 'oi', gesture: 'neutral', actions: [{ type: 'gesture', name: 'wave' }], remember: null });
   assert.equal(parseProviderRaw('{"reply":"","gesture":"neutral"}').ok, false);
   assert.equal(parseProviderRaw('not json but short').ok, true);
   assert.equal(parseProviderRaw('[' + 'x'.repeat(2100)).ok, false);
