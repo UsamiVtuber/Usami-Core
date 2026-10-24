@@ -21,3 +21,9 @@ O avatar é o modelo 白ー (shiro), arte por **Sweet_nya555**. O crédito é um
 ## Layout (decisão do usuário)
 
 Usuário escolheu um HUD minimalista, baseado no mock de referência: sem texto de marca no topo (o botão de configurações fica à esquerda), status centralizado, crédito à direita, e bloco de boas-vindas removido. O dock de botões fica abaixo do composer e a hint "SUA COMPANHIA, NO SEU RITMO" foi removida. Não reintroduzir esses elementos sem pedido.
+
+## Modos de conversa (decisão do usuário)
+
+- Em chamada de voz, manter a Shiro como foco central, compositor de texto disponível e controles circulares da chamada abaixo dele.
+- Em conversa apenas por texto, mostrar o histórico em painel lateral esquerdo e o compositor na base, sem retirar o avatar do palco.
+- A troca entre voz e texto deve acontecer na mesma tela; configurações e ferramentas de rig permanecem recolhidas e secundárias.
