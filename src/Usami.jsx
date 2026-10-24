@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, Info, ImagePlus, MessagesSquare } from 'lucide-react';
+import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, VolumeX, Info, ImagePlus, MessagesSquare } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
@@ -14,6 +14,7 @@ import { createEmotionEngine } from './emotion-engine';
 import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
+import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { planVisemes } from './visemes';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import './usami.css';
@@ -80,7 +81,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate, emotionEngine }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate, emotionEngine, vrmGestures }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -92,7 +93,23 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    element.appendChild(renderer.domElement);
+    const canvas = renderer.domElement;
+    element.appendChild(canvas);
+    // Look-at (VRM): three-vrm aims the eye/head rig at vrm.lookAt.target on
+    // every vrm.update(delta) call of the render loop. The pointer feeds a
+    // desired position; the loop eases toward it so the gaze is never robotic.
+    const lookDesired = new THREE.Vector3(0, 1.45, 2.5);
+    let lookTarget = null;
+    const onPointerMove = event => {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const nx = ((event.clientX - rect.left) / rect.width) * 2 - 1; // -1 left .. +1 right
+      const ny = 1 - ((event.clientY - rect.top) / rect.height) * 2; // -1 bottom .. +1 top
+      // Coefficients below are visual fine-tuning, in meters in front of the
+      // model: ±1.2 m of horizontal sweep and 1.1–1.8 m of height at z = 2.5
+      // keep the gaze subtle (~±20° of rotation at the screen edges).
+      lookDesired.set(nx * 1.2, 1.45 + ny * 0.35, 2.5);
+    };
     scene.add(new THREE.HemisphereLight(0xffffff, 0x766485, 2.2));
     const light = new THREE.DirectionalLight(0xffebd8, 2);
     light.position.set(2, 4, 4);
@@ -159,6 +176,20 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           return node ? { part, node, x: node.rotation.x, z: node.rotation.z } : null;
         }).filter(Boolean);
       }
+      if (vrm?.humanoid) {
+        // Etapa 4: gestos procedurais (wave/tilt) + pose de corpo por emoção em
+        // nós normalizados que nenhuma outra camada toca (braço direito + head).
+        vrmGestures.current = createVrmGestureLayer({ humanoid: vrm.humanoid });
+      }
+      if (vrm?.lookAt) {
+        // three-vrm 3.x: assigning an Object3D to vrm.lookAt.target makes
+        // vrm.update(delta) aim the gaze rig at its world position.
+        lookTarget = new THREE.Object3D();
+        lookTarget.position.copy(lookDesired);
+        scene.add(lookTarget);
+        vrm.lookAt.target = lookTarget;
+        canvas.addEventListener('pointermove', onPointerMove);
+      }
       let meshes = 0, bones = 0, triangles = 0;
       const morphs = new Set();
       const boneList = [];
@@ -192,6 +223,11 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       if (vrm?.expressionManager) emotionEngine.current = createEmotionEngine({ driver: expressionDriver });
       controller.current = {
         gesture(name) {
+          // Etapa 4: layer do humanoid (VRM) primeiro — wave/tilt/idle em nós
+          // normalizados; o caminho Autumn (DEF-*) segue como fallback.
+          if (vrmGestures.current?.gesture(name)) return true;
+          if (name === 'wave') { gesture = null; mixer.stopAllAction(); return customMotion.wave(); }
+          if (name === 'idle') { gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); }
           if (name !== 'tilt') return false;
           const index = boneList.findIndex(bone => bone.name === 'DEF-spine006');
           if (index < 0) return false;
@@ -202,8 +238,8 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         },
         play(index) { const animation = animations[index]; if (!animation?.clip || animation.excludedTracks) return; gesture = null; customMotion.stop(); mixer.stopAllAction(); mixer.clipAction(animation.clip).reset().play(); },
         stop() { mixer.stopAllAction(); gesture = null; customMotion.stop(); },
-        idle() { gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
-        wave() { gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
+        idle() { if (vrmGestures.current?.gesture('idle')) return true; gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
+        wave() { if (vrmGestures.current?.gesture('wave')) return true; gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
         setMorph(name, value) { this.morph(name, value); },
         setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; return expressionDriver?.set(name, weight, { ttlMs: 4000 }) ?? false; },
@@ -217,9 +253,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         },
         setMeshVisible(name, visible) { avatar.traverse(object => { if (object.isMesh && object.name === name) object.visible = Boolean(visible); }); },
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
-        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); }
+        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); }
       };
-      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable, customWave: customMotion.waveAvailable, customTilt: boneList.some(bone => bone.name === 'DEF-spine006'), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, meshList: manifest.meshes, manifest });
+      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable || Boolean(vrmGestures.current?.available.idle), customWave: customMotion.waveAvailable || Boolean(vrmGestures.current?.available.wave), customTilt: boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
     const resize = () => {
       camera.aspect = element.clientWidth / element.clientHeight;
@@ -255,6 +291,10 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           else if (base.part === 'neck') base.node.rotation.z = base.z + pose.swayZ * .03;
         }
       }
+      // Etapa 4: gestos + pose emocional do humanoid, junto do sway e antes do vrm.update.
+      vrmGestures.current?.update();
+      // Ease the gaze toward the pointer target (frame-rate independent smoothing).
+      if (lookTarget) lookTarget.position.lerp(lookDesired, 1 - Math.exp(-delta * 8));
       if (lips?.current?.items?.length) {
         const elapsed = (performance.now() - (lipsAnchor?.current || 0)) * (lipsRate?.current || 1);
         let active = null;
@@ -272,8 +312,11 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       disposed = true;
       controller.current = null;
       emotionEngine.current = null;
+      if (vrmGestures) vrmGestures.current = null;
       cancelAnimationFrame(frame);
       observer.disconnect();
+      canvas.removeEventListener('pointermove', onPointerMove);
+      if (vrm?.lookAt) vrm.lookAt.target = null;
       localTextures.forEach(texture => texture.dispose());
       scene.traverse(object => {
         if (object.geometry) object.geometry.dispose();
@@ -334,6 +377,7 @@ export function Usami() {
   const [message, setMessage] = useState('');
   const [conversation, setConversation] = useState([]);
   const [quiet, setQuiet] = useState(false);
+  const [voiceOff, setVoiceOff] = useState(false);
   const [boneIndex, setBoneIndex] = useState(0);
   const [axis, setAxis] = useState('x');
   const [angle, setAngle] = useState(0);
@@ -348,6 +392,7 @@ export function Usami() {
   const controller = useRef(null);
   const director = useRef(null);
   const emotionEngine = useRef(null);
+  const vrmGestures = useRef(null);
   const auto = useRef(null);
   const blinkMode = useRef(null);
   const blinkName = useRef(null);
@@ -356,6 +401,7 @@ export function Usami() {
   const lipsAnchor = useRef(0);
   const lipsRate = useRef(1);
   const ttsAudio = useRef(null);
+  const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
   const callActiveRef = useRef(false);
   const callStartRef = useRef(0);
@@ -429,7 +475,25 @@ export function Usami() {
     if (/relax|calm|sleepy|tired|content/.test(expression)) return 'relaxed';
     return 'neutral';
   };
+  const toggleVoice = () => {
+    const next = !voiceOffRef.current;
+    voiceOffRef.current = next;
+    setVoiceOff(next);
+    if (next) {
+      // Muting cuts whatever is playing immediately (server TTS + call synthesis).
+      ttsAudio.current?.pause();
+      if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
+    }
+  };
   const speakReply = async (reply, styleId = 'neutral') => {
+    // Mute: never request /api/tts — go straight to the silent lip-sync mimic,
+    // the same fallback the catch block below performs when audio is missing.
+    if (voiceOffRef.current) {
+      lips.current = planVisemes(reply);
+      lipsRate.current = quiet ? .8 : 1;
+      lipsAnchor.current = performance.now();
+      return;
+    }
     try {
       const response = await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply, styleId }) });
       const type = response.headers.get('content-type') || '';
@@ -472,7 +536,8 @@ export function Usami() {
     return gains;
   };
   const speakSpoken = reply => {
-    if (!synthesisSupported) return;
+    // Mute: skip browser synthesis too — the caller keeps animating the lips.
+    if (!synthesisSupported || voiceOffRef.current) return;
     const synthesis = window.speechSynthesis;
     try { synthesis.cancel(); } catch {}
     const utterance = new SpeechSynthesisUtterance(String(reply || '').slice(0, 400));
@@ -549,6 +614,9 @@ export function Usami() {
       // Etapa 3: emoção confiável no texto aplica o engine e remove o set_expression
       // do LLM (evita blend duplo); sem confiança, as actions seguem intactas.
       const resolved = resolveReplyEmotion({ reply: data.reply, actions: data.actions, engine: emotionEngine.current });
+      // Etapa 4: emoção aplicada também vira pose de corpo (head) com TTL; sem
+      // confiança, a pose vigente decai sozinha até neutral — nada a fazer aqui.
+      if (resolved.applied && resolved.emotion) vrmGestures.current?.setEmotion(resolved.emotion.label, resolved.emotion.intensity, 4500);
       const results = director.current?.execute(resolved.actions)?.results || [];
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
@@ -589,7 +657,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} emotionEngine={emotionEngine} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} emotionEngine={emotionEngine} vrmGestures={vrmGestures} />}
     <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
@@ -605,12 +673,14 @@ export function Usami() {
         <button className="composer-tool" type="button" disabled title="Envio de imagem em breve" aria-label="Enviar imagem indisponível"><ImagePlus size={18}/></button>
         <input value={text} onChange={event => setText(event.target.value)} placeholder={call ? 'Escreva enquanto fala...' : 'Diga alguma coisa...'} aria-label="Mensagem" maxLength={2000} />
         {!call && <button className="composer-call" type="button" onClick={startCall} disabled={!recognitionSupported} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador.' : 'Iniciar chamada de voz'} aria-label="Iniciar chamada de voz"><Phone size={18}/></button>}
+        {!call && <button className="composer-call" type="button" onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={18}/>:<Volume2 size={18}/>}</button>}
         <button className="composer-send" aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button>
       </form>
       {call && <div className="dock" aria-label="Controles da chamada">
         <button className="round live" disabled={!recognitionSupported} title="Microfone ativo" aria-label="Microfone ativo"><Mic size={19}/></button>
         <button className={'round '+(chat?'selected':'')} onClick={() => setChat(!chat)} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
         <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
+        <button className={'round '+(voiceOff?'selected':'')} onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={19}/>:<Volume2 size={19}/>}</button>
         <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
         <button className="round" onClick={() => setPanel(true)} aria-label="Detalhes do avatar"><Info size={19}/></button>
       </div>}
