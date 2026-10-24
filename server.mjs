@@ -3,6 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
+import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
+import { buildPersona, getAffinityStage } from './src/persona.js';
+import { createMemoryStore } from './src/memory-store.js';
+import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -11,6 +15,18 @@ const DEFAULT_SYSTEM = 'Você é Usami, uma companion acolhedora, curiosa e natu
 const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 
 const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
+
+// Heurística do "remember": sinais de fato duradouro → núcleo; o resto é recente.
+const DURABLE_FACT = /\b(anivers[áa]rio|gosta|tem|nome)\b|\b\d{1,2}\/\d{1,2}\b/i;
+
+// Memória local + afinidade (data/memory.json, escrita atômica tmp+rename).
+// Falha aqui nunca derruba o chat: o handler isola as operações de memória.
+const memoryStore = createMemoryStore({ dataDir: 'data' });
+try {
+  memoryStore.load();
+} catch {
+  console.error('Aviso: memória local indisponível — o chat segue sem contexto persistido.');
+}
 
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
   if (!origin) return true;
@@ -97,6 +113,14 @@ export function systemFor(capabilities) {
   return base + ' Capabilidades disponíveis neste modelo: ' + JSON.stringify(capabilities) + '.';
 }
 
+// Fato "remember" do schema da persona: string curta e útil, ou null.
+function normalizeRemember(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') return null;
+  return trimmed.slice(0, 300);
+}
+
 export function parseProviderRaw(raw) {
   if (typeof raw !== 'string' || raw.length > 10000) {
     return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
@@ -113,7 +137,7 @@ export function parseProviderRaw(raw) {
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
-  return { ok: true, reply: result.reply.trim(), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions) };
+  return { ok: true, reply: result.reply.trim(), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions), remember: normalizeRemember(result.remember) };
 }
 
 export function createChatHandler(options = {}) {
@@ -168,7 +192,19 @@ export function createChatHandler(options = {}) {
     }
 
     const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
-    const system = systemFor(capabilities);
+    const mem = memoryStore.getAll();
+    const today = new Date().toISOString().slice(0, 10);
+    const hour = new Date().getHours();
+    const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+    const system = buildPersona({
+      affinity: mem.affinity.score,
+      coreFacts: mem.coreFacts,
+      recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
+      history: memoryStore.getTodayHistory(today),
+      username: mem.user.nickname || 'você',
+      date: today,
+      timeOfDay,
+    });
     let key;
     try {
       key = await getKey();
@@ -208,8 +244,37 @@ export function createChatHandler(options = {}) {
       return send(parsed.status, { error: parsed.error });
     }
 
+    // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
+    // Isolado de propósito — falha de disco nunca derruba a resposta do chat.
+    let affinityPayload = null;
+    try {
+      const remember = parsed.remember;
+      if (remember) {
+        if (DURABLE_FACT.test(remember)) memoryStore.addCoreFact(remember);
+        else memoryStore.addRecentFact(remember);
+      }
+      const turnTimestamp = new Date().toISOString();
+      memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
+      memoryStore.appendHistory('assistant', parsed.reply, turnTimestamp);
+      const current = memoryStore.getAll();
+      const gain = calculateGain({
+        userMessage: parsedBody.message,
+        assistantReply: parsed.reply,
+        rememberFact: remember,
+        currentScore: current.affinity.score,
+        stage: getStage(current.affinity.score),
+        alreadyGainedToday: current.affinity.totalDailyGainToday,
+      });
+      const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
+      // applyGain já devolve o objeto completo (score + contador diário); grava direto.
+      memoryStore.save({ ...current, affinity: newAff });
+      affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
+    } catch {
+      // sem memória o chat segue stateless; nada a fazer aqui
+    }
+
     const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
-    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions });
+    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, ...(affinityPayload || {}) });
   };
 }
 
@@ -466,12 +531,173 @@ export function createTtsHandler(options = {}) {
   };
 }
 
+// ---- STT (speech-to-text local via faster-whisper) ----
+
+// Parser multipart/form-data minimalista (sem deps): extrai apenas o campo
+// `audio` (arquivo) e ignora campos de texto. Browsers emitem CRLF.
+export function parseMultipartAudio(buffer, contentType) {
+  const header = typeof contentType === 'string' ? contentType : '';
+  const match = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(header);
+  if (!match || !(match[1] ?? match[2])) {
+    return { ok: false, status: 400, error: 'Requisição multipart inválida (boundary ausente).' };
+  }
+  const boundary = Buffer.from('--' + (match[1] ?? match[2]).trim());
+  let index = buffer.indexOf(boundary);
+  while (index !== -1) {
+    const next = buffer.indexOf(boundary, index + boundary.length);
+    if (next === -1) break;
+    // trecho entre dois boundaries: começa após o CRLF da linha do boundary e
+    // termina antes do CRLF que precede o próximo boundary
+    const raw = buffer.subarray(index + boundary.length, next);
+    const start = raw.length >= 2 && raw[0] === 0x0d && raw[1] === 0x0a ? 2 : 0;
+    const end = raw.length >= 2 && raw[raw.length - 2] === 0x0d && raw[raw.length - 1] === 0x0a ? raw.length - 2 : raw.length;
+    const part = raw.subarray(start, end);
+    let headEnd = part.indexOf('\r\n\r\n');
+    let sep = 4;
+    if (headEnd === -1) {
+      headEnd = part.indexOf('\n\n');
+      sep = 2;
+    }
+    if (headEnd === -1) {
+      index = next;
+      continue;
+    }
+    const head = part.subarray(0, headEnd).toString('utf8');
+    const data = part.subarray(headEnd + sep);
+    // `filename="..."` também contém "name=" — exige delimitador antes do nome
+    const nameMatch = /(?:^|[;\s])name=(?:"([^"]*)"|([^;\s]+))/i.exec(head);
+    const name = nameMatch ? (nameMatch[1] ?? nameMatch[2]) : null;
+    if (name === 'audio') {
+      if (!data.length) {
+        return { ok: false, status: 400, error: 'Arquivo de áudio vazio.' };
+      }
+      const fileMatch = /filename="([^"]*)"/i.exec(head);
+      const extMatch = fileMatch ? /\.([A-Za-z0-9]{1,8})$/.exec(fileMatch[1]) : null;
+      return { ok: true, audio: Buffer.from(data), extension: extMatch ? extMatch[1].toLowerCase() : null };
+    }
+    index = next;
+  }
+  return { ok: false, status: 400, error: 'Campo "audio" ausente.' };
+}
+
+// Corre a transcrição contra um timeout de parede; rejeições tardias de um impl
+// que estourou o relógio são engolidas para não virarem unhandled rejection.
+function withTranscribeTimeout(promise, ms) {
+  let timer;
+  const wrapped = Promise.resolve(promise);
+  wrapped.catch(() => {});
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error('Transcrição expirou.');
+      error.name = 'TimeoutError';
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([wrapped, timeout]).finally(() => clearTimeout(timer));
+}
+
+export function createSttHandler(options = {}) {
+  // fetchImpl é aceito por paridade de assinatura com chat/tts, mas
+  // deliberadamente não usado: a transcrição roda via python local, não HTTP.
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const transcribeImpl = options.transcribeImpl || transcribeAudio;
+  const getConfig = options.getConfig || (async () => ({ whisperModel: process.env.WHISPER_MODEL || null }));
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const model = options.model;
+  const timeoutMs = options.timeoutMs || 60000;
+  const language = options.language || 'pt';
+  const beamSize = Number.isFinite(Number(options.beamSize)) ? Number(options.beamSize) : 1;
+  const tmpDir = options.tmpDir || process.env.USAMI_STT_TMP_DIR || 'tmp';
+  const maxBodyBytes = options.maxBodyBytes || 8 * 1024 * 1024;
+
+  return async function handleStt(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'POST' || req.url !== '/api/stt') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    const contentType = req.headers['content-type'] || '';
+    const mime = contentType.split(';')[0].trim().toLowerCase();
+    if (mime !== 'multipart/form-data') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    const chunks = [];
+    let total = 0;
+    let tooLarge = false;
+    for await (const chunk of req) {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total > maxBodyBytes) {
+        tooLarge = true;
+        break;
+      }
+    }
+    if (tooLarge) {
+      return send(413, { error: 'Áudio muito grande.' });
+    }
+
+    const parsed = parseMultipartAudio(Buffer.concat(chunks), contentType);
+    if (!parsed.ok) {
+      return send(parsed.status, { error: parsed.error });
+    }
+
+    // config falhando não derruba o STT: o nome do modelo tem default funcional
+    let config = null;
+    try {
+      config = await getConfig();
+    } catch {
+      config = null;
+    }
+    const modelName = model
+      || (typeof config === 'string' && config ? config : null)
+      || config?.whisperModel
+      || config?.WHISPER_MODEL
+      || process.env.WHISPER_MODEL
+      || 'base';
+
+    let audioPath;
+    try {
+      audioPath = await saveTempAudio(parsed.audio, { dir: tmpDir, extension: parsed.extension || 'webm' });
+    } catch {
+      return send(500, { error: 'Falha ao preparar o áudio.' });
+    }
+
+    let text;
+    try {
+      text = await withTranscribeTimeout(transcribeImpl({ audioPath, modelName, language, beamSize, timeoutMs }), timeoutMs);
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError';
+      return send(timedOut ? 504 : 500, { error: timedOut ? 'Transcrição expirou.' : 'Falha na transcrição.' });
+    } finally {
+      await removeTempAudio(audioPath);
+    }
+
+    if (typeof text !== 'string') {
+      return send(500, { error: 'Falha na transcrição.' });
+    }
+    return send(200, { text: text.trim() });
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleChat = createChatHandler();
   const handleTts = createTtsHandler({ cache: true });
+  const handleStt = createSttHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
+    if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
