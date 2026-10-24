@@ -5,6 +5,7 @@ import { resolveReplyEmotion } from '../src/reply-emotion.js';
 const HAPPY_REPLY = 'Haha, que bom te ver! 😊'; // confidence 0.85
 const CAP_REPLY = 'Que bom! haha 😊 🎉 😄';      // confidence 0.95 (teto)
 const PLAIN_REPLY = 'ok, então combinamos assim'; // confidence 0
+const WELL_REPLY = 'Estou bem, obrigada por perguntar!'; // happy em conversa curta
 
 const makeEngine = () => {
   const calls = [];
@@ -22,6 +23,14 @@ test('confiança alta aplica o engine e remove set_expression das actions', () =
   assert.equal(calls[0].label, 'happy');
   assert.equal(calls[0].intensity, result.emotion.intensity);
   assert.equal(calls[0].durationMs, 4500);
+});
+
+test('resposta cotidiana positiva aplica sorriso em vez de permanecer no idle', () => {
+  const { calls, engine } = makeEngine();
+  const result = resolveReplyEmotion({ reply: WELL_REPLY, actions: [], engine });
+  assert.equal(result.applied, true);
+  assert.equal(result.emotion.label, 'happy');
+  assert.equal(calls.length, 1);
 });
 
 test('confiança baixa mantém as actions intactas e não toca no engine', () => {

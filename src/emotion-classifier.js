@@ -17,7 +17,9 @@
 // - `demais` NÃO é match de happy de propósito: em pt-BR é mais intensificador
 //   do que emoção ("triste demais" não é alegria) — só entra na intensidade.
 
-export const DEFAULT_CONFIDENCE_THRESHOLD = 0.6;
+// Um único indício explícito vale 0.55; o limiar precisa aceitar esse caso
+// para respostas naturais curtas ("estou bem", "que bom", "estou feliz").
+export const DEFAULT_CONFIDENCE_THRESHOLD = 0.55;
 
 const FIRST_MATCH_WEIGHT = 0.55;
 const EXTRA_MATCH_WEIGHT = 0.15;
@@ -59,6 +61,11 @@ const LEXICON = {
     /\bador[oa]s?\b/gi,
     /(?:\bte amo\b|\bamo (?:voc[êe]|vc|tu)\b)/gi,
     /\bque bom\b/gi,
+    /\bestou (?:muito )?bem\b/gi,
+    /\bt[oô] (?:muito )?bem\b/gi,
+    /\bbem[,! ]+(?:sim|obrigad[ao]s?)\b/gi,
+    /obrigad[ao] por perguntar/gi,
+    /\b(?:[óo]tim[ao]|maravilh[ao]|animad[ao])\b/gi,
     /\bfeliz\b/gi,
     /\boba\b/gi,
     /\bincr[íi]vel\b/gi,

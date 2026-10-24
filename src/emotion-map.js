@@ -4,7 +4,7 @@
 // (happy04 → "04-prefab_happy04", awkward02 → "16-prefab_awkward02"), não o
 // índice da família. Os nomes abaixo foram confrontados com a lista real de
 // 38 expressões do arquivo shiro.vrm (2026-10-23). As escolhas de variante
-// (happy04, awkward02, sad02, angry02…) seguem pendentes de confirmação
+// (happy02, awkward02, sad02, angry02…) seguem pendentes de confirmação
 // visual pelo usuário; trocar a variante é editar somente este arquivo —
 // nenhum outro ponto do código referencia esses nomes diretamente.
 //
@@ -16,10 +16,10 @@
 
 export const EMOTION_MAP = {
   neutral:   { expressions: {},                             eyesClosed: false },
-  happy:     { expressions: { '04-prefab_happy04': 1 },     eyesClosed: true  },
+  happy:     { expressions: { '02-prefab_happy02': 1 },     eyesClosed: false },
   shy:       { expressions: { '16-prefab_awkward02': 1 },   eyesClosed: true  },
   sad:       { expressions: { '13-prefab_sad02': 1 },       eyesClosed: false },
-  soft:      { expressions: { '12-prefab_sad01': 0.6 },     eyesClosed: false },
+  soft:      { expressions: { '01-prefab_happy01': 0.6 },   eyesClosed: false },
   angry:     { expressions: { '08-prefab_angry02': 1 },     eyesClosed: false },
   surprised: { expressions: { '20-prefab_startled': 1 },    eyesClosed: false },
   doubtful:  { expressions: { '19-prefab_doubt': 1 },       eyesClosed: false },

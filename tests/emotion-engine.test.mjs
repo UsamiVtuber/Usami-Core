@@ -24,10 +24,10 @@ test("apply('happy') aplica o mapa com peso 1 e TTL de 4500 ms", () => {
   const h = makeHarness();
   assert.deepEqual(h.engine.apply({ label: 'happy' }), { applied: true, label: 'happy' });
   assert.equal(h.setCalls.length, 1);
-  assert.equal(h.setCalls[0].name, '04-prefab_happy04');
+  assert.equal(h.setCalls[0].name, '02-prefab_happy02');
   assert.equal(h.setCalls[0].weight, 1);
   assert.equal(h.setCalls[0].options.ttlMs, 4500);
-  assert.deepEqual(h.driver.active(), [{ name: '04-prefab_happy04', current: 0, target: 1 }]);
+  assert.deepEqual(h.driver.active(), [{ name: '02-prefab_happy02', current: 0, target: 1 }]);
 });
 
 test('a intensidade escala o peso do mapa e passa por clamp01', () => {
@@ -52,9 +52,9 @@ test('label desconhecido, ausente ou neutral libera tudo como neutral', () => {
 test('blinkMultiplier suprime o blink com expressÃ£o de olhos fechados ativa', () => {
   const h = makeHarness();
   assert.equal(h.engine.blinkMultiplier(), 1, 'nada ativo: blink livre');
-  h.engine.apply({ label: 'happy' }); // happy fecha os olhos no mapa
+  h.engine.apply({ label: 'shy' }); // shy fecha os olhos no mapa
   for (let step = 0; step < 6; step++) { h.advance(ATTACK_TAU_MS); h.engine.update(); }
-  const weight = h.driver.getWeight('04-prefab_happy04');
+  const weight = h.driver.getWeight('16-prefab_awkward02');
   assert.ok(weight > 0.95, `peso da expressÃ£o ~1 (obtido ${weight})`);
   assert.ok(h.engine.blinkMultiplier() < 0.1, 'blink quase totalmente suprimido');
   h.engine.apply({ label: 'neutral' });
@@ -65,7 +65,7 @@ test('blinkMultiplier suprime o blink com expressÃ£o de olhos fechados ativa',
 test("apply('soft') usa o peso 0.6 do mapa e a intensidade multiplica", () => {
   const h = makeHarness();
   h.engine.apply({ label: 'soft' });
-  assert.equal(h.setCalls[0].name, '12-prefab_sad01');
+  assert.equal(h.setCalls[0].name, '01-prefab_happy01');
   assert.equal(h.setCalls[0].weight, 0.6);
   h.engine.apply({ label: 'soft', intensity: 0.5 });
   assert.equal(h.setCalls[1].weight, 0.3);
@@ -80,7 +80,7 @@ test('reset limpa o driver imediatamente (setRaw 0 e sem entries)', () => {
   h.engine.reset();
   assert.deepEqual(h.driver.active(), []);
   const last = h.raw[h.raw.length - 1];
-  assert.deepEqual(last, ['04-prefab_happy04', 0]);
+  assert.deepEqual(last, ['02-prefab_happy02', 0]);
 });
 
 test('label conhecido sem expressÃµes apenas libera (mapa customizado)', () => {

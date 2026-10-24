@@ -23,7 +23,15 @@ test('frase de saudade classifica como sad', () => {
 test('frase sem emoção fica abaixo do limiar (neutro-incerto)', () => {
   const result = classifyEmotion('ok, então combinamos assim');
   assert.ok(result.confidence < 0.55);
-  assert.equal(DEFAULT_CONFIDENCE_THRESHOLD, 0.6);
+  assert.equal(DEFAULT_CONFIDENCE_THRESHOLD, 0.55);
+});
+
+test('resposta positiva curta reconhece o sorriso com um único indício', () => {
+  for (const phrase of ['Estou bem, obrigada!', 'Tô bem sim!', 'Ótima, obrigada por perguntar.']) {
+    const result = classifyEmotion(phrase);
+    assert.equal(result.label, 'happy', phrase);
+    assert.ok(result.confidence >= DEFAULT_CONFIDENCE_THRESHOLD, phrase);
+  }
 });
 
 test('negação até 3 tokens antes reduz o peso do match pela metade', () => {

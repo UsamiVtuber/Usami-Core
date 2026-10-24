@@ -99,6 +99,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     scene.add(light);
     let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null;
     const localTextures = [];
+    // O loop de renderização também usa esta lista para blink e lip sync.
+    // Ela precisa viver no escopo do effect, não apenas dentro do callback do loader.
+    const morphList = [];
     const loader = sourceType === 'fbx' ? new FBXLoader() : new GLTFLoader();
     if (sourceType !== 'fbx') loader.register(parser => new VRMLoaderPlugin(parser));
     loader.load(source, loaded => {
@@ -159,7 +162,6 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       let meshes = 0, bones = 0, triangles = 0;
       const morphs = new Set();
       const boneList = [];
-      const morphList = [];
       avatar.traverse(object => {
         if (object.isBone) { bones++; boneList.push(object); }
         if (object.isMesh) {
