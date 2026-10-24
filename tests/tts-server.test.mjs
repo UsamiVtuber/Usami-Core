@@ -396,6 +396,43 @@ test('gemini: options/config ajustam model e voice', async () => {
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Puck');
 });
 
+test('gemini: styleId happy insere a cláusula da emoção e mantém o voiceConfig', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse(); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'que bom te ver', styleId: 'happy' }) }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 1);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado, com voz alegre e brilhante: que bom te ver');
+  // a cláusula não altera a voz enviada ao Google
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, undefined);
+});
+
+test('gemini: styleId neutral mantém a instrução base exata', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse(); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'tudo certo', styleId: 'neutral' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado: tudo certo');
+});
+
+test('gemini: styleId desconhecido cai na instrução base (fallback determinístico)', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse(); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'estranho isso', styleId: 'estranho-x' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado: estranho isso');
+});
+
 test('handler: cache local evita nova chamada e separa estilos', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

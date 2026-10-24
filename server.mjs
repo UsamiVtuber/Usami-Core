@@ -259,6 +259,27 @@ const DEFAULT_GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
 const DEFAULT_GEMINI_TTS_INSTRUCTION = 'Leia em português do Brasil, com tom acolhedor e animado: ';
 const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
+// Cláusulas de emoção por styleId, inseridas na instrução do gemini; neutral e
+// rótulos desconhecidos não têm cláusula — caem na instrução base (determinístico).
+const STYLE_INSTRUCTIONS = {
+  happy: 'com voz alegre e brilhante',
+  sad: 'com voz triste e suave',
+  angry: 'com voz firme e irritada',
+  surprised: 'com voz espantada',
+  relaxed: 'com voz calma e serena',
+  soft: 'com voz doce e meiga',
+  shy: 'com voz tímida e envergonhada',
+  doubtful: 'com voz desconfiada',
+};
+
+// Insere a cláusula da emoção antes do ": " final da instrução base; base sem
+// o delimitador recebe a cláusula anexada — sem cláusula conhecida, base intacta.
+function buildGeminiInstruction(base, styleId) {
+  const clause = STYLE_INSTRUCTIONS[styleId];
+  if (!clause) return base;
+  const trimmed = base.replace(/:\s*$/, '');
+  return trimmed + (trimmed === base ? ' ' : ', ') + clause + ': ';
+}
 
 function normalizeTtsProvider(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -414,7 +435,9 @@ export function createTtsHandler(options = {}) {
     let response;
     try {
       if (provider === 'gemini') {
-        const instruction = options.geminiInstruction || process.env.GEMINI_TTS_INSTRUCTION || DEFAULT_GEMINI_TTS_INSTRUCTION;
+        const baseInstruction = options.geminiInstruction || process.env.GEMINI_TTS_INSTRUCTION || DEFAULT_GEMINI_TTS_INSTRUCTION;
+        // styleId conhecido ganha a cláusula da emoção; neutral/desconhecido fica na base
+        const instruction = buildGeminiInstruction(baseInstruction, parsedBody.styleId);
         // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
         // instrução não conta no limite de 2000 chars, validado sobre o texto puro
         response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(geminiModel) + ':generateContent', {
