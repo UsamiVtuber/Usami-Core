@@ -7,6 +7,12 @@ import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { createMemoryStore } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
+import { buildServices } from './src/flow-services.js';
+import { createFlowExecutor } from './src/flow-executor.js';
+import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-classifier.js';
+import { createEmotionEngine } from './src/emotion-engine.js';
+import { createExpressionDriver } from './src/expression-driver.js';
+import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 
@@ -27,6 +33,28 @@ try {
 } catch {
   console.error('Aviso: memória local indisponível — o chat segue sem contexto persistido.');
 }
+
+// Serviços de domínio + FlowExecutor (grafo de nós estilo n8n)
+const emotionEngine = createEmotionEngine({
+  driver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),
+});
+const gestureLayer = createVrmGestureLayer({ now: () => Date.now() });
+const services = buildServices({
+  fetchImpl: globalThis.fetch,
+  getKey: async () => {
+    const envPath = process.env.USAMI_KEYS_FILE || 'A:/Usami Project/.env';
+    const parsed = parseEnv(await readFile(envPath, 'utf8'));
+    return parsed.OPENROUTER_API_KEY || null;
+  },
+  model: DEFAULT_MODEL,
+  memoryStore,
+  classifyEmotion,
+  emotionEngine,
+  expressionDriver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),
+  gestureLayer,
+  transcribeAudio,
+});
+const flowExecutor = createFlowExecutor({ services, config: {} });
 
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
   if (!origin) return true;
@@ -275,6 +303,75 @@ export function createChatHandler(options = {}) {
 
     const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
     return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, ...(affinityPayload || {}) });
+  };
+}
+
+// --- Flow-based chat handler (n8n-style node graph) ---
+export function createFlowChatHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+
+  return async function handleFlowChat(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'POST' || req.url !== '/api/chat') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    let body = '';
+    let tooLarge = false;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 8192) {
+        tooLarge = true;
+        break;
+      }
+    }
+    if (tooLarge) {
+      return send(413, { error: 'Mensagem muito longa.' });
+    }
+
+    const parsedBody = parseChatBody(body);
+    if (!parsedBody.ok) {
+      return send(parsedBody.status, { error: parsedBody.error });
+    }
+
+    const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
+
+    try {
+      const result = await flowExecutor.executeChat({
+        userText: parsedBody.message,
+        audioBuffer: null, // STT handled separately via /api/stt
+        capabilities,
+        // O navegador toca o TTS por /api/tts e é quem faz o lip-sync. Evita
+        // uma segunda síntese invisível e mantém uma única fonte de áudio.
+        voiceOff: true,
+      });
+
+      return send(200, {
+        reply: result.reply,
+        gesture: result.gesture,
+        actions: result.actions,
+        emotion: result.emotion,
+        audioBuffer: result.audioBuffer ? 'base64_placeholder' : null, // actual audio via /api/tts
+        debug: result.debug,
+      });
+    } catch (error) {
+      return send(500, { error: 'Erro interno no flow: ' + error.message });
+    }
   };
 }
 
@@ -691,6 +788,9 @@ export function createSttHandler(options = {}) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  // O handler consolidado preserva a persona, memória e afinidade no prompt.
+  // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
+  // finalizada, sem trocar comportamento real por um pipeline parcial.
   const handleChat = createChatHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
