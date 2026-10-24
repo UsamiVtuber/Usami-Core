@@ -9,5 +9,8 @@ _backup/
 public/models/
 public/live2d/
 
+# Cache de áudio TTS gerado em runtime
+data/
+
 # Arquivos de ambiente (chaves nunca entram no repositório)
 .env
