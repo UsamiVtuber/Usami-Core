@@ -4,6 +4,7 @@
 // tagged catalog the chat classifier and the expression panel can consume
 // directly. No imports, no side effects: runs the same in Node (server.mjs)
 // and in the browser.
+import { EXPRESSION_LABELS, EXPRESSION_TAGS } from './emotion-map.js';
 
 // Garbage names: composed only of symbols/underscores/hyphens.
 const GARBAGE_NAME_RE = /^[\W_]+$/;
@@ -16,7 +17,9 @@ const TAG_RULES = [
   { tag: 'happy', keywords: ['happy', 'joy', 'smile', 'fun', 'glad'] },
   { tag: 'sad', keywords: ['sad', 'cry', 'sorrow', 'tear'] },
   { tag: 'angry', keywords: ['angry', 'mad', 'rage', 'annoy'] },
+  { tag: 'awkward', keywords: ['awkward', 'shy', 'embarrass'] },
   { tag: 'surprised', keywords: ['surprise', 'shock', 'wow', 'amaze'] },
+  { tag: 'doubtful', keywords: ['doubt', 'doubtful', 'question'] },
   { tag: 'relaxed', keywords: ['relax', 'calm', 'sleepy', 'tired', 'content'] },
 ];
 
@@ -35,6 +38,7 @@ function priorityGroup(tag) {
 }
 
 function tagExpression(lowerName) {
+  if (EXPRESSION_TAGS[lowerName]) return EXPRESSION_TAGS[lowerName];
   for (const rule of TAG_RULES) {
     if (rule.keywords.some(keyword => lowerName.includes(keyword))) return rule.tag;
   }
@@ -42,6 +46,10 @@ function tagExpression(lowerName) {
   if (SPEAK_KEYWORDS.some(keyword => lowerName.includes(keyword))) return 'speak';
   if (BLINK_KEYWORDS.some(keyword => lowerName.includes(keyword))) return 'blink';
   return 'other';
+}
+
+export function labelExpression(name) {
+  return EXPRESSION_LABELS[name] || name;
 }
 
 // Curates raw expressionNames into { curated, dropped }:

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { curateExpressions } from '../src/expressions-catalog.js';
+import { curateExpressions, labelExpression } from '../src/expressions-catalog.js';
 
 test('filtra lixo e dedupe case-insensitive mantendo a primeira forma original', () => {
   const result = curateExpressions([
@@ -99,6 +99,24 @@ test('visemas de letra única casam exatamente, mesmo em maiúscula', () => {
   // 'aa' e 'oh' contêm letras de visema, mas não são nomes exatos.
   assert.equal(tags.get('aa'), 'other');
   assert.equal(tags.get('oh'), 'other');
+});
+
+test('catalogo Shiro classifica as cinco expressões finais e fornece rótulos humanos', () => {
+  const names = [
+    '21-prefab_emoji', '22-prefab_clothes', '23-prefab_hat',
+    '24-prefab_hairpin', '25-prefab_sleeve', '19-prefab_doubt', '20-prefab_startled',
+  ];
+  const entries = curateExpressions(names, { limit: 40 }).curated;
+  const tags = new Map(entries.map(entry => [entry.name, entry.tag]));
+  assert.equal(tags.get('21-prefab_emoji'), 'effect');
+  assert.equal(tags.get('22-prefab_clothes'), 'effect');
+  assert.equal(tags.get('23-prefab_hat'), 'effect');
+  assert.equal(tags.get('24-prefab_hairpin'), 'effect');
+  assert.equal(tags.get('25-prefab_sleeve'), 'effect');
+  assert.equal(tags.get('19-prefab_doubt'), 'doubtful');
+  assert.equal(tags.get('20-prefab_startled'), 'surprised');
+  assert.equal(labelExpression('23-prefab_hat'), 'Efeito chapéu');
+  assert.equal(labelExpression('unknown_expression'), 'unknown_expression');
 });
 
 test('dentro de cada grupo de prioridade a ordem original é mantida', () => {

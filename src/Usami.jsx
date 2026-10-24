@@ -3,13 +3,15 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, Info } from 'lucide-react';
+import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, Info, ImagePlus, MessagesSquare } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
 import { createMotionDirector } from './motion-director';
 import { createAutoMotion } from './auto-motion';
 import { createExpressionDriver } from './expression-driver';
+import { createEmotionEngine } from './emotion-engine';
+import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
 import { planVisemes } from './visemes';
@@ -78,7 +80,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, lips, lipsAnchor, lipsRate, emotionEngine }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -183,6 +185,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         setRaw: (name, weight) => vrm?.expressionManager?.setValue(name, weight),
         blinkName: detectedBlink,
       });
+      // Etapa 3: o engine de emoções só existe para VRMs com expressionManager
+      // (Live2D/GLB ficam sem — o chat cai no fallback das actions do LLM).
+      if (vrm?.expressionManager) emotionEngine.current = createEmotionEngine({ driver: expressionDriver });
       controller.current = {
         gesture(name) {
           if (name !== 'tilt') return false;
@@ -229,8 +234,10 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       const delta = Math.min(clock.getDelta(), .1);
       const state = auto?.current?.update?.();
       if (state?.blink !== undefined && blinkMode?.current && blinkName?.current) {
-        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, state.blink);
-        else morphList.filter(item => item.name === blinkName.current).forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink; });
+        // Etapa 3: emoções de olhos fechados suprimem o blink (gate do emotion-engine).
+        const blinkGate = emotionEngine?.current?.blinkMultiplier() ?? 1;
+        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, state.blink * blinkGate);
+        else morphList.filter(item => item.name === blinkName.current).forEach(item => { item.object.morphTargetInfluences[item.index] = state.blink * blinkGate; });
       }
       expressionDriver?.update();
       if (state && state.idleActive !== lastIdleActive?.current) {
@@ -262,6 +269,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     return () => {
       disposed = true;
       controller.current = null;
+      emotionEngine.current = null;
       cancelAnimationFrame(frame);
       observer.disconnect();
       localTextures.forEach(texture => texture.dispose());
@@ -312,16 +320,17 @@ function BondMeters({ intimacy, values }) {
 }
 
 export function Usami() {
-  const [source, setSource] = useState('/live2d/Resources/youling/youling.model3.json');
-  const [sourceType, setSourceType] = useState('live2d');
-  const [sourceName, setSourceName] = useState('youling.model3.json');
+  const [source, setSource] = useState('/models/shiro.vrm');
+  const [sourceType, setSourceType] = useState('gltf');
+  const [sourceName, setSourceName] = useState('shiro.vrm');
   const [modelPath, setModelPath] = useState('');
   const [report, setReport] = useState(null);
   const [meshPrefs, setMeshPrefs] = useState({});
   const [panel, setPanel] = useState(false);
-  const [chat, setChat] = useState(false);
+  const [chat, setChat] = useState(true);
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
+  const [conversation, setConversation] = useState([]);
   const [quiet, setQuiet] = useState(false);
   const [boneIndex, setBoneIndex] = useState(0);
   const [axis, setAxis] = useState('x');
@@ -336,6 +345,7 @@ export function Usami() {
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
+  const emotionEngine = useRef(null);
   const auto = useRef(null);
   const blinkMode = useRef(null);
   const blinkName = useRef(null);
@@ -351,9 +361,16 @@ export function Usami() {
   const speakingRef = useRef(false);
   const busyRef = useRef(false);
   const submitRef = useRef(null);
+  const turnId = useRef(0);
   const recognitionSupported = typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
   const synthesisSupported = typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function';
   const poke = () => auto.current?.notifyActivity();
+  const addTurn = (role, content, mode = 'text') => {
+    const value = String(content || '').trim();
+    if (!value) return;
+    turnId.current += 1;
+    setConversation(previous => [...previous, { id: turnId.current, role, content: value, mode }]);
+  };
   const reportModel = useCallback(value => {
     setReport(value);
     if (value.animations) setSelectedClip(String(Math.max(0, value.animations.findIndex(clip => clip.boneTracks && !clip.excludedTracks))));
@@ -480,6 +497,7 @@ export function Usami() {
     const minutes = Math.max(0, Math.floor((Date.now() - callStartRef.current) / 60000));
     if (minutes > 0) awardXP({ companhia: minutes });
     setCall(false);
+    setChat(true);
     setMessage(reason || 'Chamada encerrada.');
   };
   const startCall = () => {
@@ -508,6 +526,7 @@ export function Usami() {
     callActiveRef.current = true;
     callStartRef.current = Date.now();
     setCallSeconds(0);
+    setChat(false);
     setCall(true);
   };
   const submitMessage = async (content, { spoken = false } = {}) => {
@@ -515,6 +534,7 @@ export function Usami() {
     if (!value || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
+    addTurn('user', value, spoken ? 'voice' : 'text');
     awardXP(gainsFor(value, spoken));
     setMessage('Usami está pensando…');
     try {
@@ -524,7 +544,10 @@ export function Usami() {
       try { data = await response.json(); } catch { throw new Error('Resposta inválida do servidor.'); }
       if (!response.ok) throw new Error(data?.error || 'Falha na conversa.');
       if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new Error('Resposta inválida do servidor.');
-      const results = director.current?.execute(data.actions)?.results || [];
+      // Etapa 3: emoção confiável no texto aplica o engine e remove o set_expression
+      // do LLM (evita blend duplo); sem confiança, as actions seguem intactas.
+      const resolved = resolveReplyEmotion({ reply: data.reply, actions: data.actions, engine: emotionEngine.current });
+      const results = director.current?.execute(resolved.actions)?.results || [];
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
@@ -533,7 +556,8 @@ export function Usami() {
         lips.current = planVisemes(data.reply);
         lipsRate.current = quiet ? .8 : .98;
         lipsAnchor.current = performance.now();
-      } else speakReply(data.reply, styleIdForActions(data.actions));
+      } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions));
+      addTurn('assistant', data.reply, spoken ? 'voice' : 'text');
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
       if (!spoken) setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
@@ -559,23 +583,36 @@ export function Usami() {
     setMeshPrefs({});
     controller.current?.applyDefaultVisibility();
   };
-  return <main className={'stage' + (quiet ? ' companion' : '')}>
+  return <main className={'stage ' + (call ? 'voice-mode' : 'text-mode') + (quiet ? ' companion' : '') + (chat ? ' history-open' : '')}>
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} />}
-    <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? `chamada · ${formatCallTime(callSeconds)}` : busy ? 'pensando' : quiet ? 'modo companion' : 'em repouso'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
-    <div className="controls">
-      {message && <p className="notice" role="status">{message}</p>}
-      {chat && <><div className="privacy-note">Ao enviar, sua mensagem será compartilhada com a OpenRouter e o provedor selecionado.</div><form className="composer" onSubmit={sendMessage}><input value={text} onChange={event => setText(event.target.value)} placeholder="Escreva uma mensagem..." aria-label="Mensagem" maxLength={2000} /><button aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button></form></>}
-      <div className="dock">
-        <button className="round" disabled={call || !recognitionSupported} onClick={() => setMessage('Inicie uma chamada para falar com a Usami.')} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador. Use Chrome ou Edge.' : call ? 'O microfone já está ativo na chamada.' : 'Inicie uma chamada pelo botão do telefone.'} aria-label="Microfone"><Mic size={19}/></button>
-        <button className={'round' + (call ? ' hangup' : '')} onClick={() => (call ? endCall() : startCall())} aria-label={call ? 'Encerrar chamada' : 'Iniciar chamada de voz'} aria-pressed={call}>{call ? <PhoneOff size={19}/> : <Phone size={19}/>}</button>
-        <button className={'round '+(chat?'selected':'')} onClick={() => { setChat(!chat); setMessage(''); }} aria-label={chat?'Fechar campo de texto':'Abrir campo de texto'} aria-expanded={chat}><Keyboard size={19}/></button>
-        <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
-        <button className="round" onClick={() => setMessage('A reprodução de áudio ainda não está disponível.')} aria-label="Áudio indisponível"><Volume2 size={19}/></button>
-        <button className="round" onClick={() => setPanel(true)} aria-label="Detalhes do avatar"><Info size={19}/></button>
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} lips={lips} lipsAnchor={lipsAnchor} lipsRate={lipsRate} emotionEngine={emotionEngine} />}
+    <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
+    {chat && <section className="chat-history" aria-label="Histórico da conversa">
+      <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
+      <div className="chat-scroll">
+        {conversation.length ? conversation.map(turn => <div className={'chat-turn ' + turn.role} key={turn.id}><span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span><p>{turn.content}</p></div>) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
+        {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
       </div>
+    </section>}
+    <div className="controls">
+      {call && message && <p className="voice-caption" role="status">{message}</p>}
+      <div className="privacy-note">Mensagens usam os provedores configurados para responder.</div>
+      <form className="composer" onSubmit={sendMessage}>
+        <button className="composer-tool" type="button" disabled title="Envio de imagem em breve" aria-label="Enviar imagem indisponível"><ImagePlus size={18}/></button>
+        <input value={text} onChange={event => setText(event.target.value)} placeholder={call ? 'Escreva enquanto fala...' : 'Diga alguma coisa...'} aria-label="Mensagem" maxLength={2000} />
+        {!call && <button className="composer-call" type="button" onClick={startCall} disabled={!recognitionSupported} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador.' : 'Iniciar chamada de voz'} aria-label="Iniciar chamada de voz"><Phone size={18}/></button>}
+        <button className="composer-send" aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button>
+      </form>
+      {call && <div className="dock" aria-label="Controles da chamada">
+        <button className="round live" disabled={!recognitionSupported} title="Microfone ativo" aria-label="Microfone ativo"><Mic size={19}/></button>
+        <button className={'round '+(chat?'selected':'')} onClick={() => setChat(!chat)} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
+        <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
+        <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
+        <button className="round" onClick={() => setPanel(true)} aria-label="Detalhes do avatar"><Info size={19}/></button>
+      </div>}
+      {!call && !chat && <button className="history-toggle" onClick={() => setChat(true)}><MessagesSquare size={16}/> Mostrar conversa</button>}
     </div>
     {panel && <div className="scrim" onClick={() => setPanel(false)}><aside onClick={event => event.stopPropagation()}><div className="panel-head"><div><span className="eyebrow">LABORATÓRIO</span><h2>Avatar & rig</h2></div><button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button></div><p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p><input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/><button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button><label className="rig-label">Modelo local (public/)<input placeholder="/models/exemplo.vrm" value={modelPath} onChange={e => setModelPath(e.target.value)} /></label><div className="rig-actions"><button onClick={() => loadFromPath(modelPath)}>Carregar caminho</button></div><p>Arquivos grandes não cabem no upload; caminhos servidos por /public. Ex.: /models/shiro.vrm</p><h3>Inspeção do modelo</h3>{!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
       <dl>{Object.entries({Formato:report.format,Meshes:report.meshes,Bones:report.bones,Triângulos:report.triangles,Animações:report.animations.length,'Morph targets':report.morphs.length,Expressões:report.expressions.length}).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
