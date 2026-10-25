@@ -43,7 +43,9 @@ const GENERATION_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e n
 // Prompt de animação: dada a resposta da Usami e as capacidades do avatar, planeja ações.
 const ANIMATION_SYSTEM = `Você é um diretor de animação para um avatar VRM (Shiro).
 Dada a resposta de texto da Usami e a lista de capacidades do avatar, devolva SOMENTE JSON com ações para o avatar:
-{"actions":[{"type":"gesture","name":"tilt" ou "wave" ou "idle","delayMs":0},{"type":"play_clip","name":"Nome do clip","delayMs":0},{"type":"set_morph","name":"Nome do morph","value":0 a 1,"delayMs":0},{"type":"set_mesh_visible","name":"mesh","visible":true,"delayMs":0},{"type":"set_expression","name":"expressao","weight":0 a 1,"delayMs":0}]}
+{"actions":[{"type":"gesture","name":"tilt" ou "wave" ou "idle" ou "clap" ou "hand-on-hip" ou "wave2" ou "point" ou "shrug" ou "head-scratch" ou "arms-crossed" ou "facepalm" ou "cheer" ou "blow-kiss" ou "hands-on-cheeks" ou "bow","delayMs":0},{"type":"play_clip","name":"Nome do clip","delayMs":0},{"type":"set_morph","name":"Nome do morph","value":0 a 1,"delayMs":0},{"type":"set_mesh_visible","name":"mesh","visible":true,"delayMs":0},{"type":"set_expression","name":"expressao","weight":0 a 1,"delayMs":0}]}
+
+Gestos: clap=bater palmas, hand-on-hip=mão na cintura, wave2=aceno com as duas mãos, point=apontar, shrug=dar de ombros, head-scratch=coçar a cabeça, arms-crossed=braços cruzados, facepalm=mão no rosto, cheer=comemorar, blow-kiss=jogar beijo, hands-on-cheeks=mãos nas bochechas, bow=reverência. wave/tilt/idle são os discretos. Use o gesto que combina com o texto; prefira um só gesto por resposta.
 
 Cada ação pode ter delayMs (ms após o início da fala) para sincronizar com o áudio. No máximo 5 ações. Se não houver ação adequada, actions: []`;
 

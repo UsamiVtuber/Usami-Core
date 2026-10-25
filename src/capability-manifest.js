@@ -64,7 +64,10 @@ export function summarizeCapabilities(manifest) {
     morphs: (manifest.morphs ?? []).slice(0, 60).filter(name => typeof name === 'string' && name.length > 0),
     expressions: (manifest.expressions ?? []).slice(0, 20).filter(name => typeof name === 'string' && name.length > 0),
     meshes: (manifest.meshes ?? []).slice(0, 100).map(mesh => ({ name: mesh?.name, accessory: mesh?.skinned === false })).filter(mesh => typeof mesh.name === 'string' && mesh.name.length > 0),
-    gestures: [...(manifest.customTilt !== false ? ['tilt'] : []), ...(manifest.customIdle ? ['idle'] : []), ...(manifest.customWave ? ['wave'] : [])],
+    // Lista curta de propósito no prompt: os proceduralmente possíveis estão no
+    // modelo, mas o LLM só precisa dos que valem a pena citar (o director valida
+    // contra o manifesto completo, não contra este resumo).
+    gestures: [...(manifest.customTilt !== false ? ['tilt'] : []), ...(manifest.customIdle ? ['idle'] : []), ...(manifest.customWave ? ['wave'] : []), ...(manifest.gestures ?? []).filter(name => name !== 'tilt' && name !== 'idle' && name !== 'wave').slice(0, 12)],
   };
 }
 
