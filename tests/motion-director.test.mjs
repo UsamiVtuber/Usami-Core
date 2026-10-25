@@ -113,6 +113,17 @@ test('tilt indisponível quando customTilt é false', () => {
   assert.equal(result.reason, 'gesture unavailable on this model');
 });
 
+test('gestos da biblioteca: só passam os que o manifesto lista', () => {
+  const controller = makeController();
+  const director = createMotionDirector({ controller, capabilities: { ...capabilities, gestures: ['clap', 'bow'] }, now, cooldowns: { gesture: 0 } });
+  const applied = director.execute([{ type: 'gesture', name: 'clap' }]).results[0];
+  assert.deepEqual(controller.calls, [['gesture']], 'a biblioteca é chamada pelo dispatcher');
+  assert.equal(applied.applied, true);
+  assert.equal(director.execute([{ type: 'gesture', name: 'facepalm' }]).results[0].reason, 'gesture unavailable on this model', 'fora da lista do modelo');
+  assert.equal(director.execute([{ type: 'gesture', name: 'dancinha' }]).results[0].reason, 'gesture unavailable on this model', 'nem é gesto conhecido');
+  assert.deepEqual(controller.calls, [['gesture']], 'recusas não chegam ao controller');
+});
+
 test('meshes só acessório e com cooldown próprio', () => {
   const controller = makeController();
   let clock = 1000;

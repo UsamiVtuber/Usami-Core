@@ -4,7 +4,14 @@
 // misbehaving model cannot move the avatar in arbitrary ways.
 export const DEFAULT_MAX_ACTIONS = 5;
 
-const GESTURE_NAMES = ['tilt', 'wave', 'idle'];
+// Os três primeiros são da camada de gestos legado/pose; o resto vem da
+// biblioteca de gestos procedurais (vrm-gesture-library) e é roteado por
+// controller.gesture(name).
+export const GESTURE_NAMES = [
+  'tilt', 'wave', 'idle',
+  'clap', 'hand-on-hip', 'wave2', 'point', 'shrug', 'head-scratch',
+  'arms-crossed', 'facepalm', 'cheer', 'blow-kiss', 'hands-on-cheeks', 'bow',
+];
 export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
 export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, set_mesh_visible: 800, set_expression: 3000 };
 const MESH_COOLDOWN_PER_TARGET = 4000;
@@ -30,7 +37,6 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
   const accessoryNames = new Set((manifest.meshes ?? []).filter(mesh => mesh && mesh.skinned === false).map(mesh => mesh.name));
   const idleAvailable = manifest.customIdle !== false;
   const waveAvailable = manifest.customWave !== false;
-  const tiltAvailable = manifest.customTilt !== false;
 
   const verbs = new Set(DIRECTOR_VERBS);
 
@@ -54,10 +60,21 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
       }
     } else if (verb === 'gesture') {
       const name = GESTURE_NAMES.includes(action?.name) ? action.name : null;
-      const available = name === 'idle' ? idleAvailable : name === 'wave' ? waveAvailable : tiltAvailable;
-      if (!name || !available) reason = 'gesture unavailable on this model';
+      // O manifesto diz o que este modelo consegue; sem lista de gestos, vale o legado.
+      const known = new Set([
+        ...(manifest.customTilt !== false ? ['tilt'] : []),
+        ...(manifest.customWave !== false && waveAvailable ? ['wave'] : []),
+        ...(idleAvailable ? ['idle'] : []),
+        ...(Array.isArray(manifest.gestures) ? manifest.gestures : []),
+      ]);
+      if (!name || !known.has(name)) reason = 'gesture unavailable on this model';
       else {
-        applied = name === 'tilt' ? controller.gesture('tilt') === true : name === 'wave' ? controller.wave() === true : controller.idle() === true;
+        // idle e wave têm métodos próprios no controller; os demais nomes vão
+        // para o dispatcher (camada legado + biblioteca de gestos).
+        const run = name === 'wave' ? controller.wave
+          : name === 'idle' ? controller.idle
+          : () => controller.gesture?.(name);
+        applied = run?.() === true;
         if (!applied) reason = 'model refused';
       }
     } else if (verb === 'set_morph') {

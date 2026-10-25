@@ -241,3 +241,53 @@ test('clear restaura TODOS os nós à base exata e zera o estado', () => {
     assert.deepEqual(snapshot(humanoid.nodes[name]), rotation, `${name} continua na base após update`);
   }
 });
+
+// — Etapa 5: a camada delega os braços à biblioteca de gestos —
+
+test('gestureNames e available expõem a biblioteca para o painel e para o director', () => {
+  const layer = createVrmGestureLayer({ humanoid: makeHumanoid(), now: makeClock().now });
+  assert.ok(layer.gestureNames.includes('clap'));
+  assert.ok(!layer.gestureNames.includes('bow'), 'sem espinha no rig, o bow some da lista');
+  assert.equal(layer.available['hand-on-hip'], true);
+  assert.equal(layer.gesture('bow'), false);
+  assert.equal(layer.gesture('dancinha'), false);
+});
+
+test('gesto da biblioteca assume o braço e o aceno legado espera a vez', () => {
+  const humanoid = makeHumanoid();
+  const clock = makeClock();
+  const layer = createVrmGestureLayer({ humanoid, now: clock.now });
+  const expected = snapshotAll(humanoid);
+  const upper = humanoid.nodes.rightUpperArm;
+  assert.equal(layer.gesture('clap'), true);
+  assert.equal(layer.active().gesture, 'clap');
+  assert.equal(layer.wave(), false, 'sem dois donos para o mesmo braço');
+  assert.equal(layer.gesture('wave'), false);
+  clock.advance(1000); // platô do clap
+  layer.update();
+  assert.ok(Math.abs(upper.rotation.x - (expected.rightUpperArm.x - 0.30)) < 1e-9, 'x vai ao alvo do gesto');
+  assert.ok(Math.abs(upper.rotation.z - (expected.rightUpperArm.z - 0.18)) < 1e-9, 'z vai ao alvo do gesto');
+  layer.stopGesture();
+  clock.advance(50);
+  layer.update();
+  assert.equal(layer.active().gesture, null);
+  assert.deepEqual(snapshot(upper), expected.rightUpperArm, 'stopGesture devolve o braço à base');
+  assert.equal(layer.wave(), true, 'liberado, o legado pode tocar de novo');
+});
+
+test('head soma a pose emocional e o offset do gesto no mesmo update', () => {
+  const humanoid = makeHumanoid();
+  const clock = makeClock();
+  const layer = createVrmGestureLayer({ humanoid, now: clock.now });
+  const head = humanoid.nodes.head;
+  const expected = snapshot(head);
+  layer.setEmotion('sad', 1, 100000);
+  assert.equal(layer.gesture('point'), true);
+  settle(layer, clock, 24, 50); // 1200ms: rampa da pose convergiu, point no platô
+  assert.ok(Math.abs(head.rotation.x - (expected.x + 0.16)) < 0.005, 'pose emocional em sad');
+  assert.ok(Math.abs(head.rotation.y - (expected.y - 0.08)) < 1e-9, 'o y vem do gesto via headOffsets()');
+  clock.advance(2000); // point acabou (2600ms)
+  layer.update();
+  assert.equal(head.rotation.y, expected.y, 'gesto encerrado devolve o y');
+  assert.ok(Math.abs(head.rotation.x - (expected.x + 0.16)) < 0.005, 'a pose continua vigente');
+});

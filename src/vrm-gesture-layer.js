@@ -5,6 +5,14 @@
 // ou o blink, então as camadas compõem naturalmente.
 // Toda escrita é `base + offset` (base capturada na construção), nunca rotação
 // absoluta pura; em repouso os offsets são zero e a escrita é idempotente.
+//
+// A biblioteca de gestos (etapa 5) assume os braços, ombros, quadril e os eixos
+// x de spine/neck; aqui ficam o aceno legado de um braço, o tilt e a pose
+// emocional da cabeça. Os offsets de head pedidos por um gesto são somados aos
+// da pose, e a biblioteca roda depois do sway, escrevendo só nos eixos que o
+// sway não usa — assim as camadas compõem em vez de se sobrescreverem.
+
+import { createGestureLibrary } from './vrm-gesture-library.js';
 
 // amplitudes preliminares, ajustar visualmente
 export const EMOTION_POSES = {
@@ -63,11 +71,13 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
   }
 
   // Capacidades congeladas: o rig não muda depois do load.
+  const library = createGestureLibrary({ humanoid, now });
   const available = Object.freeze({
     wave: ARM_BONES.every(name => nodes[name]),
     tilt: Boolean(nodes.head),
     idle: Boolean(humanoid),
     emotions: Boolean(nodes.head),
+    ...Object.fromEntries(Object.entries(library.available).map(([name, ok]) => [name, ok && Boolean(humanoid)])),
   });
 
   // dt do update: diferença entre chamadas; o primeiro update após um set conta
@@ -82,7 +92,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
   };
 
   function wave() {
-    if (!available.wave || waveState.playing) return false;
+    if (!available.wave || waveState.playing || library.active().name) return false;
     waveState.playing = true;
     waveState.startedAt = now();
     markClock();
@@ -98,12 +108,27 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
   }
 
   // Dispatcher usado pelo controller.gesture(): 'idle' é no-op de propósito —
-  // o sway já dá vida contínua ao avatar.
+  // o sway já dá vida contínua ao avatar. Os demais nomes vão para a biblioteca.
   function gesture(name) {
     if (name === 'wave') return wave();
     if (name === 'tilt') return tilt();
     if (name === 'idle') return available.idle;
+    if (library.play(name)) {
+      // Um gesto de braço novo encerra o aceno legado: os dois escrevem nos
+      // mesmos ossos e não há blend entre as camadas.
+      waveState.playing = false;
+      waveState.startedAt = 0;
+      return true;
+    }
     return false;
+  }
+
+  // Encerra o gesto em curso (inclusive os de pose mantida) sem tocar na pose
+  // emocional nem no tilt.
+  function stopGesture() {
+    waveState.playing = false;
+    waveState.startedAt = 0;
+    return library.stop();
   }
 
   function setEmotion(label, intensity = 1, durationMs = POSE.defaultDurationMs) {
@@ -167,18 +192,27 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
       }
     }
 
+    // — biblioteca: escreve braços/ombros/quadril/espinha antes da cabeça —
+    library.update();
+    const gestureHead = library.headOffsets();
+    const legacyArm = !library.active().name;
+
     // — escrita: TODOS os nós que possui, sempre base + offset (idempotente) —
-    if (nodes.rightUpperArm) nodes.rightUpperArm.rotation.z = base.rightUpperArm.z - WAVE.upperArmZ * waveEnv;
-    if (nodes.rightLowerArm) nodes.rightLowerArm.rotation.z = base.rightLowerArm.z - WAVE.lowerArmZ * waveEnv;
-    if (nodes.rightHand) nodes.rightHand.rotation.z = base.rightHand.z + Math.sin((waveElapsedMs / 1000) * WAVE.handSpeed) * WAVE.handAmp * waveEnv;
+    if (legacyArm) {
+      if (nodes.rightUpperArm) nodes.rightUpperArm.rotation.z = base.rightUpperArm.z - WAVE.upperArmZ * waveEnv;
+      if (nodes.rightLowerArm) nodes.rightLowerArm.rotation.z = base.rightLowerArm.z - WAVE.lowerArmZ * waveEnv;
+      if (nodes.rightHand) nodes.rightHand.rotation.z = base.rightHand.z + Math.sin((waveElapsedMs / 1000) * WAVE.handSpeed) * WAVE.handAmp * waveEnv;
+    }
     if (nodes.head) {
-      // head.x é só da pose; head.z soma pose + tilt (composição aditiva interna).
-      nodes.head.rotation.x = base.head.x + poseState.current.x;
-      nodes.head.rotation.z = base.head.z + poseState.current.z + TILT.amp * tiltEnv;
+      // head.x é só da pose + gesto; head.z soma pose + tilt + gesto.
+      nodes.head.rotation.x = base.head.x + poseState.current.x + gestureHead.x;
+      nodes.head.rotation.z = base.head.z + poseState.current.z + TILT.amp * tiltEnv + gestureHead.z;
+      nodes.head.rotation.y = base.head.y + gestureHead.y;
     }
   }
 
   function clear() {
+    library.clear();
     for (const name of LAYER_BONES) {
       if (!nodes[name]) continue;
       nodes[name].rotation.x = base[name].x;
@@ -202,6 +236,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     return Object.freeze({
       wave: waveState.playing,
       tilt: tiltState.playing,
+      gesture: library.active().name,
       emotion: Object.freeze({
         label: poseState.label,
         intensity: poseState.intensity,
@@ -212,5 +247,5 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     });
   }
 
-  return { available, wave, tilt, gesture, setEmotion, update, clear, active };
+  return { available, gestureNames: library.names, wave, tilt, gesture, stopGesture, setEmotion, update, clear, active };
 }
