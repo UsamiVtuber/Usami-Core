@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
+import { GESTURE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { createMemoryStore } from './src/memory-store.js';
@@ -18,7 +19,13 @@ import { classifyUserMessage, generateReply, planAnimation } from './src/llm-rou
 import { readRagContext } from './src/rag.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
-export const USE_NVIDIA = (process.env.USE_NVIDIA === 'true') || Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
+// USE_NVIDIA=false desliga a rota NVIDIA mesmo com chave presente (isolamento de testes);
+// ausente/true: auto-detecção (env direto ou .env do projeto). Avaliado por chamada.
+export function useNvidia() {
+  if (process.env.USE_NVIDIA === 'false') return false;
+  return (process.env.USE_NVIDIA === 'true') || Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
+}
+const USE_NVIDIA = useNvidia();
 
 // Verifica se a chave NVIDIA está configurada (env ou A:\.env), sem fazer chamada de API.
 function nvidiaKeyConfigured() {
@@ -43,7 +50,7 @@ if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
   }
 }
 
-const DEFAULT_SYSTEM = 'Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"tilt" ou "wave" ou "idle"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false}]}. Actions é opcional e pode ser vazio; no máximo 5 ações.'.trim();
+const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false}]}. Actions é opcional e pode ser vazio; no máximo 5 ações.`.trim();
 
 const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 
@@ -73,6 +80,7 @@ function isValidN8nCommand(cmd) {
   if (!VALID_COMMAND_TYPES.has(cmd.type)) return false;
   if (cmd.type === 'say' && typeof cmd.message !== 'string') return false;
   if (['gesture', 'set_expression', 'set_morph', 'set_mesh_visible'].includes(cmd.type) && typeof cmd.name !== 'string') return false;
+  if (cmd.type === 'gesture' && !GESTURE_NAMES.includes(cmd.name)) return false;
   return true;
 }
 
@@ -181,7 +189,7 @@ export function sanitizeCapabilities(input) {
     morphs: names(input.morphs, 60),
     meshes,
     expressions: names(input.expressions, 20),
-    gestures: names(input.gestures, 5, ['tilt', 'idle', 'wave']),
+    gestures: names(input.gestures, 20, ['tilt', 'idle', 'wave']),
   };
 }
 
@@ -355,7 +363,7 @@ export function createChatHandler(options = {}) {
     let parsed;
     let classification = null;
 
-    if (USE_NVIDIA) {
+    if (useNvidia()) {
       // Fluxo NVIDIA: 3 modelos com rate limit global de 40 req/min
       try {
         // 1) Classificação da frase do usuário (modelo leve)

@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } from '../server.mjs';
+
+// Isolamento: proíbe a rota NVIDIA (rede real) nos testes; força o caminho
+// OpenRouter onde fetchImpl/getKey são injetados.
+process.env.USE_NVIDIA = 'false';
+
+const { createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } = await import('../server.mjs');
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -161,11 +166,15 @@ test('handler: 400 mensagem inválida', async () => {
   assert.equal(res.statusCode, 400);
 });
 
-test('handler: 503 sem chave', async () => {
-  const handler = createChatHandler({ getKey: async () => null, fetchImpl: async () => jsonResponse('') });
+test('handler: modo offline quando não há chave de LLM', async () => {
+  const handler = createChatHandler({ getKey: async () => null, fetchImpl: async () => { throw new Error('não deve chamar rede no modo offline'); } });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
-  assert.equal(res.statusCode, 503);
+  assert.equal(res.statusCode, 200);
+  const data = JSON.parse(res.body);
+  assert.equal(data.source, 'offline');
+  assert.ok(typeof data.reply === 'string' && data.reply.length > 0);
+  assert.deepEqual(data.actions, []);
 });
 
 test('handler: 200 com resposta válida', async () => {
@@ -222,10 +231,21 @@ test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
 });
 
 test('handler: 502 quando provedor retorna formato inválido', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('{"bad":') });
+  // Conteúdo vazio não tem como virar reply — 502. Texto livre (até JSON
+  // quebrado) é tolerado de propósito pelo parseProviderRaw.
+  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('   ') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 502);
+});
+
+test('parseProviderRaw: texto livre vira reply; vazio ou gigante é 502', () => {
+  assert.equal(parseProviderRaw('oi!').ok, true);
+  assert.equal(parseProviderRaw('oi!').reply, 'oi!');
+  assert.equal(parseProviderRaw('{"bad":').reply, '{"bad":');
+  assert.equal(parseProviderRaw('   ').ok, false);
+  assert.equal(parseProviderRaw('x'.repeat(10001)).ok, false);
+  assert.equal(parseProviderRaw(null).ok, false);
 });
 
 test('handler: timeout vira 502', async () => {

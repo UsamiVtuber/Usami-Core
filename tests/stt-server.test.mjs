@@ -77,7 +77,7 @@ test('handler: 200 transcreve o áudio e devolve { text } com temp criado e apag
     const handler = createSttHandler({ transcribeImpl, tmpDir: dir, getConfig: async () => ({ whisperModel: 'tiny' }) });
     const res = await call(handler, { body: audioBody() });
     assert.equal(res.statusCode, 200);
-    assert.equal(res.headers['Content-Type'], 'application/json');
+    assert.equal(res.headers['Content-Type'], 'application/json; charset=utf-8');
     assert.equal(res.headers['Cache-Control'], 'no-store');
     assert.deepEqual(JSON.parse(res.body), { text: 'olá mundo' });
     assert.equal(seen.length, 1);
