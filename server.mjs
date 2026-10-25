@@ -18,13 +18,13 @@ import { classifyUserMessage, generateReply, planAnimation } from './src/llm-rou
 import { readRagContext } from './src/rag.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
-export const USE_NVIDIA = process.env.USE_NVIDIA === 'true' && Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
+export const USE_NVIDIA = (process.env.USE_NVIDIA === 'true') || Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
 
 // Verifica se a chave NVIDIA está configurada (env ou A:\.env), sem fazer chamada de API.
 function nvidiaKeyConfigured() {
   if (process.env.NVIDIA_API_KEY) return true;
   try {
-    const text = readFileSync('A:\\.env', 'utf8');
+    const text = readFileSync('A:\\Usami Project\\.env', 'utf8');
     return /^NVIDIA_API_KEY\s*=/m.test(text);
   } catch {
     return false;
@@ -35,7 +35,7 @@ function nvidiaKeyConfigured() {
 // nvidia-client.js (que lê process.env.NVIDIA_API_KEY) a encontre.
 if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
   try {
-    const text = readFileSync('A:\\.env', 'utf8');
+    const text = readFileSync('A:\\Usami Project\\.env', 'utf8');
     const match = text.match(/^NVIDIA_API_KEY\s*=\s*(.+)$/m);
     if (match) process.env.NVIDIA_API_KEY = match[1].trim();
   } catch {
@@ -263,9 +263,22 @@ export function parseProviderRaw(raw) {
 export function createChatHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
-    const envPath = options.envPath || process.env.USAMI_KEYS_FILE || 'A:/Lira/LiraVtuber/.env';
-    const parsed = parseEnv(await readFile(envPath, 'utf8'));
-    return parsed.OPENROUTER_API_KEY || null;
+    // Tenta múltiplos arquivos .env candidatos para a chave OpenRouter.
+    const candidates = [
+      options.envPath,
+      process.env.USAMI_KEYS_FILE,
+      'A:/Usami Project/.env',
+      'A:/Lira/LiraVtuber/.env',
+    ].filter(Boolean);
+    for (const envPath of candidates) {
+      try {
+        const parsed = parseEnv(await readFile(envPath, 'utf8'));
+        if (parsed.OPENROUTER_API_KEY) return parsed.OPENROUTER_API_KEY;
+      } catch {
+        // arquivo ausente ou ilegível → tenta o próximo
+      }
+    }
+    return null;
   });
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const model = options.model || process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
@@ -274,7 +287,7 @@ export function createChatHandler(options = {}) {
 
   return async function handleChat(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -484,7 +497,7 @@ export function createChatHandler(options = {}) {
       source: parsed.source,
     });
 
-    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, ...(affinityPayload || {}) });
+    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source, ...(affinityPayload || {}) });
   };
 }
 
@@ -494,7 +507,7 @@ export function createFlowChatHandler(options = {}) {
 
   return async function handleFlowChat(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -564,7 +577,7 @@ export function createN8nCommandHandler(options = {}) {
 
   return async function handleN8nCommand(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -644,7 +657,7 @@ export function createRagContextHandler(options = {}) {
 
   return async function handleRagContext(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -780,7 +793,7 @@ export function createTtsHandler(options = {}) {
 
   return async function handleTts(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -1017,7 +1030,7 @@ export function createSttHandler(options = {}) {
 
   return async function handleStt(req, res) {
     const send = (status, data) => {
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
 
@@ -1112,7 +1125,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
   server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
