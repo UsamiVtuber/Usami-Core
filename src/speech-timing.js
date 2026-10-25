@@ -14,15 +14,24 @@ export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
 export function createSpeechScheduler({ now = () => performance.now() } = {}) {
   const timers = [];
   let endedHandler = null;
+  let boundAudio = null;      // elemento de áudio com listener anexado (p/ remover em cancel)
   let durationCheckTimer = null;
   let durationTimeout = null;
+
+  function detachEnded() {
+    if (boundAudio && endedHandler) {
+      try { boundAudio.removeEventListener('ended', endedHandler); } catch {}
+    }
+    boundAudio = null;
+    endedHandler = null;
+  }
 
   function cancel() {
     timers.forEach(clearTimeout);
     timers.length = 0;
     if (durationCheckTimer) { clearInterval(durationCheckTimer); durationCheckTimer = null; }
     if (durationTimeout) { clearTimeout(durationTimeout); durationTimeout = null; }
-    endedHandler = null;
+    detachEnded();
   }
 
   function schedule({ actions, audio, onAction, onEnd }) {
@@ -40,6 +49,7 @@ export function createSpeechScheduler({ now = () => performance.now() } = {}) {
           if (typeof onEnd === 'function') onEnd(action);
         }
       };
+      boundAudio = audio;
       audio.addEventListener('ended', endedHandler, { once: true });
 
       // Para 'middle', precisamos da duração. Polling curto até loadedmetadata.

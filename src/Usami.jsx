@@ -549,7 +549,7 @@ export function Usami() {
     if (content.length > 120 || duringCall) gains.companhia = 2;
     return gains;
   };
-  const speakSpoken = reply => {
+  const speakSpoken = (reply, timedActions = []) => {
     // Mute: skip browser synthesis too — the caller keeps animating the lips.
     if (!synthesisSupported || voiceOffRef.current) return;
     const synthesis = window.speechSynthesis;
@@ -561,9 +561,26 @@ export function Usami() {
     if (voice) utterance.voice = voice;
     utterance.rate = quiet ? .8 : .98;
     utterance.pitch = quiet ? .95 : 1;
-    utterance.onstart = () => { speakingRef.current = true; };
+    utterance.onstart = () => {
+      speakingRef.current = true;
+      // Frente 2: ações com timing no modo chamada — start executa agora,
+      // delayMs via setTimeout, end via onend da utterance (middle não tem
+      // duração conhecida no speechSynthesis).
+      for (const action of timedActions ?? []) {
+        if (action?.trigger === 'start' || (!action?.trigger && !action?.delayMs)) {
+          director.current?.execute([action]);
+        } else if (action?.delayMs && action.delayMs > 0) {
+          setTimeout(() => director.current?.execute([action]), action.delayMs);
+        }
+      }
+    };
     const releaseMic = () => { speakingRef.current = false; };
-    utterance.onend = releaseMic;
+    utterance.onend = () => {
+      releaseMic();
+      for (const action of timedActions ?? []) {
+        if (action?.trigger === 'end') director.current?.execute([action]);
+      }
+    };
     utterance.onerror = releaseMic;
     synthesis.speak(utterance);
   };
@@ -656,8 +673,8 @@ export function Usami() {
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
       if (spoken) {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
-        // HTMLAudioElement) — mantém o fallback mudo decidido na etapa 5.
-        speakSpoken(data.reply);
+        // HTMLAudioElement) — timing via utterance.onend / setTimeout.
+        speakSpoken(data.reply, timedActions);
       } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions);
       addTurn('assistant', data.reply, spoken ? 'voice' : 'text');
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));

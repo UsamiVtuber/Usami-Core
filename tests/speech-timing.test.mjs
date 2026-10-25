@@ -14,6 +14,9 @@ function makeFakeAudio({ duration = null, ended = false } = {}) {
       if (!listeners[event]) return;
       listeners[event] = listeners[event].filter(h => h !== handler);
     },
+    listenerCount(event) {
+      return (listeners[event] || []).length;
+    },
     dispatchEvent(event) {
       const handlers = listeners[event.type] || [];
       for (const h of handlers) h(event);
@@ -119,6 +122,19 @@ test('speech-timing: trigger middle executa na metade da duração', () => {
   audio.dispatchEvent({ type: 'loadedmetadata' });
   assert.equal(executed.length, 0); // ainda não, setTimeout não foi acelerado
   scheduler.cancel();
+});
+
+test('speech-timing: cancel remove o listener de ended do áudio', () => {
+  const scheduler = createSpeechScheduler();
+  const audio = makeFakeAudio();
+  scheduler.schedule({
+    actions: [{ type: 'gesture', name: 'wave', trigger: 'end' }],
+    audio,
+    onAction: () => {},
+  });
+  assert.equal(audio.listenerCount('ended'), 1, 'listener anexado após schedule');
+  scheduler.cancel();
+  assert.equal(audio.listenerCount('ended'), 0, 'listener removido após cancel');
 });
 
 test('speech-timing: cancel limpa agendamentos pendentes', () => {
