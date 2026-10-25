@@ -16,7 +16,7 @@
 import { classifyEmotion } from './emotion-classifier.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 
-const DEFAULT_CLASSIFICATION_MODEL = 'nvidia/nemotron-3-nano-4b-v1';
+const DEFAULT_CLASSIFICATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_GENERATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_ANIMATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 
@@ -50,9 +50,8 @@ Cada ação pode ter delayMs (ms após o início da fala) para sincronizar com o
 // --- Classificação (frase do usuário) -------------------------------------
 
 export async function classifyUserMessage(text, { classifier = classifyEmotion } = {}) {
-  // Se não houver chave NVIDIA, usa o classificador determinístico local.
-  const hasKey = process.env.NVIDIA_API_KEY || await keyExists();
-  if (!hasKey) {
+  // Se não houver chave NVIDIA configurada, usa o classificador determinístico local.
+  if (!process.env.NVIDIA_API_KEY) {
     const result = classifier(text) || { label: 'neutral', intensity: 0, confidence: 0 };
     return {
       emotion: result.label,
@@ -98,8 +97,7 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
 // --- Geração de texto (resposta da Usami) ---------------------------------
 
 export async function generateReply(systemPrompt, userMessage, { temperature = 0.7 } = {}) {
-  const hasKey = process.env.NVIDIA_API_KEY || await keyExists();
-  if (!hasKey) throw new Error('NVIDIA_API_KEY não configurada');
+  if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -117,8 +115,7 @@ export async function generateReply(systemPrompt, userMessage, { temperature = 0
 // --- Animação (planeja ações com base na resposta) -------------------------
 
 export async function planAnimation(reply, capabilities, { temperature = 0.3 } = {}) {
-  const hasKey = process.env.NVIDIA_API_KEY || await keyExists();
-  if (!hasKey) return { actions: [], source: 'no-nvidia-key' };
+  if (!process.env.NVIDIA_API_KEY) return { actions: [], source: 'no-nvidia-key' };
 
   const capsSummary = capabilities ? JSON.stringify(capabilities) : '{}';
   const messages = [

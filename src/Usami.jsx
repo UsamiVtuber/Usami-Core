@@ -18,6 +18,8 @@ import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { createAudioLipSync } from './audio-lipsync';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
+import { classifyFacs } from './facs-classifier.js';
+import { applyFacsToDriver } from './facs-apply.js';
 import './usami.css';
 
 // Viseme morph names exposed by the VRM avatar (capital I).

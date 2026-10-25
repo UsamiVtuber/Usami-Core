@@ -8,17 +8,17 @@
 // A API é compatível com OpenAI (POST /v1/chat/completions), então o
 // corpo da requisição segue o mesmo esquema do OpenRouter.
 
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
-const DEFAULT_ENV_FILE = 'A:\\.env';
+const DEFAULT_ENV_FILE = 'A:/.env';
 const DEFAULT_RATE_LIMIT = 40;    // requisições por minuto
 const DEFAULT_RATE_WINDOW_MS = 60 * 1000;
 
 let apiKeyCache = null;
 let envFileCache = null;
 
-async function resolveApiKey() {
+function resolveApiKeySync() {
   if (apiKeyCache) return apiKeyCache;
   // 1) variável de ambiente
   if (process.env.NVIDIA_API_KEY) {
@@ -29,15 +29,20 @@ async function resolveApiKey() {
   const envFile = process.env.NVIDIA_ENV_FILE || DEFAULT_ENV_FILE;
   if (envFile === envFileCache && apiKeyCache) return apiKeyCache;
   try {
-    const text = await readFile(envFile, 'utf8');
+    const text = readFileSync(envFile, 'utf8');
     const parsed = parseEnvText(text);
     apiKeyCache = parsed.NVIDIA_API_KEY || null;
     envFileCache = envFile;
     return apiKeyCache;
-  } catch {
+  } catch (error) {
+    console.warn('[nvidia-client] não foi possível ler', envFile, ':', error.message);
     apiKeyCache = null;
     return null;
   }
+}
+
+async function resolveApiKey() {
+  return resolveApiKeySync();
 }
 
 function parseEnvText(text) {

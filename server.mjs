@@ -17,7 +17,7 @@ import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 import { classifyUserMessage, generateReply, planAnimation } from './src/llm-router.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
-export const USE_NVIDIA = process.env.USE_NVIDIA !== 'false' && Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
+export const USE_NVIDIA = process.env.USE_NVIDIA === 'true' && Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
 
 // Verifica se a chave NVIDIA está configurada (env ou A:\.env), sem fazer chamada de API.
 function nvidiaKeyConfigured() {
@@ -27,6 +27,18 @@ function nvidiaKeyConfigured() {
     return /^NVIDIA_API_KEY\s*=/m.test(text);
   } catch {
     return false;
+  }
+}
+
+// Exporta a chave NVIDIA para o ambiente do processo, para que o
+// nvidia-client.js (que lê process.env.NVIDIA_API_KEY) a encontre.
+if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
+  try {
+    const text = readFileSync('A:\\.env', 'utf8');
+    const match = text.match(/^NVIDIA_API_KEY\s*=\s*(.+)$/m);
+    if (match) process.env.NVIDIA_API_KEY = match[1].trim();
+  } catch {
+    // falha silenciosa — o nvidia-client já avisa no console
   }
 }
 
@@ -228,10 +240,18 @@ export function parseProviderRaw(raw) {
   try {
     result = JSON.parse(raw.trim().replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, ''));
   } catch {
-    if (/^[\[{]/.test(raw.trim()) || raw.length > 2000) {
-      return { ok: false, status: 502, error: 'O modelo retornou um formato inválido. Tente novamente.' };
+    // Se a resposta parece JSON de erro ({"error": ...}), tenta extrair a mensagem
+    const trimmed = raw.trim();
+    if (/^[{[]/.test(trimmed)) {
+      try {
+        const errorJson = JSON.parse(trimmed);
+        if (errorJson?.error?.message) {
+          return { ok: false, status: 502, error: errorJson.error.message };
+        }
+      } catch {}
     }
-    result = { reply: raw.trim(), gesture: 'neutral' };
+    // Caso contrário, trata o texto bruto como resposta livre
+    result = { reply: trimmed, gesture: 'neutral' };
   }
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
@@ -345,43 +365,64 @@ export function createChatHandler(options = {}) {
         return send(502, { error: 'Não foi possível acessar a configuração.' });
       }
       if (!key) {
-        return send(503, { error: 'Chave OpenRouter não configurada.' });
-      }
+        // Sem nenhuma chave: resposta offline simples baseada no classificador local
+        classification = await classifyUserMessage(parsedBody.message);
+        const offlineReplies = {
+          neutral: 'Oi! Estou aqui, mas ainda não configurei uma chave de LLM. Quer conversar mesmo assim?',
+          happy: 'Oi! Estou bem feliz de te ver! 😊',
+          sad: 'Oi... estou um pouco triste hoje. Você quer conversar sobre algo?',
+          angry: 'Oi. Não estou no meu melhor momento, mas estou aqui.',
+          shy: 'O-Oi... *corada*',
+          soft: 'Oi, seja bem-vindo. Estou por aqui.',
+          surprised: 'O-Oi! Não esperava você!',
+          doubtful: 'Oi... você tem certeza que quer conversar comigo?',
+        };
+        const emotion = classification?.emotion || 'neutral';
+        parsed = {
+          ok: true,
+          reply: offlineReplies[emotion] || offlineReplies.neutral,
+          gesture: 'neutral',
+          actions: [],
+          remember: null,
+          classification,
+          source: 'offline',
+        };
+      } else {
+        let response;
+        try {
+          response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, max_tokens: 320, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
+            signal: AbortSignal.timeout(45000),
+          });
+        } catch (error) {
+          return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
+        }
 
-      let response;
-      try {
-        response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, max_tokens: 320, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
-          signal: AbortSignal.timeout(45000),
-        });
-      } catch (error) {
-        return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
-      }
+        if (!response || !response.ok) {
+          return send(502, { error: 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').' });
+        }
 
-      if (!response || !response.ok) {
-        return send(502, { error: 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').' });
-      }
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          return send(502, { error: 'Resposta inválida do provedor.' });
+        }
 
-      let data;
-      try {
-        data = await response.json();
-      } catch {
-        return send(502, { error: 'Resposta inválida do provedor.' });
-      }
+        const raw = data?.choices?.[0]?.message?.content;
+        const parsedRouter = parseProviderRaw(raw);
+        if (!parsedRouter.ok) {
+          return send(parsedRouter.status, { error: parsedRouter.error });
+        }
 
-      const raw = data?.choices?.[0]?.message?.content;
-      const parsedRouter = parseProviderRaw(raw);
-      if (!parsedRouter.ok) {
-        return send(parsedRouter.status, { error: parsedRouter.error });
+        parsed = {
+          ...parsedRouter,
+          classification,
+          source: 'openrouter',
+        };
       }
-
-      parsed = {
-        ...parsedRouter,
-        classification,
-        source: 'openrouter',
-      };
     }
 
     // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
