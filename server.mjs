@@ -21,6 +21,7 @@ const DEFAULT_SYSTEM = 'Você é Usami, uma companion acolhedora, curiosa e natu
 const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 
 const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
+export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
 
 // Heurística do "remember": sinais de fato duradouro → núcleo; o resto é recente.
 const DURABLE_FACT = /\b(anivers[áa]rio|gosta|tem|nome)\b|\b\d{1,2}\/\d{1,2}\b/i;
@@ -117,6 +118,15 @@ export function sanitizeActions(raw) {
     if (action.type === 'set_morph') base.value = action.value;
     if (action.type === 'set_mesh_visible') base.visible = action.visible;
     if (action.type === 'set_expression') base.weight = action.weight;
+    // Timing por frase: delayMs (ms após o início da fala) e trigger
+    // ('start' | 'middle' | 'end') são metadados do cliente, preservados
+    // para agendamento sincronizado com o áudio TTS.
+    if (typeof action.delayMs === 'number' && Number.isFinite(action.delayMs) && action.delayMs >= 0) {
+      base.delayMs = Math.round(action.delayMs);
+    }
+    if (SPEECH_TRIGGERS.includes(action.trigger)) {
+      base.trigger = action.trigger;
+    }
     return base;
   });
 }

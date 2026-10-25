@@ -17,6 +17,7 @@ import { createVrmIdleSway } from './vrm-idle-sway';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { createAudioLipSync } from './audio-lipsync';
 import { curateExpressions, labelExpression } from './expressions-catalog';
+import { createSpeechScheduler } from './speech-timing';
 import './usami.css';
 
 // Viseme morph names exposed by the VRM avatar (capital I).
@@ -406,6 +407,8 @@ export function Usami() {
   const audioLipSync = useRef(null);
   const ttsAudio = useRef(null);
   const expressionDriverRef = useRef(null);
+  const speechScheduler = useRef(null);
+  if (!speechScheduler.current) speechScheduler.current = createSpeechScheduler();
   const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
   const callActiveRef = useRef(false);
@@ -490,7 +493,7 @@ export function Usami() {
       if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     }
   };
-  const speakReply = async (reply, styleId = 'neutral') => {
+  const speakReply = async (reply, styleId = 'neutral', timedActions = []) => {
     // Mute: nunca pede /api/tts — a boca fica fechada (fallback mudo), o mesmo
     // comportamento do catch abaixo quando o áudio não chega.
     if (voiceOffRef.current) return;
@@ -510,6 +513,18 @@ export function Usami() {
       // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
       // áudio pronto. Sem duração do servidor, sem timeline textual.
       audioLipSync.current?.attach(audio);
+      // Frente 2: agendar ações com timing para disparar durante a fala
+      // (start/middle/end ou delayMs). O scheduler gerencia setTimeout e
+      // audio.onended; cancela qualquer agendamento anterior.
+      if (timedActions.length > 0 && speechScheduler.current) {
+        speechScheduler.current.schedule({
+          actions: timedActions,
+          audio,
+          onAction: (action) => {
+            director.current?.execute([action]);
+          },
+        });
+      }
     } catch {
       // Fallback mudo (áudio indisponível): a boca apenas fica fechada.
       audioLipSync.current?.clear();
@@ -595,6 +610,18 @@ export function Usami() {
     setChat(false);
     setCall(true);
   };
+  // Frente 2: particiona actions em imediatas (executar agora) e timed
+  // (disparar durante a fala via delayMs ou trigger 'start'/'middle'/'end').
+  const partitionByTiming = (actions) => {
+    const immediate = [];
+    const timed = [];
+    for (const action of actions ?? []) {
+      if (action?.trigger || action?.delayMs) timed.push(action);
+      else immediate.push(action);
+    }
+    return [immediate, timed];
+  };
+
   const submitMessage = async (content, { spoken = false } = {}) => {
     const value = String(content || '').trim();
     if (!value || busyRef.current) return;
@@ -622,7 +649,8 @@ export function Usami() {
       // Etapa 4: emoção aplicada também vira pose de corpo (head) com TTL; sem
       // confiança, a pose vigente decai sozinha até neutral — nada a fazer aqui.
       if (resolved.applied && resolved.emotion) vrmGestures.current?.setEmotion(resolved.emotion.label, resolved.emotion.intensity, 4500);
-      const results = director.current?.execute(resolved.actions)?.results || [];
+      const [immediateActions, timedActions] = partitionByTiming(resolved.actions);
+      const results = director.current?.execute(immediateActions)?.results || [];
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
@@ -630,7 +658,7 @@ export function Usami() {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
         // HTMLAudioElement) — mantém o fallback mudo decidido na etapa 5.
         speakSpoken(data.reply);
-      } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions));
+      } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions);
       addTurn('assistant', data.reply, spoken ? 'voice' : 'text');
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
       if (!spoken) setText('');
