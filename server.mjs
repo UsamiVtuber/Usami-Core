@@ -15,6 +15,7 @@ import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 import { classifyUserMessage, generateReply, planAnimation } from './src/llm-router.js';
+import { readRagContext } from './src/rag.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 export const USE_NVIDIA = process.env.USE_NVIDIA === 'true' && Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
@@ -315,7 +316,7 @@ export function createChatHandler(options = {}) {
     const today = new Date().toISOString().slice(0, 10);
     const hour = new Date().getHours();
     const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
-    const system = buildPersona({
+    let system = buildPersona({
       affinity: mem.affinity.score,
       coreFacts: mem.coreFacts,
       recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
@@ -324,6 +325,20 @@ export function createChatHandler(options = {}) {
       date: today,
       timeOfDay,
     });
+
+    // RAG: injeta contexto recente do vault Obsidian (respostas gravadas
+    // pelo workflow n8n) no system prompt, se a Usami tiver permissão para
+    // ler o vault.
+    let ragContext = null;
+    try {
+      ragContext = await readRagContext();
+    } catch {
+      ragContext = null;
+    }
+    if (ragContext) {
+      system += '\n\n--- Contexto recente do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+    }
+
     let parsed;
     let classification = null;
 
@@ -618,6 +633,53 @@ export function createN8nCommandHandler(options = {}) {
     }
 
     return send(404, { error: 'Não encontrado.' });
+  };
+}
+
+// --- RAG: contexto do vault Obsidian ---------------------------------------
+
+export function createRagContextHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const vaultRelative = options.vaultRelative || process.env.USAMI_RAG_VAULT;
+
+  return async function handleRagContext(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    if (req.method !== 'GET' || req.url !== '/api/rag/context') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const maxFiles = Number(req.headers['x-rag-max-files'] || 10);
+    const maxCharsPerFile = Number(req.headers['x-rag-max-chars'] || 2000);
+    const maxTotalChars = Number(req.headers['x-rag-max-total'] || 6000);
+
+    let context;
+    try {
+      context = await readRagContext({
+        vaultRelative,
+        maxFiles,
+        maxCharsPerFile,
+        maxTotalChars,
+      });
+    } catch (error) {
+      return send(500, { error: 'Erro ao ler contexto RAG: ' + error.message });
+    }
+
+    return send(200, {
+      ok: true,
+      context: context || '',
+      hasContext: Boolean(context),
+      source: 'vault-obsidian',
+    });
   };
 }
 
@@ -1041,6 +1103,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
   const handleN8nCommand = createN8nCommandHandler();
+  const handleRagContext = createRagContextHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
@@ -1048,6 +1111,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
+    if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
