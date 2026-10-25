@@ -21,7 +21,7 @@ export const EMOTION_MAP = {
   sad:       { expressions: { '13-prefab_sad02': 1 },       eyesClosed: false },
   soft:      { expressions: { '01-prefab_happy01': 0.6 },   eyesClosed: false },
   angry:     { expressions: { '08-prefab_angry02': 1 },     eyesClosed: false },
-  surprised: { expressions: { '20-prefab_startled': 1 },    eyesClosed: false },
+  surprised: { expressions: { '21-prefab_emoji': 1 },       eyesClosed: false },
   doubtful:  { expressions: { '19-prefab_doubt': 1 },       eyesClosed: false },
 };
 
@@ -33,14 +33,14 @@ export const EXPRESSION_LABELS = Object.freeze({
   neutral: 'Neutra',
   '01-prefab_happy01': 'Feliz suave', '02-prefab_happy02': 'Feliz sorridente',
   '03-prefab_happy03': 'Feliz apaixonada', '04-prefab_happy04': 'Feliz de olhos fechados',
-  '05-prefab_happy05': 'Feliz radiante', '06-prefab_happy06': 'Feliz empolgada',
+  '05-prefab_happy05': 'Feliz radiante', '06-prefab_happy06': 'Piscada olho direito',
   '07-prefab_angry01': 'Irritada', '08-prefab_angry02': 'Brava', '09-prefab_angry03': 'Furiosa',
   '10-prefab_angry04': 'Furiosa de olhos fechados', '11-prefab_angry05': 'Brava contida',
   '12-prefab_sad01': 'Triste suave', '13-prefab_sad02': 'Chorando', '14-prefab_sad03': 'Triste abatida',
   '15-prefab_awkward01': 'Envergonhada', '16-prefab_awkward02': 'Constrangida',
   '17-prefab_awkward03': 'Constrangida nervosa', '18-prefab_awkward04': 'Desconfortável',
   '19-prefab_doubt': 'Desconfiada', '20-prefab_startled': 'Assustada',
-  '21-prefab_emoji': 'Reação emoji', '22-prefab_clothes': 'Efeito roupa',
+  '21-prefab_emoji': 'Surpresa', '22-prefab_clothes': 'Efeito roupa',
   '23-prefab_hat': 'Efeito chapéu', '24-prefab_hairpin': 'Efeito presilha',
   '25-prefab_sleeve': 'Efeito manga',
 });
@@ -54,7 +54,7 @@ export const EXPRESSION_TAGS = Object.freeze({
   '12-prefab_sad01': 'sad', '13-prefab_sad02': 'sad', '14-prefab_sad03': 'sad',
   '15-prefab_awkward01': 'awkward', '16-prefab_awkward02': 'awkward',
   '17-prefab_awkward03': 'awkward', '18-prefab_awkward04': 'awkward',
-  '19-prefab_doubt': 'doubtful', '20-prefab_startled': 'surprised',
-  '21-prefab_emoji': 'effect', '22-prefab_clothes': 'effect', '23-prefab_hat': 'effect',
+  '19-prefab_doubt': 'doubtful', '20-prefab_startled': 'surprised', '21-prefab_emoji': 'surprised',
+  '22-prefab_clothes': 'effect', '23-prefab_hat': 'effect',
   '24-prefab_hairpin': 'effect', '25-prefab_sleeve': 'effect',
 });

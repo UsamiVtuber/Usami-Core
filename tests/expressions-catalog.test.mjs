@@ -108,7 +108,7 @@ test('catalogo Shiro classifica as cinco expressões finais e fornece rótulos h
   ];
   const entries = curateExpressions(names, { limit: 40 }).curated;
   const tags = new Map(entries.map(entry => [entry.name, entry.tag]));
-  assert.equal(tags.get('21-prefab_emoji'), 'effect');
+  assert.equal(tags.get('21-prefab_emoji'), 'surprised');
   assert.equal(tags.get('22-prefab_clothes'), 'effect');
   assert.equal(tags.get('23-prefab_hat'), 'effect');
   assert.equal(tags.get('24-prefab_hairpin'), 'effect');
