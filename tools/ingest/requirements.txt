@@ -1,0 +1,17 @@
+# Dependências diretas do pipeline de ingestão (Fase 3). Verificado em Python 3.12.10.
+#
+# O pipeline só usa stdlib + estas duas bibliotecas. Nada aqui chama API paga:
+# a transcrição roda em CPU com o modelo que já está no cache local.
+#
+# Binários de sistema (não vêm por pip; precisam estar no PATH):
+#   ffmpeg / ffprobe  -> testado com 9.0.2 (full_build www.gyan.dev)
+#
+# Nota de versão: faster-whisper 1.2.1 chama PyAV (av) para decodificar o áudio,
+# e o par av 19.0.2 + faster-whisper 1.2.1 é incompatível (TypeError em
+# av.open(metadata_errors=...)). Não baixamos nem upamos nada por causa disso:
+# media.decode_audio() decodifica com ffmpeg e entrega PCM ao modelo, então o
+# PyAV nunca é usado. Se um dia o faster-whisper consertar isso, o atalho próprio
+# continua funcionando — o caminho é o mesmo.
+
+faster-whisper==1.2.1
+numpy==2.5.3

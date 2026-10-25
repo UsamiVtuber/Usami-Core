@@ -12,5 +12,12 @@ public/live2d/
 # Cache de áudio TTS gerado em runtime
 data/
 
+# Descartável: logs de servidor, mídia de demonstração e saídas de verificação
+/tmp/
+
+# Bytecode Python (tools/ingest)
+__pycache__/
+*.pyc
+
 # Arquivos de ambiente (chaves nunca entram no repositório)
 .env

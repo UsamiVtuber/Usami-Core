@@ -15,6 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
+import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
 const DEFAULT_CLASSIFICATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_GENERATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
@@ -140,6 +141,23 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
     console.warn('NVIDIA animation falhou:', error.message);
     return { actions: [], source: 'nvidia-fallback' };
   }
+}
+
+// --- Estruturação de técnica (Fase 3: ficha ingerida → técnica validável) ---
+
+export async function structureTechnique(userPrompt, { temperature = 0.2 } = {}) {
+  if (!process.env.NVIDIA_API_KEY) throw new Error('no-llm-provider');
+  const messages = [
+    { role: 'system', content: TECHNIQUE_SYSTEM_PROMPT },
+    { role: 'user', content: userPrompt },
+  ];
+  const raw = await sharedClient.chatText({
+    model: GENERATION_MODEL,
+    messages,
+    temperature,
+    max_tokens: 900,
+  });
+  return { raw, provider: 'nvidia', model: GENERATION_MODEL };
 }
 
 // --- Utilitários -----------------------------------------------------------

@@ -15,8 +15,10 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, generateReply, planAnimation } from './src/llm-router.js';
+import { classifyUserMessage, generateReply, planAnimation, structureTechnique } from './src/llm-router.js';
 import { readRagContext } from './src/rag.js';
+import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
+import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 // USE_NVIDIA=false desliga a rota NVIDIA mesmo com chave presente (isolamento de testes);
@@ -1020,13 +1022,13 @@ export function parseMultipartAudio(buffer, contentType) {
 
 // Corre a transcrição contra um timeout de parede; rejeições tardias de um impl
 // que estourou o relógio são engolidas para não virarem unhandled rejection.
-function withTranscribeTimeout(promise, ms) {
+function withTimeout(promise, ms, message) {
   let timer;
   const wrapped = Promise.resolve(promise);
   wrapped.catch(() => {});
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      const error = new Error('Transcrição expirou.');
+      const error = new Error(message);
       error.name = 'TimeoutError';
       reject(error);
     }, ms);
@@ -1113,7 +1115,7 @@ export function createSttHandler(options = {}) {
 
     let text;
     try {
-      text = await withTranscribeTimeout(transcribeImpl({ audioPath, modelName, language, beamSize, timeoutMs }), timeoutMs);
+      text = await withTimeout(transcribeImpl({ audioPath, modelName, language, beamSize, timeoutMs }), timeoutMs, 'Transcrição expirou.');
     } catch (error) {
       const timedOut = error?.name === 'TimeoutError';
       return send(timedOut ? 504 : 500, { error: timedOut ? 'Transcrição expirou.' : 'Falha na transcrição.' });
@@ -1128,6 +1130,162 @@ export function createSttHandler(options = {}) {
   };
 }
 
+// --- POST /api/technique: ficha ingerida → técnica validada (Fase 3) --------
+
+// A rota nunca inventa movimento: ela pega a ficha de ingestão (dado já validado
+// pelo pipeline Python), pede ao modelo para estruturá-la e passa a saída pelo
+// sanitize da técnica — que só conhece shapes da allowlist, gestos da biblioteca
+// e clamps do próprio runtime. Técnica inválida não é gravada. Com `technique` no
+// corpo, o operador pula o modelo: todo o resto do caminho (validação + gravação)
+// é o mesmo, então a ferramenta funciona sem nenhum serviço externo.
+const TECHNIQUE_BODY_LIMIT = 32 * 1024;
+const TECHNIQUE_TIMEOUT_MS = Math.max(1000, Number(process.env.TECHNIQUE_TIMEOUT_MS) || 45000);
+
+export function parseTechniqueRaw(raw) {
+  const text = String(raw ?? '').trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '');
+  if (!text || text.length > 20000) return { ok: false };
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
+    return { ok: true, value };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export function parseTechniqueBody(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return { ok: false, status: 400, error: 'JSON inválido.' };
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, status: 400, error: 'Corpo deve ser um objeto JSON.' };
+  }
+  const sourceId = typeof input.sourceId === 'string' ? input.sourceId.trim().slice(0, 64) : '';
+  if (!sourceId) return { ok: false, status: 400, error: 'sourceId obrigatório (id da ficha de ingestão).' };
+  if (input.technique !== undefined && input.technique !== null && typeof input.technique !== 'object') {
+    return { ok: false, status: 400, error: 'technique deve ser um objeto.' };
+  }
+  return {
+    ok: true,
+    sourceId,
+    technique: input.technique ?? null,
+    dryRun: input.dryRun === true,
+    status: typeof input.status === 'string' ? input.status : 'proposta',
+  };
+}
+
+export function createTechniqueHandler(options = {}) {
+  const store = options.store || createTechniqueStore({ dataDir: options.dataDir || 'data' });
+  const readFicha = options.readFicha || (sourceId => readIngestedFicha(sourceId, { dataDir: options.dataDir || 'data' }));
+  const llm = options.llm || (prompt => structureTechnique(prompt));
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const timeoutMs = options.timeoutMs || TECHNIQUE_TIMEOUT_MS;
+
+  return async function handleTechnique(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const target = new URL(req.url || '/api/technique', 'http://127.0.0.1:8787');
+    const route = target.pathname;
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    // --- leitura (recuperação com proveniência) ---
+    if (req.method === 'GET' && (route === '/api/technique' || route === '/api/techniques')) {
+      if (route === '/api/techniques') {
+        const statusFilter = target.searchParams.get('status');
+        const all = await store.list();
+        const techniques = TECHNIQUE_STATUSES.includes(statusFilter)
+          ? all.filter(technique => technique.status === statusFilter)
+          : all;
+        return send(200, { techniques: techniques.map(summarizeTechnique), total: techniques.length });
+      }
+      const id = target.searchParams.get('id') || '';
+      const found = await store.get(id);
+      if (!found.ok) return send(404, { error: found.errors.join('; ') });
+      return send(200, { technique: found.technique });
+    }
+
+    if (req.method !== 'POST' || route !== '/api/technique') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    let body = '';
+    let tooLarge = false;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > TECHNIQUE_BODY_LIMIT) {
+        tooLarge = true;
+        break;
+      }
+    }
+    if (tooLarge) return send(413, { error: 'Corpo muito longo.' });
+
+    const parsed = parseTechniqueBody(body);
+    if (!parsed.ok) return send(parsed.status, { error: parsed.error });
+
+    const loaded = await readFicha(parsed.sourceId);
+    if (!loaded.ok) return send(404, { error: loaded.errors.join('; ') });
+    const ficha = loaded.ficha;
+    const sources = [{
+      sourceId: ficha.id,
+      kind: ficha?.source?.kind ?? null,
+      title: ficha?.source?.title ?? null,
+      schema: ficha?.schema ?? null,
+    }];
+
+    let engine;
+    let candidate;
+    if (parsed.technique) {
+      engine = { provider: 'operador', model: 'manual' };
+      candidate = parsed.technique;
+    } else {
+      let result;
+      try {
+        result = await withTimeout(llm(techniqueUserPrompt(ficha)), timeoutMs, 'Estruturação expirou.');
+      } catch (error) {
+        if (error?.message === 'no-llm-provider') {
+          return send(503, { error: 'Nenhum provedor de LLM configurado — envie a técnica no campo `technique` ou configure a chave.' });
+        }
+        if (error?.name === 'TimeoutError') return send(504, { error: 'Estruturação expirou.' });
+        return send(502, { error: `Falha no provedor de LLM: ${String(error?.message || error).slice(0, 200)}` });
+      }
+      const rawParsed = parseTechniqueRaw(result?.raw);
+      if (!rawParsed.ok) return send(422, { error: 'Saída do modelo não é JSON de técnica.' });
+      engine = { provider: result.provider, model: result.model };
+      candidate = rawParsed.value;
+    }
+
+    const check = sanitizeTechnique(candidate, { sources, engine, status: parsed.status, now: options.now });
+    if (!check.ok) return send(422, { error: 'Técnica rejeitada pela validação.', errors: check.errors, discarded: check.discarded });
+
+    if (parsed.dryRun) return send(200, { technique: check.technique, stored: false, discarded: check.discarded });
+
+    let saved;
+    try {
+      saved = await store.save(check.technique);
+    } catch {
+      return send(500, { error: 'Falha ao gravar a técnica.' });
+    }
+    if (!saved.ok) return send(422, { error: 'Técnica rejeitada ao gravar.', errors: saved.errors });
+    console.log(`[technique] ${saved.technique.id} "${saved.technique.name}" <- ${parsed.sourceId} (${engine.provider}/${engine.model})`);
+    return send(200, { technique: saved.technique, stored: true, discarded: check.discarded });
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
@@ -1137,6 +1295,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleStt = createSttHandler();
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
+  const handleTechnique = createTechniqueHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
@@ -1145,6 +1304,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
+    if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
