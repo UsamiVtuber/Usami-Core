@@ -7,7 +7,7 @@ import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
-import { createMotionDirector } from './motion-director';
+import { createMotionDirector, SHAPE_NAMES } from './motion-director';
 import { createAutoMotion } from './auto-motion';
 import { createExpressionDriver } from './expression-driver';
 import { createEmotionEngine } from './emotion-engine';
@@ -253,6 +253,12 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           gesture = { bone: boneList[index], base: boneList[index].quaternion.clone(), elapsed: 0 };
           return true;
         },
+        // Fase 1: sequências de keyframes (shapes do buildSequenceRequest). Só o
+        // layer VRM executa; GLB/FBX não têm o rig humanoid normalizado e recusam.
+        playSequence(request) {
+          if (!vrmGestures.current) return false;
+          return vrmGestures.current.playSequence(request) === true;
+        },
         play(index) { const animation = animations[index]; if (!animation?.clip || animation.excludedTracks) return; gesture = null; customMotion.stop(); mixer.stopAllAction(); mixer.clipAction(animation.clip).reset().play(); },
         stop() { mixer.stopAllAction(); gesture = null; customMotion.stop(); vrmGestures.current?.stopGesture(); },
         idle() { if (vrmGestures.current?.gesture('idle')) return true; gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
@@ -272,7 +278,12 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
         reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); audioLipSync.current?.clear(); }
       };
-      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: customMotion.idleAvailable || Boolean(vrmGestures.current?.available.idle), customWave: customMotion.waveAvailable || Boolean(vrmGestures.current?.available.wave), customTilt: boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt), boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: vrmGestures.current?.gestureNames ?? [], meshList: manifest.meshes, manifest });
+      manifest.customIdle = customMotion.idleAvailable || Boolean(vrmGestures.current?.available.idle);
+      manifest.customWave = customMotion.waveAvailable || Boolean(vrmGestures.current?.available.wave);
+      manifest.customTilt = boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt);
+      manifest.sequences = Boolean(vrmGestures.current?.available.sequences);
+      manifest.gestures = vrmGestures.current?.gestureNames ?? [];
+      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: manifest.customIdle, customWave: manifest.customWave, customTilt: manifest.customTilt, sequences: manifest.sequences, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: manifest.gestures, meshList: manifest.meshes, manifest });
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
     const resize = () => {
       camera.aspect = element.clientWidth / element.clientHeight;
@@ -719,6 +730,8 @@ export function Usami() {
               ctrl.setMorph(cmd.name, cmd.value ?? 0);
             } else if (cmd.type === 'set_mesh_visible') {
               ctrl.setMeshVisible(cmd.name, cmd.visible ?? true);
+            } else if (cmd.type === 'play_sequence') {
+              ctrl.playSequence(cmd);
             }
           } catch {
             // Falha ao aplicar um comando não interrompe os seguintes.
@@ -791,6 +804,7 @@ export function Usami() {
       {report.format === 'FBX' && <p>{sourceName.toLowerCase() === 'felis.fbx' ? 'Felis: usando as texturas-base locais quando disponíveis. Os shaders e efeitos do Unity não são reproduzidos.' : 'FBX em teste: texturas externas e materiais do Unity podem não acompanhar este arquivo.'}</p>}
       {!report.live2d && <><h3>Movimentos personalizados</h3><p>Testes para o rig Autumn. O idle é contínuo; o aceno dura alguns segundos. Não estão ligados às respostas da IA.</p><div className="rig-actions"><button disabled={!report.customIdle} onClick={() => { controller.current?.idle(); poke(); }}>Iniciar idle</button><button disabled={!report.customWave} onClick={() => { controller.current?.wave(); poke(); }}>Acenar</button><button onClick={() => controller.current?.stop()}>Parar movimentos</button></div>{(!report.customIdle || !report.customWave) && <p>Alguns ossos necessários não foram encontrados neste modelo.</p>}
       {Boolean(report.gestures?.length) && <><h3>Gestos</h3><p>Gestos procedurais sobre o rig humanoid; valem para qualquer VRM com braços. Os de pose ficam até você parar.</p><div className="rig-actions">{report.gestures.map(name => <button key={name} onClick={() => { controller.current?.gesture(name); poke(); }}>{GESTURE_LABELS[name] ?? name}</button>)}<button onClick={() => controller.current?.stop()}>Parar gesto</button></div></>}
+      {report.sequences && <><h3>Sequências</h3><p>Shapes paramétricas expandidas em keyframes — o mesmo caminho que a IA usa em play_sequence.</p><div className="rig-actions">{SHAPE_NAMES.map(shape => <button key={shape} onClick={() => { controller.current?.playSequence({ shape }); poke(); }}>{shape}</button>)}<button onClick={() => controller.current?.stop()}>Parar sequência</button></div></>}
       <h3>Meshes</h3>{meshList.length ? <>{meshList.map(mesh => <label className="rig-label" key={mesh.name}>{mesh.name} {mesh.skinned ? '(rig)' : '(sem rig)'}<input type="checkbox" checked={isMeshVisible(mesh)} onChange={() => toggleMesh(mesh)} /></label>)}<div className="rig-actions"><button onClick={resetMeshes}>Restaurar visibilidade padrão</button></div><p>Modelos sem esqueleto começam ocultos; desmarque para esconder acessórios ou mostre o que quiser.</p></> : <p>Nenhuma mesh presente.</p>}
       <h3>Animações</h3>{report.animations.length ? <><label className="rig-label">Clip<select value={selectedClip} onChange={e => setSelectedClip(e.target.value)}>{report.animations.map((clip,i) => <option key={i} value={i}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label><p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p><div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => { controller.current?.play(Number(selectedClip)); poke(); }}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div></> : <p>Este modelo não contém clips.</p>}
       <h3>Ossos</h3><p>Rotação local limitada; iniciar uma animação pode sobrescrever o ajuste.</p><label className="rig-label">Osso<select value={boneIndex} onChange={e => {setBoneIndex(Number(e.target.value));setAngle(0);}}>{report.boneNames.map(b => <option key={b.index} value={b.index}>{b.name} [{b.index}]</option>)}</select></label><label className="rig-label">Eixo<select value={axis} onChange={e => {setAxis(e.target.value);setAngle(0);}}><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label><label className="rig-label">Rotação: {angle}°<input type="range" min="-45" max="45" value={angle} onChange={e => {const value=Number(e.target.value);setAngle(value);controller.current?.bone(boneIndex,axis,value);}} /></label>

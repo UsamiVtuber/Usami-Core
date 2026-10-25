@@ -7,13 +7,19 @@ export const DEFAULT_MAX_ACTIONS = 5;
 // Os três primeiros são da camada de gestos legado/pose; o resto vem da
 // biblioteca de gestos procedurais (vrm-gesture-library) e é roteado por
 // controller.gesture(name).
+import { SHAPE_NAMES } from './sequence-shapes.js';
+
+export { SHAPE_NAMES };
+
+// Fase 1: play_sequence — shapes paramétricos expandidos pelo controller; o
+// director só valida o vocabulário e roteia.
 export const GESTURE_NAMES = [
   'tilt', 'wave', 'idle',
   'clap', 'hand-on-hip', 'wave2', 'point', 'shrug', 'head-scratch',
   'arms-crossed', 'facepalm', 'cheer', 'blow-kiss', 'hands-on-cheeks', 'bow',
 ];
-export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
-export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, set_mesh_visible: 800, set_expression: 3000 };
+export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression', 'play_sequence'];
+export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, play_sequence: 4000, set_mesh_visible: 800, set_expression: 3000 };
 const MESH_COOLDOWN_PER_TARGET = 4000;
 
 const cooldownVerbs = new Set(Object.keys(DEFAULT_COOLDOWNS));
@@ -75,6 +81,21 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
           : name === 'idle' ? controller.idle
           : () => controller.gesture?.(name);
         applied = run?.() === true;
+        if (!applied) reason = 'model refused';
+      }
+    } else if (verb === 'play_sequence') {
+      const shape = SHAPE_NAMES.includes(action?.shape) ? action.shape : null;
+      if (!shape) reason = 'shape unknown';
+      else if (manifest.sequences !== true) reason = 'sequences unavailable on this model';
+      else {
+        applied = controller.playSequence?.({
+          name: action?.name,
+          shape,
+          side: action?.side,
+          amplitude: action?.amplitude,
+          cycles: action?.cycles,
+          durationMs: action?.durationMs,
+        }) === true;
         if (!applied) reason = 'model refused';
       }
     } else if (verb === 'set_morph') {

@@ -102,6 +102,39 @@ test('filterActionsByCatalog descarta ações fora do catálogo anunciado', () =
   assert.deepEqual(filterActionsByCatalog('não array', capabilities), []);
 });
 
+test('sanitizeCapabilities: gestos da biblioteca passam e sequences é flag', () => {
+  const sanitized = sanitizeCapabilities({
+    gestures: ['clap', 'bow', 'point', 'voar'],
+    sequences: true,
+  });
+  assert.deepEqual(sanitized.gestures, ['clap', 'bow', 'point']);
+  assert.equal(sanitized.sequences, true);
+  assert.equal(sanitizeCapabilities({ sequences: 'sim' }).sequences, false);
+  assert.equal(sanitizeCapabilities({}).sequences, false);
+});
+
+test('sanitizeActions mantém play_sequence com shape válida e descarta inválida', () => {
+  const actions = sanitizeActions([
+    { type: 'play_sequence', shape: 'wave-arm', amplitude: 0.3, cycles: 2, durationMs: 1500, side: 'left', delayMs: 200 },
+    { type: 'play_sequence', shape: 'moonwalk' },
+    { type: 'play_sequence' },
+    { type: 'play_sequence', shape: 'nod', amplitude: 'muito' },
+  ]);
+  assert.deepEqual(actions, [
+    { type: 'play_sequence', name: undefined, shape: 'wave-arm', side: 'left', amplitude: 0.3, cycles: 2, durationMs: 1500, delayMs: 200 },
+    { type: 'play_sequence', name: undefined, shape: 'nod' },
+  ]);
+  assert.deepEqual(sanitizeActions([{ type: 'play_sequence', tracks: [{ bone: 'head' }] }]).length, 0,
+    'keyframes crus do LLM nunca passam: só shape+params');
+});
+
+test('systemFor anuncia a shape e o prompt traz o vocabulário de sequências', () => {
+  const system = systemFor({ clips: [], morphs: [], gestures: ['tilt'], expressions: [], meshes: [], sequences: true });
+  assert.match(system, /play_sequence/);
+  assert.match(system, /wave-arm/);
+  assert.match(system, /sequences/);
+});
+
 test('sanitizeCapabilities normaliza resumo do cliente', () => {
   const sanitized = sanitizeCapabilities({
     format: 'GLB / glTF '.padEnd(60, 'x'),

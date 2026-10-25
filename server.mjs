@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
-import { GESTURE_NAMES } from './src/motion-director.js';
+import { GESTURE_NAMES, DIRECTOR_VERBS, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { createMemoryStore } from './src/memory-store.js';
@@ -50,11 +50,10 @@ if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
   }
 }
 
-const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false}]}. Actions é opcional e pode ser vazio; no máximo 5 ações.`.trim();
+const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false},{"type":"play_sequence","shape":"um de: ${SHAPE_NAMES.join(', ')}","amplitude":0.02 a 0.5,"cycles":1 a 8,"durationMs":600 a 8000,"side":"left" ou "right"}]}. Actions é opcional e pode ser vazio; no máximo 5 ações. play_sequence compõe movimento novo a partir de uma shape; use apenas se capabilities.sequences for true.`.trim();
 
 const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 
-const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression'];
 export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
 
 // Heurística do "remember": sinais de fato duradouro → núcleo; o resto é recente.
@@ -73,6 +72,7 @@ const VALID_COMMAND_TYPES = new Set([
   'set_expression',// expressão VRM com peso
   'set_morph',     // morph target com valor
   'set_mesh_visible',// mostra/esconde mesh acessório
+  'play_sequence', // sequência a partir de shape paramétrica
 ]);
 
 function isValidN8nCommand(cmd) {
@@ -81,6 +81,7 @@ function isValidN8nCommand(cmd) {
   if (cmd.type === 'say' && typeof cmd.message !== 'string') return false;
   if (['gesture', 'set_expression', 'set_morph', 'set_mesh_visible'].includes(cmd.type) && typeof cmd.name !== 'string') return false;
   if (cmd.type === 'gesture' && !GESTURE_NAMES.includes(cmd.name)) return false;
+  if (cmd.type === 'play_sequence' && !SHAPE_NAMES.includes(cmd.shape)) return false;
   return true;
 }
 
@@ -189,7 +190,8 @@ export function sanitizeCapabilities(input) {
     morphs: names(input.morphs, 60),
     meshes,
     expressions: names(input.expressions, 20),
-    gestures: names(input.gestures, 20, ['tilt', 'idle', 'wave']),
+    gestures: names(input.gestures, 20, GESTURE_NAMES),
+    sequences: input.sequences === true,
   };
 }
 
@@ -200,6 +202,16 @@ export function sanitizeActions(raw) {
     if (action.type === 'set_morph') base.value = action.value;
     if (action.type === 'set_mesh_visible') base.visible = action.visible;
     if (action.type === 'set_expression') base.weight = action.weight;
+    // play_sequence: só o vocabulário (shape) e parâmetros numéricos limitados
+    // passam; os keyframes são expandidos localmente pelo buildSequenceRequest.
+    if (action.type === 'play_sequence') {
+      if (!SHAPE_NAMES.includes(action.shape)) return null;
+      base.shape = action.shape;
+      if (action.side === 'left' || action.side === 'right') base.side = action.side;
+      for (const key of ['amplitude', 'cycles', 'durationMs']) {
+        if (Number.isFinite(action[key])) base[key] = action[key];
+      }
+    }
     // Timing por frase: delayMs (ms após o início da fala) e trigger
     // ('start' | 'middle' | 'end') são metadados do cliente, preservados
     // para agendamento sincronizado com o áudio TTS.
@@ -210,7 +222,7 @@ export function sanitizeActions(raw) {
       base.trigger = action.trigger;
     }
     return base;
-  });
+  }).filter(Boolean);
 }
 
 export function filterActionsByCatalog(actions, capabilities) {
@@ -637,7 +649,7 @@ export function createN8nCommandHandler(options = {}) {
       }
 
       if (!isValidN8nCommand(cmd)) {
-        return send(400, { error: 'Comando inválido. Tipos válidos: say, gesture, set_expression, set_morph, set_mesh_visible.' });
+        return send(400, { error: 'Comando inválido. Tipos válidos: say, gesture, set_expression, set_morph, set_mesh_visible, play_sequence.' });
       }
 
       const entry = {

@@ -13,6 +13,8 @@
 // sway não usa — assim as camadas compõem em vez de se sobrescreverem.
 
 import { createGestureLibrary } from './vrm-gesture-library.js';
+import { createSequenceRunner, SEQUENCE_BONE_AXES } from './motion-sequence.js';
+import { buildSequenceRequest } from './sequence-shapes.js';
 
 // amplitudes preliminares, ajustar visualmente
 export const EMOTION_POSES = {
@@ -92,7 +94,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
   };
 
   function wave() {
-    if (!available.wave || waveState.playing || library.active().name) return false;
+    if (!available.wave || waveState.playing || library.active().name || sequenceRunner.active()) return false;
     waveState.playing = true;
     waveState.startedAt = now();
     markClock();
@@ -109,10 +111,13 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
 
   // Dispatcher usado pelo controller.gesture(): 'idle' é no-op de propósito —
   // o sway já dá vida contínua ao avatar. Os demais nomes vão para a biblioteca.
+  // Quem chega depois vence: um gesto novo encerra a sequência em curso
+  // (substituição previsível, mesma regra da biblioteca entre gestos).
   function gesture(name) {
+    releaseSequence();
+    if (name === 'idle') return available.idle;
     if (name === 'wave') return wave();
     if (name === 'tilt') return tilt();
-    if (name === 'idle') return available.idle;
     if (library.play(name)) {
       // Um gesto de braço novo encerra o aceno legado: os dois escrevem nos
       // mesmos ossos e não há blend entre as camadas.
@@ -123,11 +128,57 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     return false;
   }
 
+  // Fase 1: runner de sequências de keyframes sobre os nós normalizados. Os
+  // nós/base seguem a mesma regra da biblioteca: escrita base+offset, eixos
+  // restritos por SEQUENCE_BONE_AXES (validados antes de chegar aqui).
+  const sequenceNodes = {};
+  for (const name of Object.keys(SEQUENCE_BONE_AXES)) {
+    const node = readNode(name);
+    if (node?.rotation) sequenceNodes[name] = { node, base: cloneRotation(node.rotation) };
+  }
+  const sequenceRunner = createSequenceRunner({ nodes: sequenceNodes, now });
+  const sequenceAvailable = Boolean(humanoid) && Object.keys(sequenceNodes).length > 0;
+
+  const releaseSequence = () => {
+    if (!sequenceRunner.active()) return;
+    sequenceRunner.stop();
+    for (const name of Object.keys(sequenceNodes)) {
+      const { node, base } = sequenceNodes[name];
+      node.rotation.x = base.x;
+      node.rotation.y = base.y;
+      node.rotation.z = base.z;
+    }
+  };
+
+  // Toca uma sequência: aceita pedido de shape ({shape, ...}) — expandido
+  // localmente — ou sequência completa de tracks (validada pelo runner).
+  // Substitui o gesto em curso de forma previsível: a biblioteca solta os
+  // ossos antes (direção de override: sequência > biblioteca > legado).
+  function playSequence(input) {
+    if (!sequenceAvailable) return false;
+    let sequence = input;
+    if (input && typeof input === 'object' && typeof input.shape === 'string') {
+      const built = buildSequenceRequest(input);
+      if (!built.ok) return false;
+      sequence = built.sequence;
+    }
+    if (library.active().name) library.stop();
+    waveState.playing = false;
+    waveState.startedAt = 0;
+    return sequenceRunner.play(sequence).ok;
+  }
+
+  function stopSequence() {
+    releaseSequence();
+    return true;
+  }
+
   // Encerra o gesto em curso (inclusive os de pose mantida) sem tocar na pose
   // emocional nem no tilt.
   function stopGesture() {
     waveState.playing = false;
     waveState.startedAt = 0;
+    releaseSequence();
     return library.stop();
   }
 
@@ -194,8 +245,11 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
 
     // — biblioteca: escreve braços/ombros/quadril/espinha antes da cabeça —
     library.update();
+    sequenceRunner.update();
     const gestureHead = library.headOffsets();
-    const legacyArm = !library.active().name;
+    // O aceno legado só escreve se nem a biblioteca nem uma sequência ocuparem
+    // os braços (direção de override: sequência > biblioteca > legado).
+    const legacyArm = !library.active().name && !sequenceRunner.active();
 
     // — escrita: TODOS os nós que possui, sempre base + offset (idempotente) —
     if (legacyArm) {
@@ -213,6 +267,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
 
   function clear() {
     library.clear();
+    releaseSequence();
     for (const name of LAYER_BONES) {
       if (!nodes[name]) continue;
       nodes[name].rotation.x = base[name].x;
@@ -237,6 +292,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
       wave: waveState.playing,
       tilt: tiltState.playing,
       gesture: library.active().name,
+      sequence: sequenceRunner.active()?.name ?? null,
       emotion: Object.freeze({
         label: poseState.label,
         intensity: poseState.intensity,
@@ -247,5 +303,5 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     });
   }
 
-  return { available, gestureNames: library.names, wave, tilt, gesture, stopGesture, setEmotion, update, clear, active };
+  return { available: Object.freeze({ ...available, sequences: sequenceAvailable }), gestureNames: library.names, wave, tilt, gesture, stopGesture, playSequence, stopSequence, setEmotion, update, clear, active };
 }

@@ -68,6 +68,7 @@ export function summarizeCapabilities(manifest) {
     // modelo, mas o LLM só precisa dos que valem a pena citar (o director valida
     // contra o manifesto completo, não contra este resumo).
     gestures: [...(manifest.customTilt !== false ? ['tilt'] : []), ...(manifest.customIdle ? ['idle'] : []), ...(manifest.customWave ? ['wave'] : []), ...(manifest.gestures ?? []).filter(name => name !== 'tilt' && name !== 'idle' && name !== 'wave').slice(0, 12)],
+    sequences: manifest.sequences === true,
   };
 }
 
