@@ -81,7 +81,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures, expressionDriverRef }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -218,6 +218,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         setRaw: (name, weight) => vrm?.expressionManager?.setValue(name, weight),
         blinkName: detectedBlink,
       });
+      if (expressionDriverRef) expressionDriverRef.current = expressionDriver;
       // Etapa 3: o engine de emoções só existe para VRMs com expressionManager
       // (Live2D/GLB ficam sem — o chat cai no fallback das actions do LLM).
       if (vrm?.expressionManager) emotionEngine.current = createEmotionEngine({ driver: expressionDriver });
@@ -404,6 +405,7 @@ export function Usami() {
   const lastIdleActive = useRef(false);
   const audioLipSync = useRef(null);
   const ttsAudio = useRef(null);
+  const expressionDriverRef = useRef(null);
   const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
   const callActiveRef = useRef(false);
@@ -599,6 +601,12 @@ export function Usami() {
     busyRef.current = true;
     setBusy(true);
     addTurn('user', value, spoken ? 'voice' : 'text');
+    // Frente 3: classifica a frase do usuário em AUs FACS e aplica ao
+    // expression-driver do Shiro enquanto o LLM processa (paralelo).
+    const facs = classifyFacs(value);
+    if (facs.aus.length > 0 && expressionDriverRef.current) {
+      applyFacsToDriver(facs.aus, facs.intensity, expressionDriverRef.current, { ttlMs: 4000 });
+    }
     awardXP(gainsFor(value, spoken));
     setMessage('Usami está pensando…');
     try {
@@ -653,7 +661,7 @@ export function Usami() {
     <div className="backdrop" />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} />}
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} />}
     <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
