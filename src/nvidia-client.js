@@ -1,0 +1,140 @@
+// Cliente NVIDIA API (build.nvidia.com / integrate.api.nvidia.com) com
+// rate limiter global: 40 requisições por minuto, compartilhado entre
+// todas as funções (classificação, geração de texto, animação).
+//
+// Lê NVIDIA_API_KEY de process.env.NVIDIA_API_KEY ou do arquivo .env
+// indicado por NVIDIA_ENV_FILE (padrão: A:\.env).
+//
+// A API é compatível com OpenAI (POST /v1/chat/completions), então o
+// corpo da requisição segue o mesmo esquema do OpenRouter.
+
+import { readFile } from 'node:fs/promises';
+
+const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+const DEFAULT_ENV_FILE = 'A:\\.env';
+const DEFAULT_RATE_LIMIT = 40;    // requisições por minuto
+const DEFAULT_RATE_WINDOW_MS = 60 * 1000;
+
+let apiKeyCache = null;
+let envFileCache = null;
+
+async function resolveApiKey() {
+  if (apiKeyCache) return apiKeyCache;
+  // 1) variável de ambiente
+  if (process.env.NVIDIA_API_KEY) {
+    apiKeyCache = process.env.NVIDIA_API_KEY;
+    return apiKeyCache;
+  }
+  // 2) arquivo .env
+  const envFile = process.env.NVIDIA_ENV_FILE || DEFAULT_ENV_FILE;
+  if (envFile === envFileCache && apiKeyCache) return apiKeyCache;
+  try {
+    const text = await readFile(envFile, 'utf8');
+    const parsed = parseEnvText(text);
+    apiKeyCache = parsed.NVIDIA_API_KEY || null;
+    envFileCache = envFile;
+    return apiKeyCache;
+  } catch {
+    apiKeyCache = null;
+    return null;
+  }
+}
+
+function parseEnvText(text) {
+  const out = {};
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    out[key] = value;
+  }
+  return out;
+}
+
+// Rate limiter: janela deslizante de `rateLimit` requisições por `windowMs`.
+export function createRateLimiter({ rateLimit = DEFAULT_RATE_LIMIT, windowMs = DEFAULT_RATE_WINDOW_MS } = {}) {
+  const stamps = [];
+
+  async function waitForSlot() {
+    const now = Date.now();
+    // Remove timestamps fora da janela
+    while (stamps.length && now - stamps[0] > windowMs) stamps.shift();
+
+    if (stamps.length < rateLimit) {
+      stamps.push(now);
+      return;
+    }
+
+    // Aguarda o mais antigo sair da janela
+    const waitMs = windowMs - (now - stamps[0]) + 1;
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, waitMs)));
+    return waitForSlot();
+  }
+
+  return { waitForSlot };
+}
+
+export class NvidiaClient {
+  constructor({
+    baseUrl = DEFAULT_BASE_URL,
+    rateLimiter = createRateLimiter(),
+    timeoutMs = 45000,
+  } = {}) {
+    this.baseUrl = baseUrl;
+    this.rateLimiter = rateLimiter;
+    this.timeoutMs = timeoutMs;
+  }
+
+  async chatCompletions({ model, messages, temperature = 0.7, max_tokens = 320, response_format = null }) {
+    const key = await resolveApiKey();
+    if (!key) throw new Error('NVIDIA_API_KEY não configurada (defina NVIDIA_API_KEY ou A:\\.env)');
+
+    await this.rateLimiter.waitForSlot();
+
+    const body = {
+      model,
+      messages,
+      temperature,
+      max_tokens,
+    };
+    if (response_format) body.response_format = response_format;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + key,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`NVIDIA API HTTP ${response.status}: ${text.slice(0, 200)}`);
+      }
+
+      const data = await response.json();
+      return data;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  async chatText({ model, messages, temperature = 0.7, max_tokens = 320 }) {
+    const data = await this.chatCompletions({ model, messages, temperature, max_tokens });
+    return data?.choices?.[0]?.message?.content || '';
+  }
+}
+
+// Instância compartilhada (rate limiter global entre as 3 funções).
+export const sharedRateLimiter = createRateLimiter();
+export const sharedClient = new NvidiaClient({ rateLimiter: sharedRateLimiter });

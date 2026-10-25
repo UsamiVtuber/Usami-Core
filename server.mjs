@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
@@ -13,8 +14,21 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
+import { classifyUserMessage, generateReply, planAnimation } from './src/llm-router.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
+export const USE_NVIDIA = process.env.USE_NVIDIA !== 'false' && Boolean(process.env.NVIDIA_API_KEY || nvidiaKeyConfigured());
+
+// Verifica se a chave NVIDIA está configurada (env ou A:\.env), sem fazer chamada de API.
+function nvidiaKeyConfigured() {
+  if (process.env.NVIDIA_API_KEY) return true;
+  try {
+    const text = readFileSync('A:\\.env', 'utf8');
+    return /^NVIDIA_API_KEY\s*=/m.test(text);
+  } catch {
+    return false;
+  }
+}
 
 const DEFAULT_SYSTEM = 'Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"tilt" ou "wave" ou "idle"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false}]}. Actions é opcional e pode ser vazio; no máximo 5 ações.'.trim();
 
@@ -243,43 +257,84 @@ export function createChatHandler(options = {}) {
       date: today,
       timeOfDay,
     });
-    let key;
-    try {
-      key = await getKey();
-    } catch {
-      return send(502, { error: 'Não foi possível acessar a configuração.' });
-    }
-    if (!key) {
-      return send(503, { error: 'Chave OpenRouter não configurada.' });
+    let parsed;
+    let classification = null;
+
+    if (USE_NVIDIA) {
+      // Fluxo NVIDIA: 3 modelos com rate limit global de 40 req/min
+      try {
+        // 1) Classificação da frase do usuário (modelo leve)
+        classification = await classifyUserMessage(parsedBody.message);
+
+        // 2) Geração de texto da Usami (modelo de geração)
+        const rawReply = await generateReply(system, parsedBody.message, { temperature: 0.7 });
+        const parsedReply = parseProviderRaw(rawReply);
+        if (!parsedReply.ok) throw new Error(parsedReply.error);
+
+        // 3) Planejamento de animação (modelo de animação)
+        const animation = await planAnimation(parsedReply.reply, capabilities, { temperature: 0.3 });
+
+        parsed = {
+          ok: true,
+          reply: parsedReply.reply,
+          gesture: parsedReply.gesture,
+          actions: animation.actions,
+          remember: parsedReply.remember,
+          classification,
+          source: 'nvidia',
+        };
+      } catch (error) {
+        console.warn('NVIDIA falhou, tentando OpenRouter:', error.message);
+        // Fallback para OpenRouter abaixo
+      }
     }
 
-    let response;
-    try {
-      response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, max_tokens: 320, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
-        signal: AbortSignal.timeout(45000),
-      });
-    } catch (error) {
-      return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
-    }
+    if (!parsed || !parsed.ok) {
+      // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
+      let key;
+      try {
+        key = await getKey();
+      } catch {
+        return send(502, { error: 'Não foi possível acessar a configuração.' });
+      }
+      if (!key) {
+        return send(503, { error: 'Chave OpenRouter não configurada.' });
+      }
 
-    if (!response || !response.ok) {
-      return send(502, { error: 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').' });
-    }
+      let response;
+      try {
+        response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, max_tokens: 320, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
+          signal: AbortSignal.timeout(45000),
+        });
+      } catch (error) {
+        return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
+      }
 
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      return send(502, { error: 'Resposta inválida do provedor.' });
-    }
+      if (!response || !response.ok) {
+        return send(502, { error: 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').' });
+      }
 
-    const raw = data?.choices?.[0]?.message?.content;
-    const parsed = parseProviderRaw(raw);
-    if (!parsed.ok) {
-      return send(parsed.status, { error: parsed.error });
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        return send(502, { error: 'Resposta inválida do provedor.' });
+      }
+
+      const raw = data?.choices?.[0]?.message?.content;
+      const parsedRouter = parseProviderRaw(raw);
+      if (!parsedRouter.ok) {
+        return send(parsedRouter.status, { error: parsedRouter.error });
+      }
+
+      parsed = {
+        ...parsedRouter,
+        classification,
+        source: 'openrouter',
+      };
     }
 
     // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
