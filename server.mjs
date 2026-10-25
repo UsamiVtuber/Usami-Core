@@ -40,6 +40,29 @@ export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
 // Heurística do "remember": sinais de fato duradouro → núcleo; o resto é recente.
 const DURABLE_FACT = /\b(anivers[áa]rio|gosta|tem|nome)\b|\b\d{1,2}\/\d{1,2}\b/i;
 
+// Fila de comandos vindos do n8n (n8n → Usami). O cliente (Usami.jsx) consome
+// via GET /api/n8n/commands e aplica no avatar localmente (gesto, expressão,
+// morph, visibilidade de mesh). O servidor não tem acesso direto ao avatar do
+// navegador, então a fila é o ponto de integração.
+const n8nCommandQueue = [];
+
+// Comando válido para controle direto do avatar (executado pelo cliente).
+const VALID_COMMAND_TYPES = new Set([
+  'say',           // diz algo (usa /api/chat internamente)
+  'gesture',       // gesture: tilt | wave | idle
+  'set_expression',// expressão VRM com peso
+  'set_morph',     // morph target com valor
+  'set_mesh_visible',// mostra/esconde mesh acessório
+]);
+
+function isValidN8nCommand(cmd) {
+  if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) return false;
+  if (!VALID_COMMAND_TYPES.has(cmd.type)) return false;
+  if (cmd.type === 'say' && typeof cmd.message !== 'string') return false;
+  if (['gesture', 'set_expression', 'set_morph', 'set_mesh_visible'].includes(cmd.type) && typeof cmd.name !== 'string') return false;
+  return true;
+}
+
 // Memória local + afinidade (data/memory.json, escrita atômica tmp+rename).
 // Falha aqui nunca derruba o chat: o handler isola as operações de memória.
 const memoryStore = createMemoryStore({ dataDir: 'data' });
@@ -70,6 +93,30 @@ const services = buildServices({
   transcribeAudio,
 });
 const flowExecutor = createFlowExecutor({ services, config: {} });
+
+// --- Webhook de saída: Usami → n8n -----------------------------------------
+
+// Endereço do webhook genérico do n8n local. Fire-and-forget: nunca derruba
+// o chat se o n8n estiver indisponível.
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/usami-events';
+
+export async function sendToN8nWebhook(eventType, payload) {
+  try {
+    await fetch(N8N_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: eventType,
+        timestamp: new Date().toISOString(),
+        ...payload,
+      }),
+      // Não aguarda resposta; o n8n pode estar offline sem afetar o chat.
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    // Silencioso por design: automação é opcional.
+  }
+}
 
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
   if (!origin) return true;
@@ -367,6 +414,20 @@ export function createChatHandler(options = {}) {
     }
 
     const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
+
+    // Dispara evento para o n8n (fire-and-forget): resposta, emoção,
+    // ações de animação e afinidade. Não bloqueia o chat se o n8n estiver
+    // offline.
+    void sendToN8nWebhook('usami.response', {
+      userMessage: parsedBody.message,
+      reply: parsed.reply,
+      gesture: parsed.gesture,
+      actions,
+      emotion: classification,
+      affinity: affinityPayload,
+      source: parsed.source,
+    });
+
     return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, ...(affinityPayload || {}) });
   };
 }
@@ -437,6 +498,85 @@ export function createFlowChatHandler(options = {}) {
     } catch (error) {
       return send(500, { error: 'Erro interno no flow: ' + error.message });
     }
+  };
+}
+
+// --- n8n → Usami: fila de comandos ------------------------------------------
+
+export function createN8nCommandHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+
+  return async function handleN8nCommand(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    // GET — cliente consome e limpa a fila de comandos pendentes
+    if (req.method === 'GET' && req.url === '/api/n8n/commands') {
+      const pending = [...n8nCommandQueue];
+      n8nCommandQueue.length = 0;
+      return send(200, { commands: pending, count: pending.length });
+    }
+
+    // DELETE — limpa a fila (ex.: cliente desistiu de aplicar)
+    if (req.method === 'DELETE' && req.url === '/api/n8n/commands') {
+      const cleared = n8nCommandQueue.length;
+      n8nCommandQueue.length = 0;
+      return send(200, { cleared });
+    }
+
+    // POST — n8n envia um comando para ser aplicado pelo cliente
+    if (req.method === 'POST' && req.url === '/api/n8n/command') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+
+      let body = '';
+      let tooLarge = false;
+      for await (const chunk of req) {
+        body += chunk;
+        if (body.length > 8192) {
+          tooLarge = true;
+          break;
+        }
+      }
+      if (tooLarge) {
+        return send(413, { error: 'Comando muito longo.' });
+      }
+
+      let cmd;
+      try {
+        cmd = JSON.parse(body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+
+      if (!isValidN8nCommand(cmd)) {
+        return send(400, { error: 'Comando inválido. Tipos válidos: say, gesture, set_expression, set_morph, set_mesh_visible.' });
+      }
+
+      const entry = {
+        id: Math.random().toString(36).slice(2, 10),
+        timestamp: new Date().toISOString(),
+        ...cmd,
+      };
+      n8nCommandQueue.push(entry);
+
+      // Mantém a fila limitada para não crescer indefinidamente.
+      if (n8nCommandQueue.length > 100) n8nCommandQueue.shift();
+
+      return send(200, { ok: true, id: entry.id, queued: n8nCommandQueue.length });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
   };
 }
 
@@ -859,10 +999,14 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleChat = createChatHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
+  const handleN8nCommand = createN8nCommandHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
     if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
+    if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
+    if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
+    if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });

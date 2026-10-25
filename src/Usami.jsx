@@ -683,6 +683,46 @@ export function Usami() {
     finally { busyRef.current = false; setBusy(false); }
   };
   useEffect(() => { submitRef.current = submitMessage; });
+
+  // Frente n8n: consome comandos vindos do n8n e aplica no avatar localmente.
+  // O servidor não acessa o DOM do navegador, então a fila de comandos é o
+  // ponto de integração (n8n POST /api/n8n/command → cliente GET consome).
+  useEffect(() => {
+    let timer;
+    const poll = async () => {
+      try {
+        const response = await fetch('/api/n8n/commands');
+        if (!response.ok) return;
+        const data = await response.json();
+        const commands = data?.commands ?? [];
+        for (const cmd of commands ?? []) {
+          const ctrl = controller.current;
+          if (!ctrl) continue;
+          try {
+            if (cmd.type === 'say') {
+              submitRef.current?.(cmd.message);
+            } else if (cmd.type === 'gesture') {
+              ctrl.gesture(cmd.name);
+            } else if (cmd.type === 'set_expression') {
+              ctrl.setExpression(cmd.name, cmd.weight ?? 1);
+            } else if (cmd.type === 'set_morph') {
+              ctrl.setMorph(cmd.name, cmd.value ?? 0);
+            } else if (cmd.type === 'set_mesh_visible') {
+              ctrl.setMeshVisible(cmd.name, cmd.visible ?? true);
+            }
+          } catch {
+            // Falha ao aplicar um comando não interrompe os seguintes.
+          }
+        }
+      } catch {
+        // n8n offline: ignora e tenta de novo no próximo ciclo.
+      }
+    };
+    poll();
+    timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [controller]);
+
   const sendMessage = event => { event.preventDefault(); submitMessage(text); };
   const meshList = report?.meshList || [];
   const topLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
