@@ -95,9 +95,17 @@ export function buildSequenceRequest(request) {
   }
 }
 
+// Parâmetros que cada shape aceita (nomes e resumo para o prompt). O motor de
+// experimentação usa `names` para varrer grade sem duplicar o conhecimento.
+export const SHAPE_PARAMS = Object.freeze({
+  'wave-arm': { names: ['amplitude', 'cycles', 'durationMs', 'side'], hint: 'amplitude 0.02-0.5, cycles 1-8, durationMs 600-8000, side left|right' },
+  'sway-arms': { names: ['amplitude', 'cycles', 'durationMs'], hint: 'amplitude, cycles, durationMs' },
+  nod: { names: ['amplitude', 'cycles', 'durationMs'], hint: 'amplitude, cycles, durationMs' },
+  'head-tilt-curve': { names: ['amplitude', 'cycles', 'durationMs'], hint: 'amplitude, cycles, durationMs' },
+  reach: { names: ['amplitude', 'durationMs', 'side'], hint: 'amplitude, durationMs, side' },
+  shiver: { names: ['amplitude', 'durationMs'], hint: 'amplitude, durationMs' },
+});
+
 // Vocabulário compacto para o prompt do sistema (o LLM nunca precisa saber os
 // limites internos; buildSequenceRequest impõe).
-export const SHAPE_CATALOG = SHAPE_NAMES.map(shape => {
-  const params = { 'wave-arm': 'amplitude 0.02-0.5, cycles 1-8, durationMs 600-8000, side left|right', 'sway-arms': 'amplitude, cycles, durationMs', nod: 'amplitude, cycles, durationMs', 'head-tilt-curve': 'amplitude, cycles, durationMs', reach: 'amplitude, durationMs, side', shiver: 'amplitude, durationMs' }[shape];
-  return `${shape} (${params})`;
-}).join('; ');
+export const SHAPE_CATALOG = SHAPE_NAMES.map(shape => `${shape} (${SHAPE_PARAMS[shape].hint})`).join('; ');

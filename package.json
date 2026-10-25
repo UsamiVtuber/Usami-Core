@@ -8,9 +8,10 @@
     "api": "node server.mjs",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test:unit": "node --test tests/animation-utils.test.mjs tests/custom-motion.test.mjs tests/capability-manifest.test.mjs tests/mesh-preferences.test.mjs tests/motion-director.test.mjs tests/auto-motion.test.mjs tests/vrm-idle-sway.test.mjs tests/visemes.test.mjs tests/expressions-catalog.test.mjs tests/tts-server.test.mjs tests/tts-cache.test.mjs tests/stt-server.test.mjs tests/expression-driver.test.mjs tests/emotion-engine.test.mjs tests/emotion-classifier.test.mjs tests/reply-emotion.test.mjs tests/vrm-gesture-layer.test.mjs tests/vrm-gesture-library.test.mjs tests/motion-sequence.test.mjs tests/sequence-shapes.test.mjs tests/vrm-sequence-layer.test.mjs tests/motion-director-sequence.test.mjs tests/flow-nodes.test.mjs tests/flow-executor.test.mjs tests/memory-store.test.mjs tests/affinity.test.mjs tests/audio-lipsync.test.mjs",
+    "test:unit": "node --test tests/animation-utils.test.mjs tests/custom-motion.test.mjs tests/capability-manifest.test.mjs tests/mesh-preferences.test.mjs tests/motion-director.test.mjs tests/auto-motion.test.mjs tests/vrm-idle-sway.test.mjs tests/visemes.test.mjs tests/expressions-catalog.test.mjs tests/tts-server.test.mjs tests/tts-cache.test.mjs tests/stt-server.test.mjs tests/expression-driver.test.mjs tests/emotion-engine.test.mjs tests/emotion-classifier.test.mjs tests/reply-emotion.test.mjs tests/vrm-gesture-layer.test.mjs tests/vrm-gesture-library.test.mjs tests/motion-sequence.test.mjs tests/sequence-shapes.test.mjs tests/vrm-sequence-layer.test.mjs tests/motion-director-sequence.test.mjs tests/motion-evaluation.test.mjs tests/motion-experiments.test.mjs tests/flow-nodes.test.mjs tests/flow-executor.test.mjs tests/memory-store.test.mjs tests/affinity.test.mjs tests/audio-lipsync.test.mjs",
     "test:chat": "node --test tests/chat-server.test.mjs tests/n8n-commands.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs",
+    "experiments": "node scripts/run-motion-experiments.mjs",
     "test": "npm run test:unit && npm run test:chat && npm run test:sites"
   },
   "dependencies": {
