@@ -566,40 +566,49 @@ export function Usami() {
       if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     }
   };
-  // Fila de áudio da resposta: TODAS as partes são sintetizadas em paralelo
-  // (um POST /api/tts por parte, disparados de uma vez) e tocadas em série —
-  // a parte 1 fala enquanto a 2 ainda está sendo baixada/sintetizada. O
-  // mesmo HTMLAudioElement é reutilizado (só pode passar por
-  // createMediaElementSource uma vez); cada blob: URL é revogado após tocar.
-  const speakReply = async (reply, styleId = 'neutral', timedActions = []) => {
-    // Mute: nunca pede /api/tts — a boca fica fechada (fallback mudo), o mesmo
-    // comportamento do catch abaixo quando o áudio não chega.
-    if (voiceOffRef.current) return;
+  // Fila de áudio da resposta: UMA síntese por vez. O provedor de voz não
+  // tolera requisições concorrentes (5 POST /api/tts em paralelo = 5×504; com
+  // uma em voo todas voltam 200), então cada parte é sintetizada, exibida e
+  // tocada em ordem. A síntese da próxima parte é disparada ANTES do playback
+  // da atual — continua havendo só uma requisição em voo, sem buraco de
+  // silêncio entre balões. O mesmo HTMLAudioElement é reutilizado (só pode
+  // passar por createMediaElementSource uma vez); cada blob: URL é revogado
+  // depois de tocar.
+  const speakReply = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
     const parts = (Array.isArray(reply) ? reply : splitReplyParts(String(reply ?? '')))
       .map(part => String(part || '').trim())
       .filter(Boolean);
     if (!parts.length) return;
     const queueId = ++ttsQueue.current;
+    const alive = () => !voiceOffRef.current && ttsQueue.current === queueId;
+    // Sem áudio (mudo ou síntese quebrada) as ações agendadas não têm com que
+    // se sincronizar: executar em vez de descartar, senão o corpo não reage.
+    const flushTimedActions = () => { for (const action of timedActions) director.current?.execute([action]); };
+    // Mute: nunca pede /api/tts — os balões entram todos de uma vez e a boca
+    // fica fechada (fallback mudo), como quando a síntese falha.
+    if (voiceOffRef.current) { parts.forEach(part => onPart(part)); flushTimedActions(); return; }
     if (!ttsAudio.current) ttsAudio.current = new Audio();
     const audio = ttsAudio.current;
-    // Requisições em paralelo; o resultado nunca rejeita (a fila pode ser
-    // abandonada no meio com requisições no ar — sem unhandled rejection).
-    const pending = parts.map(part => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: part, styleId }) })
+    // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
+    // requisição no ar — sem unhandled rejection.
+    const synth = text => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId }) })
       .then(async response => {
         const type = response.headers.get('content-type') || '';
         if (!response.ok || !type.includes('audio/')) throw new Error('tts-status-' + response.status);
         return URL.createObjectURL(await response.blob());
       })
-      .then(url => ({ ok: true, url }, () => ({ ok: false, url: null }))));
-    let played = false;
+      .catch(() => null);
     let attached = false;
-    for (const promise of pending) {
-      // Parte falhou: segue para a seguinte. Fila superseded/mute: sai e o
-      // sweep abaixo revoga o que ainda resolver.
-      if (voiceOffRef.current || ttsQueue.current !== queueId) break;
-      const result = await promise;
-      if (!result.ok) continue;
-      if (voiceOffRef.current || ttsQueue.current !== queueId) { URL.revokeObjectURL(result.url); break; }
+    let pending = synth(parts[0]);
+    for (let index = 0; index < parts.length; index += 1) {
+      const url = await pending;
+      pending = null;
+      // Fila superseded ou mute durante a síntese: larga o resto.
+      if (!alive()) { if (url) URL.revokeObjectURL(url); break; }
+      // O balão nasce junto da fala dele. Sem áudio (síntese falhou) o texto
+      // ainda aparece — provedor quebrado não apaga resposta.
+      onPart(parts[index]);
+      if (!url) continue;
       if (!attached) {
         // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
         // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
@@ -619,15 +628,16 @@ export function Usami() {
           });
         }
       }
-      played = true;
+      pending = index + 1 < parts.length ? synth(parts[index + 1]) : null;
       audio.playbackRate = quiet ? .8 : 1;
-      await playAudioPart(audio, result.url);
-      URL.revokeObjectURL(result.url);
+      await playAudioPart(audio, url);
+      URL.revokeObjectURL(url);
+      if (!alive()) break;
     }
-    // Sweep: URLs de partes resolvidas e nunca tocadas (fila abandonada).
-    // revoke em URL já revogada é no-op.
-    Promise.all(pending).then(results => { for (const r of results) if (r.ok) URL.revokeObjectURL(r.url); });
-    if (!played) audioLipSync.current?.clear();
+    // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
+    // revoga quando resolver. revoke em URL já revogada é no-op.
+    if (pending) Promise.resolve(pending).then(url => { if (url) URL.revokeObjectURL(url); });
+    if (!attached) { audioLipSync.current?.clear(); flushTimedActions(); }
   };
   const awardXP = gains => {
     setIntimacy(previous => {
@@ -776,11 +786,15 @@ export function Usami() {
       const bubbles = replyParts.length ? replyParts : [String(data.reply).trim()];
       if (spoken) {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
-        // HTMLAudioElement) — timing via utterance.onend / setTimeout, sem
-        // fila de partes; só a exibição é dividida em balões.
+        // HTMLAudioElement) nem pela fila de partes — timing via
+        // utterance.onend / setTimeout e balões exibidos de uma vez.
         speakSpoken(data.reply, timedActions);
-      } else speakReply(bubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions);
-      bubbles.forEach(part => addTurn('assistant', part, spoken ? 'voice' : 'text'));
+        bubbles.forEach(part => addTurn('assistant', part, 'voice'));
+      } else {
+        // Cada balão é exibido por speakReply no instante em que a fala dele
+        // toca: mensagem → áudio → mensagem → áudio, um atrás do outro.
+        speakReply(bubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions, part => addTurn('assistant', part, 'text'));
+      }
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
       if (!spoken) setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }

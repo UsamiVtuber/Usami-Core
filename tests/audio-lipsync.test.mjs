@@ -23,8 +23,8 @@ function makeAudioElement({ readyState = 2, paused = false, src = 'blob:usami-tt
   return element;
 }
 
-function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, withAnalyserConnect = true } = {}) {
-  const calls = { sources: 0, analysers: 0, closes: 0, sourceDisconnects: 0 };
+function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, withAnalyserConnect = true, state = 'running' } = {}) {
+  const calls = { sources: 0, analysers: 0, closes: 0, sourceDisconnects: 0, resumes: 0 };
   const analyser = {
     fftSize: 0,
     smoothingTimeConstant: 0,
@@ -36,7 +36,7 @@ function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, withAn
   if (!withAnalyserConnect) delete analyser.connect;
   const ctx = {
     destination: {},
-    state: 'running',
+    state,
     createMediaElementSource() {
       calls.sources += 1;
       if (sourceThrows) throw new Error('media element indisponível');
@@ -44,7 +44,11 @@ function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, withAn
     },
     createAnalyser() { calls.analysers += 1; return analyser; },
     close() { calls.closes += 1; },
-    resume() {},
+    resume() {
+      calls.resumes += 1;
+      if (resumeThrows) throw new Error('resume indisponível');
+      ctx.state = 'running';
+    },
   };
   // `new Ctor()` precisa de função construtora — arrow não é constructível.
   const Ctor = function () { return ctx; };
@@ -110,6 +114,24 @@ test('silêncio total mantém os visemas em 0 e o grafo nasce uma única vez', (
   assert.equal(web.calls.analysers, 1);
   assert.equal(web.analyser.fftSize, 256);
   assert.equal(web.analyser.smoothingTimeConstant, 0.3);
+});
+
+test('contexto suspenso é retomado (sem isso o elemento roteado fica mudo)', () => {
+  const targets = makeMorphTargets();
+  const web = makeWebAudio({ state: 'suspended', data: new Uint8Array(128).fill(255) });
+  const clock = makeClock();
+  const layer = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
+  layer.update();
+  assert.equal(web.calls.resumes, 1, 'resume chamado a cada frame enquanto suspenso');
+  clock.advance(ATTACK_TAU_MS);
+  layer.update();
+  assert.ok(Math.max(...valuesOf(targets)) > 0, 'a boca continua sendo dirigida');
+
+  // 'running' de fábrica não gasta resume algum.
+  const idle = makeWebAudio();
+  const live = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: makeMorphTargets(), now: makeClock().now, AudioContextCtor: idle.Ctor });
+  live.update();
+  assert.equal(idle.calls.resumes, 0);
 });
 
 test('voz cheia (bins 255) abre a boca: ≈0.95 após ~3×tau de ataque (90 ms)', () => {
