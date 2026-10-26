@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createFlowExecutor } from '../src/flow-executor.js';
 import { buildServices } from '../src/flow-services.js';
 import { createMemoryStore } from '../src/memory-store.js';
@@ -8,7 +11,10 @@ import { createEmotionEngine } from '../src/emotion-engine.js';
 import { createExpressionDriver } from '../src/expression-driver.js';
 
 function makeServices() {
-  const memoryStore = createMemoryStore({ dataDir: 'data' });
+  // dataDir temporário: apontar para 'data' escreveria turnos de teste na
+  // memória real da companion (data/memory.json).
+  const dir = mkdtempSync(join(tmpdir(), 'usami-flow-memory-'));
+  const memoryStore = createMemoryStore({ dataDir: dir });
   try { memoryStore.load(); } catch {}
   const emotionEngine = createEmotionEngine({
     driver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),

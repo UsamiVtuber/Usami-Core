@@ -1,11 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createMemoryStore } from '../src/memory-store.js';
 
 // Isolamento: proíbe a rota NVIDIA (rede real) nos testes; força o caminho
 // OpenRouter onde fetchImpl/getKey são injetados.
 process.env.USE_NVIDIA = 'false';
 
+// O handler do chat grava turno e afinidade em <dataDir>/memory.json. Antes, um
+// `npm test` bastava para encher a memória real da companion com "oi/olá" de
+// teste — por isso o diretório é trocado ANTES de importar o servidor, que cria
+// o depósito na avaliação do módulo, e cada handler recebe o seu próprio.
+const scratchMemoryDir = mkdtempSync(join(tmpdir(), 'usami-chat-memory-'));
+process.env.USAMI_DATA_DIR = scratchMemoryDir;
+
 const { createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } = await import('../server.mjs');
+
+const scratchMemoryStore = createMemoryStore({ dataDir: scratchMemoryDir });
+scratchMemoryStore.load();
+const chatHandler = (options = {}) => createChatHandler({ memoryStore: scratchMemoryStore, ...options });
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -177,7 +192,7 @@ test('systemFor embute capabilities no prompt', () => {
 });
 
 test('handler: 404 para método/rota incorretos', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
   const res = mockRes();
   await handler(mockReq({ method: 'GET', url: '/api/chat' }), res);
   assert.equal(res.statusCode, 404);
@@ -187,35 +202,35 @@ test('handler: 404 para método/rota incorretos', async () => {
 });
 
 test('handler: 403 origem inválida', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse(''), allowedOrigins: ['http://127.0.0.1:5173'] });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse(''), allowedOrigins: ['http://127.0.0.1:5173'] });
   const res = mockRes();
   await handler(mockReq({ headers: { origin: 'https://evil.com', 'content-type': 'application/json', host: '127.0.0.1:8787' } }), res);
   assert.equal(res.statusCode, 403);
 });
 
 test('handler: 403 content-type inválido', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'text/plain', host: '127.0.0.1:8787' } }), res);
   assert.equal(res.statusCode, 403);
 });
 
 test('handler: 413 body muito grande', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: 'x'.repeat(9000) }), res);
   assert.equal(res.statusCode, 413);
 });
 
 test('handler: 400 mensagem inválida', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: '' }) }), res);
   assert.equal(res.statusCode, 400);
 });
 
 test('handler: modo offline quando não há chave de LLM', async () => {
-  const handler = createChatHandler({ getKey: async () => null, fetchImpl: async () => { throw new Error('não deve chamar rede no modo offline'); } });
+  const handler = chatHandler({ getKey: async () => null, fetchImpl: async () => { throw new Error('não deve chamar rede no modo offline'); } });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 200);
@@ -227,7 +242,7 @@ test('handler: modo offline quando não há chave de LLM', async () => {
 
 test('handler: 200 com resposta válida', async () => {
   let calls = 0;
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => { calls++; return jsonResponse('{"reply":"olá","gesture":"tilt"}'); } });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => { calls++; return jsonResponse('{"reply":"olá","gesture":"tilt"}'); } });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 200);
@@ -244,7 +259,7 @@ test('handler: 200 applies the actions returned by the LLM in a single call', as
     calls++;
     return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[{"type":"set_expression","name":"happy","weight":0.5}]}');
   };
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy'], gestures: ['tilt'] } }) }), res);
   assert.equal(res.statusCode, 200);
@@ -261,7 +276,7 @@ test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
     calls++;
     return jsonResponse('{"reply":"olá","gesture":"tilt","actions":[{"type":"gesture","name":"tilt"},{"type":"set_expression","name":"happy","weight":0.5}]}');
   };
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi', capabilities: { expressions: ['happy'], gestures: [] } }) }), res);
   assert.equal(res.statusCode, 200);
@@ -272,7 +287,7 @@ test('handler: 200 filtra gesture fora do catálogo anunciado', async () => {
 });
 
 test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 502);
@@ -282,7 +297,7 @@ test('handler: 502 quando provedor retorna formato inválido', async () => {
   // Conteúdo vazio não tem como virar reply — 502. Texto livre (sem começar
   // por "{") é tolerado de propósito pelo parseProviderRaw; JSON truncado só
   // aproveita o "reply" recuperável.
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('   ') });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('   ') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 502);
@@ -367,7 +382,7 @@ test('parseProviderRaw: reply longo é cortado em fronteira de sentença, sem el
 });
 
 test('handler: 200 com reply recuperado de JSON truncado, sem vazar o payload bruto', async () => {
-  const handler = createChatHandler({
+  const handler = chatHandler({
     getKey: async () => 'k',
     fetchImpl: async () => jsonResponse('{"reply":"Ora, vê com os próprios olhos! *sorri*","actions":[{"type"'),
   });
@@ -380,7 +395,7 @@ test('handler: 200 com reply recuperado de JSON truncado, sem vazar o payload br
 });
 
 test('handler: timeout vira 502', async () => {
-  const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => { const e = new Error('timeout'); e.name = 'TimeoutError'; throw e; } });
+  const handler = chatHandler({ getKey: async () => 'k', fetchImpl: async () => { const e = new Error('timeout'); e.name = 'TimeoutError'; throw e; } });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 502);

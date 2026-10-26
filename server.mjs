@@ -94,9 +94,11 @@ function isValidN8nCommand(cmd) {
 
 // Memória local + afinidade (data/memory.json, escrita atômica tmp+rename).
 // Falha aqui nunca derruba o chat: o handler isola as operações de memória.
-const memoryStore = createMemoryStore({ dataDir: 'data' });
+// USAMI_DATA_DIR existe para os testes: sem ele, importar este módulo já bastava
+// para criar e depois encher o memory.json real da companion.
+const installMemoryStore = createMemoryStore({ dataDir: process.env.USAMI_DATA_DIR || 'data' });
 try {
-  memoryStore.load();
+  installMemoryStore.load();
 } catch {
   console.error('Aviso: memória local indisponível — o chat segue sem contexto persistido.');
 }
@@ -114,7 +116,7 @@ const services = buildServices({
     return parsed.OPENROUTER_API_KEY || null;
   },
   model: DEFAULT_MODEL,
-  memoryStore,
+  memoryStore: installMemoryStore,
   classifyEmotion,
   emotionEngine,
   expressionDriver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),
@@ -391,6 +393,9 @@ export function createChatHandler(options = {}) {
   const model = options.model || process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
   const systemBase = options.system || DEFAULT_SYSTEM;
   const now = options.now || (() => Date.now());
+  // Testes injetam um depósito temporário; sem isso o handler do chat escreveria
+  // em data/memory.json de verdade a cada npm test.
+  const memoryStore = options.memoryStore || installMemoryStore;
 
   return async function handleChat(req, res) {
     const send = (status, data) => {
