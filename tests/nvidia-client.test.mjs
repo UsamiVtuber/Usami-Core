@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { createRateLimiter } from '../src/nvidia-client.js';
+import { createRateLimiter, NvidiaClient } from '../src/nvidia-client.js';
 
 test('rate limiter: permite até rateLimit requisições na janela', async () => {
   const limiter = createRateLimiter({ rateLimit: 3, windowMs: 1000 });
@@ -36,4 +36,30 @@ test('rate limiter: rateLimit 0 nunca libera', async () => {
   const limiter = createRateLimiter({ rateLimit: 0, windowMs: 1000 });
   // Com rateLimit 0, stamps.length (0) < 0 é falso, então sempre espera. Não testamos espera infinita.
   assert.equal(typeof limiter.waitForSlot, 'function');
+});
+
+test('chatJson: pede response_format json_object e devolve content, reasoning e finish_reason', async () => {
+  const envKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'chave-de-teste';
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: '{"actions":[]}', reasoning_content: 'raciocínio do modelo' }, finish_reason: 'stop' }],
+      }),
+    };
+  };
+  try {
+    const client = new NvidiaClient({ rateLimiter: createRateLimiter({ rateLimit: 50, windowMs: 1000 }) });
+    const result = await client.chatJson({ model: 'm', messages: [{ role: 'user', content: 'oi' }] });
+    assert.deepEqual(result, { content: '{"actions":[]}', reasoning: 'raciocínio do modelo', finishReason: 'stop' });
+    assert.equal(bodies[0].response_format.type, 'json_object', 'o JSON pedido deve usar response_format');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (envKey === undefined) delete process.env.NVIDIA_API_KEY;
+    else process.env.NVIDIA_API_KEY = envKey;
+  }
 });

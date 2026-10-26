@@ -138,6 +138,25 @@ export class NvidiaClient {
     const data = await this.chatCompletions({ model, messages, temperature, max_tokens });
     return data?.choices?.[0]?.message?.content || '';
   }
+
+  // Chamada que espera JSON. NEMOTRON escreve o raciocínio em
+  // `reasoning_content`, mas quando o raciocínio estoura o orçamento de
+  // tokens ele transborda para `content` e o JSON nunca nasce — com
+  // response_format o modelo vai direto ao JSON (11.7s vs 19.4s medidos).
+  // Retorna os três campos para o chamador poder resgatar o JSON do raciocínio.
+  async chatJson({ model, messages, temperature = 0.7, max_tokens = 320 }) {
+    const data = await this.chatCompletions({
+      model, messages, temperature, max_tokens,
+      response_format: { type: 'json_object' },
+    });
+    const choice = data?.choices?.[0];
+    const message = choice?.message || {};
+    return {
+      content: message.content || '',
+      reasoning: message.reasoning_content || message.reasoning || '',
+      finishReason: choice?.finish_reason || null,
+    };
+  }
 }
 
 // Instância compartilhada (rate limiter global entre as 3 funções).

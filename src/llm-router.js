@@ -73,14 +73,14 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
     { role: 'user', content: text },
   ];
   try {
-    const raw = await sharedClient.chatText({
+    const answer = await sharedClient.chatJson({
       model: CLASSIFICATION_MODEL,
       messages,
       temperature: 0.2,
       // Orçamento p/ o preâmbulo de raciocínio do modelo; 200 morria antes do JSON.
       max_tokens: 500,
     });
-    const parsed = parseJsonSafe(raw);
+    const parsed = parseJsonSafe(jsonText(answer, 'emotion'), { label: 'de classificação', answer });
     return {
       emotion: parsed.emotion || 'neutral',
       confidence: Number.isFinite(parsed.confidence) ? Math.min(1, Math.max(0, parsed.confidence)) : 0,
@@ -89,7 +89,7 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
       source: 'nvidia',
     };
   } catch (error) {
-    console.warn('NVIDIA classification falhou, fallback local:', error.message);
+    console.warn('NVIDIA classification falhou, fallback local:', describeFetchError(error));
     const result = classifier(text) || { label: 'neutral', intensity: 0, confidence: 0 };
     return {
       emotion: result.label,
@@ -110,13 +110,13 @@ export async function generateReply(systemPrompt, userMessage, { temperature = 0
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage },
   ];
-  const raw = await sharedClient.chatText({
+  const answer = await sharedClient.chatJson({
     model: GENERATION_MODEL,
     messages,
     temperature,
     max_tokens: 700,
   });
-  return raw;
+  return jsonText(answer, 'reply');
 }
 
 // --- Animação (planeja ações com base na resposta) -------------------------
@@ -130,7 +130,7 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
     { role: 'user', content: `Resposta da Usami: "${reply}"\nCapacidades do avatar: ${capsSummary}` },
   ];
   try {
-    const raw = await sharedClient.chatText({
+    const answer = await sharedClient.chatJson({
       model: ANIMATION_MODEL,
       messages,
       temperature,
@@ -138,11 +138,11 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
       // tokens o texto morria no raciocínio e as actions voltavam vazias.
       max_tokens: 900,
     });
-    const parsed = parseJsonSafe(raw, { label: 'de animação' });
+    const parsed = parseJsonSafe(jsonText(answer, 'actions'), { label: 'de animação', answer });
     const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
     return { actions, source: 'nvidia' };
   } catch (error) {
-    console.warn('NVIDIA animation falhou:', error.message);
+    console.warn('NVIDIA animation falhou:', describeFetchError(error));
     return { actions: [], source: 'nvidia-fallback' };
   }
 }
@@ -166,6 +166,17 @@ export async function structureTechnique(userPrompt, { temperature = 0.2 } = {})
 
 // --- Utilitários -----------------------------------------------------------
 
+// fetch() do undici rejeita com a mensagem genérica "fetch failed" e esconde o
+// motivo real em error.cause (ENOTFOUND, ECONNRESET, UND_ERR_*). Sem isso o 502
+// do chat ficava indecifrável no log.
+export function describeFetchError(error) {
+  const message = error?.message || String(error);
+  const cause = error?.cause;
+  if (!cause) return message;
+  const detail = cause.code || cause.message || String(cause);
+  return `${message} (causa: ${detail})`;
+}
+
 async function keyExists() {
   try {
     await sharedClient.chatText({ model: CLASSIFICATION_MODEL, messages: [{ role: 'user', content: 'test' }], max_tokens: 1 });
@@ -175,7 +186,27 @@ async function keyExists() {
   }
 }
 
-function parseJsonSafe(raw, { label = '' } = {}) {
+// O JSON pedido pode estar em `content` ou, quando o raciocínio transborda,
+// escondido no fim de `reasoning_content`. Só trocamos para o raciocínio quando
+// ele contém um objeto JSON com a chave esperada — o raciocínio do modelo
+// reescreve o system prompt, e devolvê-lo como texto faria a Usami "falar o
+// próprio prompt" em vez de responder.
+export function jsonText({ content = '', reasoning = '' } = {}, requiredKey = null) {
+  const texts = [String(content ?? ''), String(reasoning ?? '')];
+  for (const text of texts) {
+    if (!text.includes('{')) continue;
+    if (!requiredKey) return text;
+    const candidate = extractJsonCandidate(text);
+    if (candidate && candidate.includes(`"${requiredKey}"`)) {
+      try {
+        if (JSON.parse(candidate)[requiredKey] !== undefined) return text;
+      } catch {}
+    }
+  }
+  return texts[0] || texts[1] || '';
+}
+
+function parseJsonSafe(raw, { label = '', answer = null } = {}) {
   const text = String(raw ?? '');
   const fenced = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   try {
@@ -189,7 +220,8 @@ function parseJsonSafe(raw, { label = '' } = {}) {
       } catch {}
     }
     // Sem isso a chamada falhava muda — `actions: []` no chat sem nenhum rastro.
-    console.warn(`llm-router: saída ${label || 'do modelo'} não é JSON recuperável (${text.slice(0, 80)}...)`);
+    const finish = answer?.finishReason ? ` finish=${answer.finishReason}` : '';
+    console.warn(`llm-router: saída ${label || 'do modelo'} não é JSON recuperável (${finish}; ${text.slice(0, 80)}...)`);
     return {};
   }
 }

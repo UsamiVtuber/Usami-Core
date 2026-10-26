@@ -16,7 +16,7 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, generateReply, planAnimation, structureTechnique } from './src/llm-router.js';
+import { classifyUserMessage, describeFetchError, generateReply, planAnimation, structureTechnique } from './src/llm-router.js';
 import { readRagContext } from './src/rag.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
 import { createTechniqueIndex } from './src/technique-index.js';
@@ -489,7 +489,7 @@ export function createChatHandler(options = {}) {
           source: 'nvidia',
         };
       } catch (error) {
-        console.warn('NVIDIA falhou, tentando OpenRouter:', error.message);
+        console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
         // Fallback para OpenRouter abaixo
       }
     }
@@ -535,6 +535,7 @@ export function createChatHandler(options = {}) {
             signal: AbortSignal.timeout(45000),
           });
         } catch (error) {
+          console.warn('OpenRouter falhou:', describeFetchError(error));
           return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
         }
 

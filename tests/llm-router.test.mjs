@@ -1,6 +1,42 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { classifyUserMessage, planAnimation } from '../src/llm-router.js';
+
+// Isolamento: sem chave NVIDIA no processo de teste o roteador cai nos
+// classificadores locais, e `npm test` não faz chamada de rede.
+delete process.env.NVIDIA_API_KEY;
+
+const { classifyUserMessage, jsonText, planAnimation } = await import('../src/llm-router.js');
+
+test('jsonText: pega o content quando ele já é JSON', () => {
+  assert.equal(jsonText({ content: '{"actions":[]}', reasoning: 'prosa de raciocínio' }), '{"actions":[]}');
+});
+
+test('jsonText: resgata o JSON do raciocínio quando o content é só prosa', () => {
+  // Raciocínio que transbordou para content: o JSON ficou preso no reasoning_content.
+  assert.equal(
+    jsonText({ content: 'The user wants me to create animation actions for a VRM avatar...', reasoning: 'plano {"actions":[{"type":"gesture","name":"tilt"}]} fim' }),
+    'plano {"actions":[{"type":"gesture","name":"tilt"}]} fim',
+  );
+});
+
+test('jsonText: sem JSON em nenhum campo devolve o texto disponível', () => {
+  assert.equal(jsonText({ content: 'sem json aqui', reasoning: 'nem aqui' }), 'sem json aqui');
+  assert.equal(jsonText({ content: '', reasoning: 'só raciocínio' }), 'só raciocínio');
+  assert.equal(jsonText(), '');
+});
+
+test('jsonText: com chave exigida, só usa o raciocínio se ele tiver o objeto pedido', () => {
+  const reasoningComReply = { content: 'prosa solta', reasoning: 'blah {"reply":"oi!"} blah' };
+  assert.equal(jsonText(reasoningComReply, 'reply'), 'blah {"reply":"oi!"} blah');
+  // O raciocínio do modelo reescreve o system prompt; sem o JSON-chave ele NÃO pode
+  // virar resposta, sob pena de a Usami "falar o próprio prompt".
+  const reasoningSemReply = {
+    content: 'prosa solta',
+    reasoning: 'System Prompt: Você é Usami, uma companion acolhedora. {"nota":"x"}',
+  };
+  assert.equal(jsonText(reasoningSemReply, 'reply'), 'prosa solta');
+  assert.equal(jsonText({ content: '{"reply":"oi","gesture":"tilt"}', reasoning: '{"reply":"vazada"}' }, 'reply'), '{"reply":"oi","gesture":"tilt"}');
+});
 
 // Mock do sharedClient para não depender da chave NVIDIA real.
 const originalClient = globalThis.sharedClientMockPlaceholder;
