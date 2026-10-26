@@ -5,19 +5,31 @@
 // absoluta). Por isso o repouso é idempotente e as camadas (sway, expressões,
 // blink) compõem sem se pisarem.
 //
-// Convenção de eixos (braços em T-pose, óssea local +X ao longo do osso):
-//   upperArm.z negativo = braço sobe | upperArm.x negativo = braço vai à frente
-//   lowerArm.z negativo = dobra o cotovelo | shoulder.z negativo = ombro sobe
+// EIXOS SEMÂNTICOS (A opção): os braços não são descritos em Euler local — que
+// muda de sentido conforme o roll da armature de cada modelo (e espelha entre L
+// e R no shiro.vrm) — e sim pela intenção do movimento:
+//   raise = marcador sobe | fwd = marcador vai à frente do personagem
+//   flex = cotovelo dobra (mão encurta a distância ao ombro)
+//   fold = palma dobra para frente | flick = mão varre para o lado
+// A tabela {osso → (eixo local, sinal)} vem de vrm-bone-calibration.js: calibrada
+// no load contra o modelo real, ou a convenção legada como fallback. Valores
+// semânticos são positivos na direção nomeada; o sinal local é responsabilidade
+// da tabela, não da definição.
+//
+// ossos de tronco (head/hips/spine/neck) não espelham entre L/R: ficam em Euler
+// cru. head é lido pela camada de gestos (pose + tilt) e chest é do sway
+// (respiração): nenhum dos dois é escrito aqui. Os gestos só mexem
+// `spine.x`/`neck.x`, eixos que nenhum outro driver toca — por isso as camadas
+// compõem em vez de se anularem.
 // Os valores são calibrados visualmente no painel de rig; ossos ausentes no
 // modelo são ignorados, então o gesto degrada em vez de quebrar.
+
+import { legacyAxisTable, resolveAxis } from './vrm-bone-calibration.js';
 
 const ARM_BONES = [
   'leftUpperArm', 'leftLowerArm', 'leftHand', 'leftShoulder',
   'rightUpperArm', 'rightLowerArm', 'rightHand', 'rightShoulder',
 ];
-// head é da camada de gestos (pose + tilt) e chest é do sway (respiração): ambos
-// ficam fora. O que esta biblioteca escreve é só `spine.x`/`neck.x`, eixos que
-// nenhum outro driver toca — por isso as camadas compõem em vez de se anularem.
 const TRUNK_BONES = ['spine', 'neck'];
 const GESTURE_BONES = [...ARM_BONES, 'head', 'hips', ...TRUNK_BONES];
 
@@ -26,83 +38,83 @@ export const GESTURE_DEFS = {
   clap: {
     durationMs: 2400, attackMs: 260, releaseMs: 420,
     bones: {
-      leftUpperArm: { x: -0.30, z: -0.18 }, rightUpperArm: { x: -0.30, z: -0.18 },
-      leftLowerArm: { x: -0.75, z: -0.55 }, rightLowerArm: { x: -0.75, z: 0.55 },
-      leftHand: { x: -0.20 }, rightHand: { x: -0.20 },
+      leftUpperArm: { fwd: 0.95, raise: 0.40 }, rightUpperArm: { fwd: 0.95, raise: 0.40 },
+      leftLowerArm: { fwd: 0.40, flex: 0.95 }, rightLowerArm: { fwd: 0.40, flex: 0.95 },
+      leftHand: { fold: 0.40 }, rightHand: { fold: 0.40 },
     },
     // Palmas: as duas mãos alternam no eixo que as aproxima no plano sagital.
-    osc: [{ bone: 'leftHand', axis: 'z', amplitude: 0.26, hz: 3.4, phase: 0 },
-      { bone: 'rightHand', axis: 'z', amplitude: 0.26, hz: 3.4, phase: Math.PI }],
+    osc: [{ bone: 'leftHand', axis: 'flick', amplitude: 0.26, hz: 3.4, phase: 0 },
+      { bone: 'rightHand', axis: 'flick', amplitude: 0.26, hz: 3.4, phase: Math.PI }],
   },
   'hand-on-hip': {
     durationMs: 3200, attackMs: 320, releaseMs: 520, hold: true,
     bones: {
-      rightUpperArm: { x: -0.10, z: -0.32 }, rightLowerArm: { x: -0.15, z: -1.20 },
-      rightHand: { x: -0.20 }, hips: { y: -0.05 }, head: { z: 0.05 },
+      rightUpperArm: { fwd: 0.10, raise: 0.32 }, rightLowerArm: { fwd: 0.15, flex: 1.20 },
+      rightHand: { fold: 0.20 }, hips: { y: -0.05 }, head: { z: 0.05 },
     },
   },
   // Aceno com as duas mãos — o `wave` legado de um braço fica na camada de gestos.
   wave2: {
     durationMs: 3400, attackMs: 480, releaseMs: 620,
     bones: {
-      leftUpperArm: { z: -1.15 }, rightUpperArm: { z: -1.15 },
-      leftLowerArm: { z: -0.30 }, rightLowerArm: { z: -0.30 },
+      leftUpperArm: { raise: 1.15 }, rightUpperArm: { raise: 1.15 },
+      leftLowerArm: { flex: 0.30 }, rightLowerArm: { flex: 0.30 },
     },
-    osc: [{ bone: 'leftHand', axis: 'z', amplitude: 0.26, hz: 2.2, phase: 0 },
-      { bone: 'rightHand', axis: 'z', amplitude: 0.26, hz: 2.2, phase: 0.4 }],
+    osc: [{ bone: 'leftHand', axis: 'flick', amplitude: 0.26, hz: 2.2, phase: 0 },
+      { bone: 'rightHand', axis: 'flick', amplitude: 0.26, hz: 2.2, phase: 0.4 }],
   },
   point: {
     durationMs: 2600, attackMs: 300, releaseMs: 480,
-    bones: { rightUpperArm: { x: -0.45, z: -0.55 }, rightHand: { x: -0.15 }, head: { y: -0.08 } },
+    bones: { rightUpperArm: { fwd: 0.45, raise: 0.55 }, rightHand: { fold: 0.15 }, head: { y: -0.08 } },
   },
   shrug: {
     durationMs: 2000, attackMs: 220, releaseMs: 380,
     bones: {
-      leftShoulder: { z: -0.18 }, rightShoulder: { z: -0.18 },
-      leftUpperArm: { z: -0.22 }, rightUpperArm: { z: -0.22 },
+      leftShoulder: { raise: 0.18 }, rightShoulder: { raise: 0.18 },
+      leftUpperArm: { raise: 0.22 }, rightUpperArm: { raise: 0.22 },
       neck: { x: -0.08 }, head: { x: -0.06 },
     },
   },
   'head-scratch': {
     durationMs: 2600, attackMs: 300, releaseMs: 460,
     bones: {
-      rightUpperArm: { x: -0.25, z: -1.05 }, rightLowerArm: { x: -0.20, z: -1.45 },
-      rightHand: { x: -0.30 }, head: { x: 0.08, z: 0.07 },
+      rightUpperArm: { fwd: 0.10, raise: 1.55 }, rightLowerArm: { fwd: 0.05, flex: 2.40 },
+      rightHand: { fold: 0.70 }, head: { x: 0.08, z: 0.07 },
     },
-    osc: [{ bone: 'rightHand', axis: 'x', amplitude: 0.10, hz: 2.6, phase: 0 }],
+    osc: [{ bone: 'rightHand', axis: 'fold', amplitude: 0.10, hz: 2.6, phase: 0 }],
   },
   'arms-crossed': {
     durationMs: 2400, attackMs: 340, releaseMs: 520, hold: true,
     bones: {
-      leftUpperArm: { x: -0.35, z: -0.45 }, rightUpperArm: { x: -0.35, z: -0.45 },
-      leftLowerArm: { x: -1.10, z: -0.55 }, rightLowerArm: { x: -1.10, z: 0.55 },
+      leftUpperArm: { fwd: 0.35, raise: 0.45 }, rightUpperArm: { fwd: 0.35, raise: 0.45 },
+      leftLowerArm: { fwd: 1.10, flex: 0.55 }, rightLowerArm: { fwd: 1.10, flex: 0.55 },
       head: { x: 0.06 },
     },
   },
   facepalm: {
     durationMs: 2800, attackMs: 260, releaseMs: 520,
     bones: {
-      rightUpperArm: { x: -0.55, z: -0.85 }, rightLowerArm: { x: -0.30, z: -1.70 },
-      rightHand: { x: -0.35 }, head: { x: 0.12 }, neck: { x: 0.06 },
+      rightUpperArm: { fwd: 0.60, raise: 1.50 }, rightLowerArm: { fwd: 0.30, flex: 2.50 },
+      rightHand: { fold: 0.90 }, head: { x: 0.12 }, neck: { x: 0.06 },
     },
   },
   cheer: {
     durationMs: 2600, attackMs: 280, releaseMs: 520,
-    bones: { leftUpperArm: { z: -2.00 }, rightUpperArm: { z: -2.00 }, head: { x: -0.10 } },
-    osc: [{ bone: 'leftUpperArm', axis: 'z', amplitude: 0.12, hz: 1.8, phase: 0 },
-      { bone: 'rightUpperArm', axis: 'z', amplitude: 0.12, hz: 1.8, phase: Math.PI }],
+    bones: { leftUpperArm: { raise: 2.00 }, rightUpperArm: { raise: 2.00 }, head: { x: -0.10 } },
+    osc: [{ bone: 'leftUpperArm', axis: 'raise', amplitude: 0.12, hz: 1.8, phase: 0 },
+      { bone: 'rightUpperArm', axis: 'raise', amplitude: 0.12, hz: 1.8, phase: Math.PI }],
   },
   'blow-kiss': {
     durationMs: 3000, attackMs: 320, releaseMs: 560,
-    bones: { rightUpperArm: { x: -0.60, z: -1.15 }, rightLowerArm: { x: -0.40, z: -1.55 }, rightHand: { x: -0.25 }, head: { x: -0.05 } },
+    bones: { rightUpperArm: { fwd: 0.65, raise: 1.48 }, rightLowerArm: { fwd: 0.28, flex: 2.45 }, rightHand: { fold: 0.75 }, head: { x: -0.05 } },
     // A mão sai do rosto e vai para fora no fim do gesto.
-    sweep: [{ bone: 'rightUpperArm', axis: 'x', from: -0.60, to: -1.10, start: 0.55, end: 0.9 }],
+    sweep: [{ bone: 'rightUpperArm', axis: 'fwd', from: 0.65, to: 1.10, start: 0.55, end: 0.9 }],
   },
   'hands-on-cheeks': {
     durationMs: 2600, attackMs: 260, releaseMs: 460, hold: true,
     bones: {
-      leftUpperArm: { x: -0.55, z: -0.95 }, rightUpperArm: { x: -0.55, z: -0.95 },
-      leftLowerArm: { x: -0.35, z: -1.60 }, rightLowerArm: { x: -0.35, z: -1.60 },
+      leftUpperArm: { fwd: 0.75, raise: 1.55 }, rightUpperArm: { fwd: 0.75, raise: 1.55 },
+      leftLowerArm: { fwd: 0.12, flex: 2.50 }, rightLowerArm: { fwd: 0.12, flex: 2.50 },
       head: { x: -0.05 },
     },
   },
@@ -160,17 +172,23 @@ const ramp = (progress, start, end) => {
   return t * t * (3 - 2 * t);
 };
 
-// Eixos que um gesto realmente mexe num osso. Escrever só neles é o que permite
-// compor com o sway: spine.z e neck.z são da respiração, e um gesto que os
-// resetasse à base congelaria o avatar enquanto durasse.
-function touchedAxes(def, bone) {
-  const axes = new Set(Object.keys(def.bones[bone] ?? {}));
-  for (const s of def.sweep ?? []) if (s.bone === bone) axes.add(s.axis);
-  for (const o of def.osc ?? []) if (o.bone === bone) axes.add(o.axis);
-  return new Set([...axes].filter(axis => ['x', 'y', 'z'].includes(axis)));
+// Eixos EULER CRUS que um gesto realmente mexe num osso, depois de resolver a
+// semântica pela tabela. Escrever só neles é o que permite compor com o sway:
+// spine.z e neck.z são da respiração, e um gesto que os resetasse à base
+// congelaria o avatar enquanto durasse.
+function touchedAxes(def, bone, axisTable) {
+  const axes = new Set();
+  const add = axisName => {
+    const resolved = resolveAxis(axisTable, bone, axisName);
+    if (resolved) axes.add(resolved.axis);
+  };
+  for (const axisName of Object.keys(def.bones[bone] ?? {})) add(axisName);
+  for (const s of def.sweep ?? []) if (s.bone === bone) add(s.axis);
+  for (const o of def.osc ?? []) if (o.bone === bone) add(o.axis);
+  return axes;
 }
 
-export function createGestureLibrary({ humanoid, now = () => performance.now() }) {
+export function createGestureLibrary({ humanoid, now = () => performance.now(), axisTable = legacyAxisTable() }) {
   const readNode = name => readBoneNode(humanoid, name);
 
   const nodes = {};
@@ -201,8 +219,8 @@ export function createGestureLibrary({ humanoid, now = () => performance.now() }
       if (name === 'head') continue;
       const node = nodes[name];
       if (!node || !base[name]) continue;
-      const keep = nextDef ? touchedAxes(nextDef, name) : null;
-      for (const axis of touchedAxes(def, name)) {
+      const keep = nextDef ? touchedAxes(nextDef, name, axisTable) : null;
+      for (const axis of touchedAxes(def, name, axisTable)) {
         if (keep?.has(axis)) continue;
         node.rotation[axis] = base[name][axis];
       }
@@ -256,6 +274,27 @@ export function createGestureLibrary({ humanoid, now = () => performance.now() }
     return { env: trapezoid(elapsedMs, def.attackMs, def.releaseMs, def.durationMs), progress: elapsedMs / def.durationMs };
   }
 
+  // Total por eixo Euler local do osso: cada nome da definição (semântico ou
+  // cru) é resolvido pela tabela do modelo e acumula no eixo local resultante
+  // (base da pose + sweep + osc). Semântica desconhecida para o osso é ignorada
+  // em vez de chutar um eixo.
+  const offsetMap = (def, name, { env, progress, elapsedMs }) => {
+    const out = new Map();
+    const apply = (axisName, value) => {
+      const resolved = resolveAxis(axisTable, name, axisName);
+      if (!resolved) return;
+      out.set(resolved.axis, (out.get(resolved.axis) ?? 0) + resolved.sign * value);
+    };
+    for (const [axisName, target] of Object.entries(def.bones[name] ?? {})) apply(axisName, target * env);
+    for (const sweep of def.sweep ?? []) {
+      if (sweep.bone === name) apply(sweep.axis, (sweep.to - sweep.from) * ramp(progress, sweep.start, sweep.end) * env);
+    }
+    for (const osc of def.osc ?? []) {
+      if (osc.bone === name) apply(osc.axis, Math.sin((elapsedMs / 1000) * osc.hz * Math.PI * 2 + osc.phase) * osc.amplitude * env);
+    }
+    return out;
+  };
+
   function update() {
     const t = now();
     if (lastUpdateMs === null) lastUpdateMs = t;
@@ -271,21 +310,14 @@ export function createGestureLibrary({ humanoid, now = () => performance.now() }
       return;
     }
 
-    for (const [name, target] of Object.entries(def.bones)) {
+    for (const name of Object.keys(def.bones)) {
       // head é da camada de gestos (pose emocional + tilt); ela soma os offsets
       // que este gesto pede, via headOffsets(). Escrever aqui brigaria com ela.
       if (name === 'head') continue;
       const node = nodes[name];
       const origin = base[name];
       if (!node || !origin) continue;
-      for (const axis of touchedAxes(def, name)) {
-        let offset = (target[axis] ?? 0) * env;
-        for (const sweep of def.sweep ?? []) {
-          if (sweep.bone === name && sweep.axis === axis) offset += (sweep.to - sweep.from) * ramp(progress, sweep.start, sweep.end) * env;
-        }
-        for (const osc of def.osc ?? []) {
-          if (osc.bone === name && osc.axis === axis) offset += Math.sin((elapsedMs / 1000) * osc.hz * Math.PI * 2 + osc.phase) * osc.amplitude * env;
-        }
+      for (const [axis, offset] of offsetMap(def, name, { env, progress, elapsedMs })) {
         node.rotation[axis] = origin[axis] + offset;
       }
     }

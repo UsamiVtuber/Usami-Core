@@ -15,6 +15,7 @@
 import { createGestureLibrary } from './vrm-gesture-library.js';
 import { createSequenceRunner, SEQUENCE_BONE_AXES } from './motion-sequence.js';
 import { buildSequenceRequest } from './sequence-shapes.js';
+import { legacyAxisTable, resolveAxis } from './vrm-bone-calibration.js';
 
 // amplitudes preliminares, ajustar visualmente
 export const EMOTION_POSES = {
@@ -31,7 +32,7 @@ export const EMOTION_POSES = {
 const ARM_BONES = ['rightUpperArm', 'rightLowerArm', 'rightHand'];
 const LAYER_BONES = [...ARM_BONES, 'head'];
 
-const WAVE = { durationMs: 3000, attackMs: 600, releaseMs: 600, upperArmZ: 1.25, lowerArmZ: 0.35, handSpeed: 7, handAmp: 0.25 };
+const WAVE = { durationMs: 3000, attackMs: 600, releaseMs: 600, upperArmRaise: 1.25, lowerArmFlex: 0.35, handSpeed: 7, handAmp: 0.25 };
 const TILT = { durationMs: 1200, attackMs: 300, releaseMs: 400, amp: 0.14 };
 const POSE = { attackTauMs: 150, releaseTauMs: 250, snap: 1e-4, defaultDurationMs: 4500 };
 
@@ -51,7 +52,7 @@ const trapezoid = (elapsedMs, attackMs, releaseMs, durationMs) => {
   return 1;
 };
 
-export function createVrmGestureLayer({ humanoid, now = () => performance.now() }) {
+export function createVrmGestureLayer({ humanoid, now = () => performance.now(), axisTable = legacyAxisTable() }) {
   const readNode = name => {
     if (!humanoid || typeof humanoid.getNormalizedBoneNode !== 'function') return null;
     try {
@@ -73,7 +74,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
   }
 
   // Capacidades congeladas: o rig não muda depois do load.
-  const library = createGestureLibrary({ humanoid, now });
+  const library = createGestureLibrary({ humanoid, now, axisTable });
   const available = Object.freeze({
     wave: ARM_BONES.every(name => nodes[name]),
     tilt: Boolean(nodes.head),
@@ -91,6 +92,15 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
 
   const markClock = () => {
     if (lastUpdateMs === null) lastUpdateMs = now();
+  };
+
+  // Escrita semântica do aceno legado (mesma tabela da biblioteca): o valor é
+  // positivo na direção nomeada; eixo local e sinal vêm da calibração do modelo.
+  const semanticWrite = (bone, semantic, value) => {
+    const node = nodes[bone];
+    const resolved = resolveAxis(axisTable, bone, semantic);
+    if (!node || !resolved) return;
+    node.rotation[resolved.axis] = base[bone][resolved.axis] + resolved.sign * value;
   };
 
   function wave() {
@@ -136,7 +146,7 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     const node = readNode(name);
     if (node?.rotation) sequenceNodes[name] = { node, base: cloneRotation(node.rotation) };
   }
-  const sequenceRunner = createSequenceRunner({ nodes: sequenceNodes, now });
+  const sequenceRunner = createSequenceRunner({ nodes: sequenceNodes, now, axisTable });
   const sequenceAvailable = Boolean(humanoid) && Object.keys(sequenceNodes).length > 0;
 
   const releaseSequence = () => {
@@ -253,9 +263,9 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
 
     // — escrita: TODOS os nós que possui, sempre base + offset (idempotente) —
     if (legacyArm) {
-      if (nodes.rightUpperArm) nodes.rightUpperArm.rotation.z = base.rightUpperArm.z - WAVE.upperArmZ * waveEnv;
-      if (nodes.rightLowerArm) nodes.rightLowerArm.rotation.z = base.rightLowerArm.z - WAVE.lowerArmZ * waveEnv;
-      if (nodes.rightHand) nodes.rightHand.rotation.z = base.rightHand.z + Math.sin((waveElapsedMs / 1000) * WAVE.handSpeed) * WAVE.handAmp * waveEnv;
+      semanticWrite('rightUpperArm', 'raise', WAVE.upperArmRaise * waveEnv);
+      semanticWrite('rightLowerArm', 'flex', WAVE.lowerArmFlex * waveEnv);
+      semanticWrite('rightHand', 'flick', -Math.sin((waveElapsedMs / 1000) * WAVE.handSpeed) * WAVE.handAmp * waveEnv);
     }
     if (nodes.head) {
       // head.x é só da pose + gesto; head.z soma pose + tilt + gesto.
@@ -303,5 +313,5 @@ export function createVrmGestureLayer({ humanoid, now = () => performance.now() 
     });
   }
 
-  return { available: Object.freeze({ ...available, sequences: sequenceAvailable }), gestureNames: library.names, wave, tilt, gesture, stopGesture, playSequence, stopSequence, setEmotion, update, clear, active };
+  return { available: Object.freeze({ ...available, sequences: sequenceAvailable }), gestureNames: library.names, axisTable, wave, tilt, gesture, stopGesture, playSequence, stopSequence, setEmotion, update, clear, active };
 }

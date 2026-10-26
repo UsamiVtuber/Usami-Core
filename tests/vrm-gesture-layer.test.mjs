@@ -265,8 +265,8 @@ test('gesto da biblioteca assume o braço e o aceno legado espera a vez', () => 
   assert.equal(layer.gesture('wave'), false);
   clock.advance(1000); // platô do clap
   layer.update();
-  assert.ok(Math.abs(upper.rotation.x - (expected.rightUpperArm.x - 0.30)) < 1e-9, 'x vai ao alvo do gesto');
-  assert.ok(Math.abs(upper.rotation.z - (expected.rightUpperArm.z - 0.18)) < 1e-9, 'z vai ao alvo do gesto');
+  assert.ok(Math.abs(upper.rotation.x - (expected.rightUpperArm.x - 0.95)) < 1e-9, 'x vai ao alvo do gesto (fwd)');
+  assert.ok(Math.abs(upper.rotation.z - (expected.rightUpperArm.z - 0.40)) < 1e-9, 'z vai ao alvo do gesto (raise)');
   layer.stopGesture();
   clock.advance(50);
   layer.update();

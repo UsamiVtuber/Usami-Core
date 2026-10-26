@@ -8,6 +8,11 @@
 // o motor de experimentação (Fase 2) os avalia; o runner os executa.
 //
 // Nunca aceite keys numéricas vindas do LLM diretamente — só shapes+params.
+//
+// Eixos: braços são escritos em termos SEMÂNTICOS (raise/fwd/flex/fold/flick —
+// ver vrm-bone-calibration.js), então a mesma shape vira o movimento certo tanto
+// num rig com convenção legada quanto num espelhado como o shiro. Tronco
+// (hips/spine/neck) não espelha entre L/R: fica em Euler cru.
 
 import { SEQUENCE_LIMITS } from './motion-sequence.js';
 
@@ -45,14 +50,14 @@ const SHAPE_BUILDERS = {
     const arm = `${side}UpperArm`;
     const hand = `${side}Hand`;
     return [
-      { bone: arm, keys: [{ t: 0, axis: 'z', value: 0 }, { t: Math.round(durationMs * 0.18), axis: 'z', value: -0.9 }, { t: Math.round(durationMs * 0.8), axis: 'z', value: -0.9 }, { t: durationMs, axis: 'z', value: 0 }] },
-      sineTrack({ bone: hand, axis: 'z', amplitude, cycles, durationMs, attack: 0.2, release: 0.25 }),
+      { bone: arm, keys: [{ t: 0, axis: 'raise', value: 0 }, { t: Math.round(durationMs * 0.18), axis: 'raise', value: 0.9 }, { t: Math.round(durationMs * 0.8), axis: 'raise', value: 0.9 }, { t: durationMs, axis: 'raise', value: 0 }] },
+      sineTrack({ bone: hand, axis: 'flick', amplitude, cycles, durationMs, attack: 0.2, release: 0.25 }),
     ];
   },
   // Os dois braços balançam (celebra contida, tremida de frio...).
   'sway-arms': ({ amplitude = 0.18, cycles = 4, durationMs = 2000 }) => [
-    sineTrack({ bone: 'leftUpperArm', axis: 'z', amplitude, cycles, durationMs, phase: 0 }),
-    sineTrack({ bone: 'rightUpperArm', axis: 'z', amplitude, cycles, durationMs, phase: Math.PI }),
+    sineTrack({ bone: 'leftUpperArm', axis: 'raise', amplitude, cycles, durationMs, phase: 0 }),
+    sineTrack({ bone: 'rightUpperArm', axis: 'raise', amplitude, cycles, durationMs, phase: Math.PI }),
   ],
   // Aceno de "sim": cabeça via layer (head não é controlável aqui) — o nod usa neck.x.
   'nod': ({ amplitude = 0.12, cycles = 2, durationMs = 1200 }) => [
@@ -62,18 +67,18 @@ const SHAPE_BUILDERS = {
   // Curva lateral de quadril+ombros (insinuação/desconfiança corporal).
   'head-tilt-curve': ({ amplitude = 0.1, cycles = 1, durationMs = 1600 }) => [
     sineTrack({ bone: 'hips', axis: 'z', amplitude, cycles, durationMs }),
-    sineTrack({ bone: 'leftShoulder', axis: 'z', amplitude: -amplitude * 0.6, cycles, durationMs }),
-    sineTrack({ bone: 'rightShoulder', axis: 'z', amplitude: -amplitude * 0.6, cycles, durationMs }),
+    sineTrack({ bone: 'leftShoulder', axis: 'raise', amplitude: -amplitude * 0.6, cycles, durationMs }),
+    sineTrack({ bone: 'rightShoulder', axis: 'raise', amplitude: -amplitude * 0.6, cycles, durationMs }),
   ],
   // Estender a mão à frente (alcançar algo).
   'reach': ({ amplitude = 0.35, durationMs = 1600, side = 'right' }) => [
-    { bone: `${side}UpperArm`, keys: [{ t: 0, axis: 'x', value: 0 }, { t: Math.round(durationMs * 0.45), axis: 'x', value: -amplitude }, { t: Math.round(durationMs * 0.7), axis: 'x', value: -amplitude }, { t: durationMs, axis: 'x', value: 0 }] },
-    { bone: `${side}LowerArm`, keys: [{ t: 0, axis: 'x', value: 0 }, { t: Math.round(durationMs * 0.45), axis: 'x', value: -amplitude * 0.6 }, { t: Math.round(durationMs * 0.7), axis: 'x', value: -amplitude * 0.6 }, { t: durationMs, axis: 'x', value: 0 }] },
+    { bone: `${side}UpperArm`, keys: [{ t: 0, axis: 'fwd', value: 0 }, { t: Math.round(durationMs * 0.45), axis: 'fwd', value: amplitude }, { t: Math.round(durationMs * 0.7), axis: 'fwd', value: amplitude }, { t: durationMs, axis: 'fwd', value: 0 }] },
+    { bone: `${side}LowerArm`, keys: [{ t: 0, axis: 'fwd', value: 0 }, { t: Math.round(durationMs * 0.45), axis: 'fwd', value: amplitude * 0.6 }, { t: Math.round(durationMs * 0.7), axis: 'fwd', value: amplitude * 0.6 }, { t: durationMs, axis: 'fwd', value: 0 }] },
   ],
   // Tremor rápido e curto (frio/medo cômico).
   'shiver': ({ amplitude = 0.05, durationMs = 900 }) => [
-    sineTrack({ bone: 'leftShoulder', axis: 'z', amplitude, cycles: 8, durationMs, release: 0.3, steps: 16 }),
-    sineTrack({ bone: 'rightShoulder', axis: 'z', amplitude, cycles: 8, durationMs, release: 0.3, phase: 0.5, steps: 16 }),
+    sineTrack({ bone: 'leftShoulder', axis: 'raise', amplitude, cycles: 8, durationMs, release: 0.3, steps: 16 }),
+    sineTrack({ bone: 'rightShoulder', axis: 'raise', amplitude, cycles: 8, durationMs, release: 0.3, phase: 0.5, steps: 16 }),
   ],
 };
 

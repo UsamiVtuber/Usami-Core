@@ -15,6 +15,7 @@ import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
+import { calibrateArmAxes } from './vrm-bone-calibration';
 import { createAudioLipSync } from './audio-lipsync';
 import { splitReplyParts } from './reply-parts';
 import { curateExpressions, labelExpression } from './expressions-catalog';
@@ -228,7 +229,20 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       if (vrm?.humanoid) {
         // Etapa 4: gestos procedurais (wave/tilt) + pose de corpo por emoção em
         // nós normalizados que nenhuma outra camada toca (braço direito + head).
-        vrmGestures.current = createVrmGestureLayer({ humanoid: vrm.humanoid });
+        // A tabela de eixos semânticos vem da sonda geométrica no modelo real
+        // (rigs espelhados trocam o sinal de raise/flex entre L e R); a sonda é
+        // somente-leitura e roda depois da pose de repouso ficar estável.
+        avatar.updateMatrixWorld(true);
+        const safeNode = name => { try { return vrm.humanoid.getNormalizedBoneNode?.(name) ?? null; } catch { return null; } };
+        const probeVec = new THREE.Vector3();
+        const probeQuat = new THREE.Quaternion();
+        const axisTable = calibrateArmAxes({
+          probe: {
+            worldPosition: name => { const n = safeNode(name); if (!n) return null; n.getWorldPosition(probeVec); return [probeVec.x, probeVec.y, probeVec.z]; },
+            worldQuaternion: name => { const n = safeNode(name); if (!n) return null; n.getWorldQuaternion(probeQuat); return [probeQuat.x, probeQuat.y, probeQuat.z, probeQuat.w]; },
+          },
+        });
+        vrmGestures.current = createVrmGestureLayer({ humanoid: vrm.humanoid, axisTable });
       }
       if (vrm?.lookAt) {
         // three-vrm 3.x: assigning an Object3D to vrm.lookAt.target makes

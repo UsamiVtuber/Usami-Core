@@ -154,6 +154,30 @@ test('nova sequência substitui a anterior sem deixar resíduo na primeira', () 
   assert.equal(runner.active().name, 'segunda');
 });
 
+test('semântica: validação aceita nomes calibráveis e o runner resolve pela tabela', () => {
+  const clock = makeClock();
+  const nodes = { rightUpperArm: { node: makeNode(0, 0, -0.1), base: makeRotation(0, 0, -0.1) } };
+  // como calibrateArmAxes pode mapear num rig espelhado: raise = z POSITIVO
+  const axisTable = { rightUpperArm: { raise: { axis: 'z', sign: 1 }, fwd: { axis: 'x', sign: -1 } } };
+  const runner = createSequenceRunner({ nodes, now: clock.now, axisTable });
+  const s = seq({ tracks: [{ bone: 'rightUpperArm', keys: [{ t: 0, axis: 'raise', value: 0 }, { t: 1000, axis: 'raise', value: 0.4 }, { t: 2000, axis: 'raise', value: 0 }] }] });
+  assert.equal(validateSequence(s).ok, true, 'nome semântico é eixo válido para braço');
+  assert.equal(runner.play(s).ok, true);
+  clock.advance(1000);
+  runner.update();
+  assert.equal(nodes.rightUpperArm.node.rotation.z, -0.1 + 0.4, 'sinal +1 da tabela aplicado sobre a base');
+  clock.advance(1000);
+  runner.update();
+  assert.equal(nodes.rightUpperArm.node.rotation.z, -0.1, 'restauração usa o eixo resolvido');
+});
+
+test('validação rejeita semântica que o osso não controla', () => {
+  const bad = seq({ tracks: [{ bone: 'rightUpperArm', keys: [{ t: 0, axis: 'flex', value: 0 }, { t: 2000, axis: 'flex', value: 0.2 }] }] });
+  assert.equal(validateSequence(bad).ok, false);
+  const trunk = seq({ tracks: [{ bone: 'spine', keys: [{ t: 0, axis: 'raise', value: 0 }, { t: 2000, axis: 'raise', value: 0.2 }] }] });
+  assert.equal(validateSequence(trunk).ok, false, 'tronco continua só em Euler cru');
+});
+
 test('osso ausente no modelo degrada em vez de quebrar', () => {
   const clock = makeClock();
   const nodes = { rightHand: { node: makeNode(), base: makeRotation() } };

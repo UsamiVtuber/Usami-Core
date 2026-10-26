@@ -13,6 +13,14 @@
 //   - braço/ombro/quadril: x, y, z liberados (nenhuma outra camada os usa).
 // As amplitudes são offsets em radianos a partir da pose capturada no load;
 // os limites abaixo são a trava de segurança do runtime determinístico.
+//
+// Eixos de escrita: além dos Euler crus (x/y/z — compatibilidade com sequências
+// antigas e ossos de tronco), as faixas de braço aceitam os nomes SEMÂNTICOS da
+// calibração (raise/fwd na upperArm, flex/fwd na lowerArm, fold/flick na hand,
+// raise no shoulder). O runner resolve cada nome pela tabela do modelo; um nome
+// sem entrada na tabela degrada em silêncio em vez de chutar um eixo.
+
+import { legacyAxisTable, resolveAxis } from './vrm-bone-calibration.js';
 
 export const SEQUENCE_LIMITS = {
   maxDurationMs: 10000,
@@ -27,20 +35,21 @@ export const SEQUENCE_LIMITS = {
   maxKeyTimeMs: 10000,
 };
 
-const ARM_AXES = ['x', 'y', 'z'];
+const RAW_AXES = ['x', 'y', 'z'];
+const arm = semantics => [...RAW_AXES, ...semantics];
 
 export const SEQUENCE_BONE_AXES = Object.freeze({
-  hips: ARM_AXES,
-  leftShoulder: ARM_AXES,
-  rightShoulder: ARM_AXES,
-  leftUpperArm: ARM_AXES,
-  leftLowerArm: ARM_AXES,
-  leftHand: ARM_AXES,
-  rightUpperArm: ARM_AXES,
-  rightLowerArm: ARM_AXES,
-  rightHand: ARM_AXES,
-  leftEye: ARM_AXES,
-  rightEye: ARM_AXES,
+  hips: RAW_AXES,
+  leftShoulder: arm(['raise']),
+  rightShoulder: arm(['raise']),
+  leftUpperArm: arm(['raise', 'fwd']),
+  leftLowerArm: arm(['flex', 'fwd']),
+  leftHand: arm(['fold', 'flick']),
+  rightUpperArm: arm(['raise', 'fwd']),
+  rightLowerArm: arm(['flex', 'fwd']),
+  rightHand: arm(['fold', 'flick']),
+  leftEye: RAW_AXES,
+  rightEye: RAW_AXES,
   spine: ['x'],
   neck: ['x'],
 });
@@ -126,7 +135,7 @@ export function sampleTrack(keys, t) {
 // Cria o runner de sequências sobre nós injetados ({ node, base }) — no runtime
 // os nós vêm do humanoid normalizado; nos testes são objetos falsos. Não há
 // escrita fora de base+offset nos eixos das keys.
-export function createSequenceRunner({ nodes, now = () => performance.now(), limits = SEQUENCE_LIMITS }) {
+export function createSequenceRunner({ nodes, now = () => performance.now(), limits = SEQUENCE_LIMITS, axisTable = legacyAxisTable() }) {
   let current = null; // { name, sequence, startedAt }
   const touched = new Set(); // "bone.axis" da sequência em curso
 
@@ -173,8 +182,10 @@ export function createSequenceRunner({ nodes, now = () => performance.now(), lim
         byAxis.get(key.axis).push(key);
       }
       for (const [axis, keys] of byAxis) {
-        entry.node.rotation[axis] = entry.base[axis] + sampleTrack(keys, elapsed);
-        touched.add(`${track.bone}.${axis}`);
+        const resolved = resolveAxis(axisTable, track.bone, axis);
+        if (!resolved) continue; // semântica sem calibração neste osso: degrada
+        entry.node.rotation[resolved.axis] = entry.base[resolved.axis] + resolved.sign * sampleTrack(keys, elapsed);
+        touched.add(`${track.bone}.${resolved.axis}`);
       }
     }
   }
