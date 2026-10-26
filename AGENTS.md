@@ -24,6 +24,14 @@ Usuário escolheu um HUD minimalista, baseado no mock de referência: sem texto 
 
 ## Modos de conversa (decisão do usuário)
 
-- Em chamada de voz, manter a Shiro como foco central, compositor de texto disponível e controles circulares da chamada abaixo dele.
+- Em chamada de voz, manter a Shiro como foco central, compositor de texto disponível e controles circulares da chamada abaixo dele. Voz na chamada usa `speechSynthesis` e não passa pela fila de TTS em partes.
 - Em conversa apenas por texto, mostrar o histórico em painel lateral esquerdo e o compositor na base, sem retirar o avatar do palco.
 - A troca entre voz e texto deve acontecer na mesma tela; configurações e ferramentas de rig permanecem recolhidas e secundárias.
+
+## Respostas em balões e boca do avatar (decisão do usuário)
+
+- Resposta longa do chat vira **vários balões de ~60 caracteres, no máximo 5**, sem nunca descartar texto (`src/reply-parts.js`). Cada balão é um `POST /api/tts`: as sínteses são pedidas em paralelo e tocadas em série, para a voz da primeira parte sair antes do resto chegar. O `reply` tem teto de ~220 caracteres no servidor e instrução de brevidade no prompt.
+- Execução de pontuação (`...`, `?!`) conta como **uma** fronteira de frase — cortar caractere por caractere produz balões picotados e artefatos na voz.
+- O texto bruto de um JSON inválido/truncado **nunca** aparece no balão: `parseProviderRaw` recupera o valor de `reply` e descarta as `actions`; sem conteúdo recuperável, devolve erro amigável.
+- A boca do VRM é escrita pelo `vrm.expressionManager` (`aa/ih/ou/ee/oh`), nunca em `morphTargetInfluences` direto: `VRMExpressionManager.update()`, dentro de `vrm.update(delta)`, zera toda expressão a cada frame e apagaria o visema. Escrita bruta em morphs continua apenas como fallback para GLB/FBX sem expressionManager.
+- As `expressions` enviadas ao servidor passam por `curateExpressions` antes do corte de 20 nomes: na ordem crua do shiro os 13 presets (visemas, blink, look) ocupavam a lista e os prefabs de emoção eram filtrados em silêncio por `filterActionsByCatalog`.
