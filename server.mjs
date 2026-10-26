@@ -232,6 +232,10 @@ export function sanitizeActions(raw) {
   }).filter(Boolean);
 }
 
+// O modelo inventa sinônimos para os verbos do diretor ("expression" em vez de
+// "set_expression"); sem essa ponte a ação passa pelo filtro e morre no director.
+const ACTION_TYPE_ALIASES = { expression: 'set_expression', emote: 'set_expression', morph: 'set_morph' };
+
 export function filterActionsByCatalog(actions, capabilities) {
   const known = (list) => (!Array.isArray(list) ? null : new Set(list));
   const sets = capabilities ? {
@@ -240,10 +244,15 @@ export function filterActionsByCatalog(actions, capabilities) {
     set_morph: known(capabilities.morphs),
     set_expression: known(capabilities.expressions),
   } : {};
-  return (Array.isArray(actions) ? actions : []).filter(action => {
-    const set = sets[action?.type];
-    return set ? set.has(action?.name) : true; // sem catálogo conhecido → mantém
-  });
+  return (Array.isArray(actions) ? actions : [])
+    .map(action => {
+      const alias = ACTION_TYPE_ALIASES[action?.type];
+      return alias ? { ...action, type: alias } : action;
+    })
+    .filter(action => {
+      const set = sets[action?.type];
+      return set ? set.has(action?.name) : true; // sem catálogo conhecido → mantém
+    });
 }
 
 export function systemFor(capabilities) {
@@ -456,15 +465,18 @@ export function createChatHandler(options = {}) {
     if (useNvidia()) {
       // Fluxo NVIDIA: 3 modelos com rate limit global de 40 req/min
       try {
-        // 1) Classificação da frase do usuário (modelo leve)
-        classification = await classifyUserMessage(parsedBody.message);
+        // 1) Classificação + 2) geração correm juntas: a classificação só
+        // depende da frase do usuário, e cada chamada NVIDIA custa ~5-15 s.
+        const [classificationResult, rawReply] = await Promise.all([
+          classifyUserMessage(parsedBody.message),
+          generateReply(system, parsedBody.message, { temperature: 0.7 }),
+        ]);
+        classification = classificationResult;
 
-        // 2) Geração de texto da Usami (modelo de geração)
-        const rawReply = await generateReply(system, parsedBody.message, { temperature: 0.7 });
         const parsedReply = parseProviderRaw(rawReply);
         if (!parsedReply.ok) throw new Error(parsedReply.error);
 
-        // 3) Planejamento de animação (modelo de animação)
+        // 3) Planejamento de animação (depende da resposta gerada)
         const animation = await planAnimation(parsedReply.reply, capabilities, { temperature: 0.3 });
 
         parsed = {

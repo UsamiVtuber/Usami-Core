@@ -102,6 +102,21 @@ test('filterActionsByCatalog descarta ações fora do catálogo anunciado', () =
   assert.deepEqual(filterActionsByCatalog('não array', capabilities), []);
 });
 
+test('filterActionsByCatalog traduz sinônimos de verbo para o diretor entender', () => {
+  const capabilities = { gestures: [], clips: [], morphs: ['smile'], expressions: ['shy'] };
+  const actions = [
+    { type: 'expression', name: 'shy', weight: 0.8 },
+    { type: 'emote', name: 'shy' },
+    { type: 'morph', name: 'smile', value: 1 },
+    { type: 'expression', name: 'inexistente' },
+  ];
+  assert.deepEqual(filterActionsByCatalog(actions, capabilities), [
+    { type: 'set_expression', name: 'shy', weight: 0.8 },
+    { type: 'set_expression', name: 'shy' },
+    { type: 'set_morph', name: 'smile', value: 1 },
+  ]);
+});
+
 test('sanitizeCapabilities: gestos da biblioteca passam e sequences é flag', () => {
   const sanitized = sanitizeCapabilities({
     gestures: ['clap', 'bow', 'point', 'voar'],
