@@ -14,6 +14,7 @@
 // a geração cai para o fluxo OpenRouter atual do server.mjs.
 
 import { classifyEmotion } from './emotion-classifier.js';
+import { extractJsonCandidate } from './json-salvage.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -76,7 +77,8 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
       model: CLASSIFICATION_MODEL,
       messages,
       temperature: 0.2,
-      max_tokens: 200,
+      // Orçamento p/ o preâmbulo de raciocínio do modelo; 200 morria antes do JSON.
+      max_tokens: 500,
     });
     const parsed = parseJsonSafe(raw);
     return {
@@ -112,7 +114,7 @@ export async function generateReply(systemPrompt, userMessage, { temperature = 0
     model: GENERATION_MODEL,
     messages,
     temperature,
-    max_tokens: 320,
+    max_tokens: 700,
   });
   return raw;
 }
@@ -132,9 +134,11 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
       model: ANIMATION_MODEL,
       messages,
       temperature,
-      max_tokens: 300,
+      // O diretor de animação raciocina antes de devolver o JSON: com 300
+      // tokens o texto morria no raciocínio e as actions voltavam vazias.
+      max_tokens: 900,
     });
-    const parsed = parseJsonSafe(raw);
+    const parsed = parseJsonSafe(raw, { label: 'de animação' });
     const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
     return { actions, source: 'nvidia' };
   } catch (error) {
@@ -171,11 +175,21 @@ async function keyExists() {
   }
 }
 
-function parseJsonSafe(raw) {
+function parseJsonSafe(raw, { label = '' } = {}) {
+  const text = String(raw ?? '');
+  const fenced = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
   try {
-    const cleaned = String(raw ?? '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-    return JSON.parse(cleaned);
+    return JSON.parse(fenced);
   } catch {
+    // Prosa de raciocínio antes do JSON: tenta o primeiro objeto balanceado.
+    const candidate = extractJsonCandidate(fenced);
+    if (candidate) {
+      try {
+        return JSON.parse(candidate);
+      } catch {}
+    }
+    // Sem isso a chamada falhava muda — `actions: []` no chat sem nenhum rastro.
+    console.warn(`llm-router: saída ${label || 'do modelo'} não é JSON recuperável (${text.slice(0, 80)}...)`);
     return {};
   }
 }
