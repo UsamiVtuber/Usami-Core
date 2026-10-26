@@ -219,7 +219,7 @@ export function parseTtsBody(body) {
   const styleId = typeof input.styleId === 'string' && input.styleId.trim() ? input.styleId.trim().slice(0, 80) : 'neutral';
   const rate = Number.isFinite(Number(input.rate)) ? Number(input.rate) : 1;
   const pitch = Number.isFinite(Number(input.pitch)) ? Number(input.pitch) : 1;
-  return { ok: true, text: input.text.trim(), styleId, rate, pitch };
+  return { ok: true, text: input.text.trim(), styleId, rate, pitch, stream: input.stream === true };
 }
 
 export function sanitizeCapabilities(input) {
@@ -886,6 +886,9 @@ const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
 // anunciava o próprio prompt. A tag entre colchetes muda a prosódia e nunca é lida.
 const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, tom acolhedor e animado] ';
 const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
+// Vozes desenhadas (Voice Design/Replication) têm id com prefixo voice_ e vão em
+// voiceConfig.voice; pré-prontas (Kore, Puck...) permanecem em prebuiltVoiceConfig.
+const CUSTOM_VOICE_PREFIX = 'voice_';
 // Cláusulas de emoção por styleId, fundidas na tag; neutral e rótulos desconhecidos
 // não têm cláusula — caem na tag base (determinístico).
 const STYLE_INSTRUCTIONS = {
@@ -942,6 +945,124 @@ function pcmToWav(pcm, sampleRate) {
   return Buffer.concat([header, pcm]);
 }
 
+function geminiVoiceConfig(voice) {
+  return String(voice || '').startsWith(CUSTOM_VOICE_PREFIX)
+    ? { voice }
+    : { prebuiltVoiceConfig: { voiceName: voice } };
+}
+
+function geminiSpeechBody({ text, voice }) {
+  return {
+    contents: [{ parts: [{ text }] }],
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      speechConfig: { voiceConfig: geminiVoiceConfig(voice) },
+    },
+  };
+}
+
+// Um evento SSE do provedor: `data: {...}`. Devolve o objeto ou null.
+function parseSseEvent(event) {
+  for (const line of event.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') return null;
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// Voz em streaming: bombeia o PCM cru para a resposta na medida em que o provedor
+// entrega. Nada é escrito em `res` antes do primeiro pedaço de áudio — enquanto
+// não há áudio, o chamador ainda pode responder erro ou cair no caminho normal
+// (que devolve o WAV inteiro). No fim devolve o PCM acumulado para o cache.
+export async function streamGeminiPcm({
+  fetchImpl = globalThis.fetch,
+  geminiUrl,
+  apiKey,
+  model,
+  voice,
+  text,
+  res,
+  timeoutMs = 30000,
+} = {}) {
+  let response;
+  try {
+    response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(model) + ':streamGenerateContent?alt=sse', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(geminiSpeechBody({ text, voice })),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    return { ok: false, reason: 'fetch-falhou' };
+  }
+  if (!response || !response.ok) {
+    return { ok: false, reason: 'http-' + (response?.status ?? 0) };
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) return { ok: false, reason: 'sem-corpo' };
+
+  const segments = [];
+  const decoder = new TextDecoder();
+  let sampleRate = DEFAULT_GEMINI_TTS_SAMPLE_RATE;
+  let buffer = '';
+  let started = false;
+
+  const feed = event => {
+    const data = parseSseEvent(event);
+    const inline = data?.candidates?.[0]?.content?.parts?.find(part => part?.inlineData?.data)?.inlineData;
+    if (!inline) return;
+    const segment = Buffer.from(inline.data, 'base64');
+    if (!segment.length) return;
+    if (!started) {
+      sampleRate = parseGeminiSampleRate(inline.mimeType);
+      // PCM cru little-endian, mono, no rate do provedor: o cliente monta o
+      // AudioBuffer e toca. Sem header — o header só nasce no cache (WAV).
+      res.writeHead(200, {
+        'Content-Type': 'audio/l16; codec=pcm; rate=' + sampleRate,
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'X-TTS-Stream': '1',
+      });
+      started = true;
+    }
+    segments.push(segment);
+    res.write(segment);
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // O provedor separa eventos em CRLFCRLF; aceitar só LF deixaria o corpo
+      // inteiro num único "evento" e a fala morria no primeiro pedaço de áudio.
+      let split;
+      while ((split = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        feed(buffer.slice(0, split.index));
+        buffer = buffer.slice(split.index + split[0].length);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) feed(buffer);
+  } catch (error) {
+    // Canais quebrados no meio da fala: o que já saiu tocou. Não há como
+    // voltar atrás na resposta iniciada, então fecha e registra.
+    console.warn('tts: streaming interrompido:', error?.message || error);
+    if (started) res.end();
+    return { ok: false, reason: 'queda-no-meio' };
+  }
+
+  if (!started) return { ok: false, reason: 'sem-audio' };
+  res.end();
+  return { ok: true, pcm: Buffer.concat(segments), sampleRate };
+}
+
 export function createTtsHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getConfig = options.getConfig || (async () => {
@@ -978,8 +1099,6 @@ export function createTtsHandler(options = {}) {
   const geminiUrl = (options.geminiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const timeoutMs = options.timeoutMs || 30000;
   const cache = options.cache ? (options.cacheStore || createFileTtsCache({ directory: options.cacheDir || process.env.USAMI_TTS_CACHE_DIR || 'data/tts-cache' })) : null;
-  // vozes desenhadas (Voice Design/Replication) no gemini usam ids com prefixo voice_
-  const CUSTOM_VOICE_PREFIX = 'voice_';
 
   return async function handleTts(req, res) {
     const send = (status, data) => {
@@ -1072,24 +1191,39 @@ export function createTtsHandler(options = {}) {
 
     let response;
     try {
+      // Voz em streaming (medido nesta máquina): o provedor entrega PCM em ~72 ms
+      // por pedaço e a primeira amostra de áudio sai em ~1,0 s, contra ~5,3 s do
+      // WAV completo. Falhou o stream (qualquer motivo antes do primeiro byte de
+      // áudio)? Segue o caminho normal abaixo, que ainda responde.
+      if (parsedBody.stream && provider === 'gemini') {
+        const streamed = await streamGeminiPcm({
+          fetchImpl,
+          geminiUrl,
+          apiKey: config.apiKey,
+          model: geminiModel,
+          voice: geminiVoice,
+          text: geminiInstruction + parsedBody.text,
+          res,
+          timeoutMs,
+        });
+        if (streamed.ok) {
+          if (cache && cacheKey) {
+            try {
+              await cache.put(cacheKey, pcmToWav(streamed.pcm, streamed.sampleRate));
+            } catch {
+              // Cache failures never make a successful synthesis fail.
+            }
+          }
+          return;
+        }
+      }
       if (provider === 'gemini') {
         // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
         // instrução não conta no limite de 2000 chars, validado sobre o texto puro
         response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(geminiModel) + ':generateContent', {
           method: 'POST',
           headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: geminiInstruction + parsedBody.text }] }],
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              // voz desenhada (voice_*) vai em voiceConfig.voice; pré-pronta permanece em prebuiltVoiceConfig
-              speechConfig: {
-                voiceConfig: geminiVoice.startsWith(CUSTOM_VOICE_PREFIX)
-                  ? { voice: geminiVoice }
-                  : { prebuiltVoiceConfig: { voiceName: geminiVoice } },
-              },
-            },
-          }),
+          body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: geminiVoice })),
           signal: AbortSignal.timeout(timeoutMs),
         });
       } else {

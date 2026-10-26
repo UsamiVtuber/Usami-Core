@@ -549,3 +549,180 @@ test('handler: cache local evita nova chamada e separa estilos', async () => {
     await rm(cacheDir, { recursive: true, force: true });
   }
 });
+
+// --- Voz em streaming (PCM cru) --------------------------------------------
+
+const GEMINI_STREAM_URL = /:streamGenerateContent\?alt=sse$/;
+
+function audioEvent(pcm, mimeType = 'audio/l16; rate=24000; channels=1') {
+  return { candidates: [{ content: { parts: [{ inlineData: { mimeType, data: Buffer.from(pcm).toString('base64') } }] } }] };
+}
+
+// Resposta de SSE falsa: uma stream legível por getReader(), opcionalmente
+// picotada em pedaços arbitrários como faz a rede de verdade. O provedor real
+// separa eventos em CRLFCRLF, então é esse o enquadramento padrão do mock.
+function sseResponse(events, { splitAt = null, separator = '\r\n\r\n' } = {}) {
+  const text = events.map(event => 'data: ' + JSON.stringify(event) + separator).join('');
+  const whole = Buffer.from(text);
+  const pieces = splitAt === null ? [whole] : [whole.subarray(0, splitAt), whole.subarray(splitAt)];
+  let index = 0;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader: () => ({
+        async read() {
+          if (index >= pieces.length) return { done: true };
+          const piece = pieces[index++];
+          return { done: false, value: new Uint8Array(piece) };
+        },
+      }),
+    },
+  };
+}
+
+function streamRes() {
+  const res = { statusCode: null, headers: null, written: [], ended: false };
+  res.writeHead = (status, headers) => { res.statusCode = status; res.headers = headers; };
+  res.write = chunk => { res.written.push(Buffer.from(chunk)); return true; };
+  res.end = data => { if (data) res.written.push(Buffer.from(data)); res.ended = true; };
+  return res;
+}
+
+const spoken = res => Buffer.concat(res.written);
+
+test('gemini stream: responde PCM cru chunk por chunk com X-TTS-Stream', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return sseResponse([audioEvent('aaaa'), audioEvent('bbbb')]);
+  };
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'voice_cewhmedkmma9' }),
+  });
+  const res = streamRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', styleId: 'happy', stream: true }) }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['Content-Type'], 'audio/l16; codec=pcm; rate=24000');
+  assert.equal(res.headers['X-TTS-Stream'], '1');
+  assert.equal(res.ended, true);
+  assert.equal(spoken(res).toString(), 'aaaabbbb');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, GEMINI_STREAM_URL);
+  // o corpo é o mesmo esquema do caminho normal: speechConfig dentro de generationConfig
+  const sent = JSON.parse(calls[0].options.body);
+  assert.deepEqual(sent.generationConfig.responseModalities, ['AUDIO']);
+  assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, 'voice_cewhmedkmma9');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado, voz alegre e brilhante] oi');
+});
+
+test('gemini stream: SSE picotado no meio do base64 ainda sai áudio inteiro', async () => {
+  const fetchImpl = async () => sseResponse([audioEvent('aaaa'), audioEvent('bbbb')], { splitAt: 40 });
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'Kore' }),
+  });
+  const res = streamRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) }), res);
+  assert.equal(spoken(res).toString(), 'aaaabbbb');
+});
+
+test('gemini stream: todos os eventos saem, não só o primeiro (CRLF e LF)', async () => {
+  for (const separator of ['\r\n\r\n', '\n\n']) {
+    const events = Array.from({ length: 9 }, (_, index) => audioEvent('s' + index));
+    const fetchImpl = async () => sseResponse(events, { separator });
+    const handler = createTtsHandler({
+      fetchImpl,
+      getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'Kore' }),
+    });
+    const res = streamRes();
+    await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) }), res);
+    assert.equal(spoken(res).toString(), events.map((_, index) => 's' + index).join(''), 'separator ' + JSON.stringify(separator));
+  }
+});
+
+test('gemini stream: o WAV do stream alimenta o cache e o HIT serve o blob', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const cacheDir = await mkdtemp(join(tmpdir(), 'usami-tts-stream-'));
+  const calls = [];
+  try {
+    const handler = createTtsHandler({
+      cache: true,
+      cacheDir,
+      fetchImpl: async url => { calls.push(url); return sseResponse([audioEvent('abcd')]); },
+      getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'Kore' }),
+    });
+    const request = () => mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) });
+    const first = streamRes();
+    await handler(request(), first);
+    assert.equal(spoken(first).toString(), 'abcd');
+    const second = mockRes();
+    await handler(request(), second);
+    assert.equal(calls.length, 1);
+    assert.equal(second.headers['X-TTS-Cache'], 'HIT');
+    // HIT não é stream: devolve o WAV empacotado e o cliente toca pelo caminho normal.
+    assert.equal(second.headers['X-TTS-Stream'], undefined);
+    assert.equal(second.headers['Content-Type'], 'audio/wav');
+    assert.equal(Buffer.from(second.body).subarray(0, 4).toString('ascii'), 'RIFF');
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('gemini stream: sem áudio no SSE cai no caminho normal e responde WAV', async () => {
+  const calls = [];
+  const fetchImpl = async url => {
+    calls.push(url);
+    return url.match(GEMINI_STREAM_URL) ? sseResponse([{ candidates: [{ finishReason: 'STOP' }] }]) : geminiAudioResponse();
+  };
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'Kore' }),
+  });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) }), res);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /:generateContent$/);
+  assert.equal(res.headers['Content-Type'], 'audio/wav');
+  assert.equal(res.body.subarray(0, 4).toString('ascii'), 'RIFF');
+});
+
+test('gemini stream: HTTP falho no stream não escreve nada e o normal responde', async () => {
+  const calls = [];
+  const fetchImpl = async url => {
+    calls.push(url);
+    if (url.match(GEMINI_STREAM_URL)) return { ok: false, status: 503 };
+    return geminiAudioResponse();
+  };
+  const handler = createTtsHandler({
+    fetchImpl,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY, geminiModel: 'gemini-3.8-flash-tts', geminiVoice: 'Kore' }),
+  });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['X-TTS-Stream'], undefined);
+});
+
+test('tts: provedor sem streaming (elevenlabs) segue o caminho normal', async () => {
+  const calls = [];
+  const handler = createTtsHandler({
+    fetchImpl: async (url, options) => { calls.push({ url, options }); return audioResponse(AUDIO_BYTES); },
+    getConfig: async () => ({ apiKey: TEST_KEY, voiceId: 'voice-42' }),
+  });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi', stream: true }) }), res);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /api\.elevenlabs\.io/);
+  assert.equal(res.headers['X-TTS-Stream'], undefined);
+});
+
+test('parseTtsBody: stream é flag booleano, não string qualquer', async () => {
+  const { parseTtsBody } = await import('../server.mjs');
+  assert.equal(parseTtsBody(JSON.stringify({ text: 'oi', stream: true })).stream, true);
+  assert.equal(parseTtsBody(JSON.stringify({ text: 'oi', stream: 'true' })).stream, false);
+  assert.equal(parseTtsBody(JSON.stringify({ text: 'oi' })).stream, false);
+});
