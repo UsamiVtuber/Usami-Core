@@ -16,7 +16,7 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReply, planAnimation, structureTechnique } from './src/llm-router.js';
+import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique } from './src/llm-router.js';
 import { readRagContext } from './src/rag.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
 import { createTechniqueIndex } from './src/technique-index.js';
@@ -90,6 +90,39 @@ function isValidN8nCommand(cmd) {
   if (cmd.type === 'gesture' && !GESTURE_NAMES.includes(cmd.name)) return false;
   if (cmd.type === 'play_sequence' && !SHAPE_NAMES.includes(cmd.shape)) return false;
   return true;
+}
+
+// Único ponto de entrada da fila: valida, carimba id/timestamp e empurra.
+// Usado pelo n8n (POST) e pelo refino de animação do próprio turno.
+function queueAvatarCommand(cmd) {
+  if (!isValidN8nCommand(cmd)) return null;
+  const entry = {
+    id: Math.random().toString(36).slice(2, 10),
+    timestamp: new Date().toISOString(),
+    ...cmd,
+  };
+  n8nCommandQueue.push(entry);
+
+  // Mantém a fila limitada para não crescer indefinidamente.
+  if (n8nCommandQueue.length > 100) n8nCommandQueue.shift();
+  return entry;
+}
+
+// Refino de animação fora do caminho crítico: quando a geração única devolve a
+// fala sem ação nenhuma, o diretor de animação roda DEPOIS da resposta e empurra
+// o gesto pela fila de comandos (o cliente consome em poll de 2 s). Troca ~4 s
+// de latência por um gesto que chega no meio da frase — sem ação nenhuma era o
+// resultado de antes quando o plano demorava.
+export async function refineAnimationInBackground(reply, capabilities, { planner = planAnimation } = {}) {
+  try {
+    const { actions } = await planner(reply, capabilities, { temperature: 0.3 });
+    const queued = filterActionsByCatalog(actions ?? [], capabilities)
+      .map(action => queueAvatarCommand(action))
+      .filter(Boolean).length;
+    console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila');
+  } catch (error) {
+    console.warn('[animacao] refino em background falhou:', describeFetchError(error));
+  }
 }
 
 // Memória local + afinidade (data/memory.json, escrita atômica tmp+rename).
@@ -258,9 +291,16 @@ export function filterActionsByCatalog(actions, capabilities) {
 }
 
 export function systemFor(capabilities) {
-  const base = DEFAULT_SYSTEM;
-  if (!capabilities) return base;
-  return base + ' Capabilidades disponíveis neste modelo: ' + JSON.stringify(capabilities) + '.';
+  return withCapabilities(DEFAULT_SYSTEM, capabilities);
+}
+
+// Anexa o catálogo de capacidades ao system prompt de quem precisa escolher
+// ações. Sem ele o modelo inventa nomes de expressão/clip que não existem no
+// avatar e toda ação morre em filterActionsByCatalog — era por isso que existia
+// uma segunda chamada (planAnimation) só para ter o catálogo em mãos.
+export function withCapabilities(system, capabilities) {
+  if (!capabilities) return system;
+  return system + ' Capabilidades disponíveis neste modelo: ' + JSON.stringify(capabilities) + '.';
 }
 
 // Fato "remember" do schema da persona: string curta e útil, ou null.
@@ -403,6 +443,9 @@ export function createChatHandler(options = {}) {
       res.end(JSON.stringify(data));
     };
 
+    // Linha do tempo do turno (stageTimes logo abaixo)
+    const chatStartedAt = now();
+
     if (req.method !== 'POST' || req.url !== '/api/chat') {
       return send(404, { error: 'Não encontrado.' });
     }
@@ -466,31 +509,52 @@ export function createChatHandler(options = {}) {
 
     let parsed;
     let classification = null;
+    let classificationPending = null;
+
+    // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
+    // otimização vira chute. Um log por turno basta para ver quem manda.
+    const stageTimes = { context: 0, llm: 0, animation: 0, total: 0 };
+    let stageAt = chatStartedAt;
+    const mark = key => {
+      const at = now();
+      stageTimes[key] = at - stageAt;
+      stageAt = at;
+    };
+    mark('context');
 
     if (useNvidia()) {
-      // Fluxo NVIDIA: 3 modelos com rate limit global de 40 req/min
+      // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
       try {
-        // 1) Classificação + 2) geração correm juntas: a classificação só
-        // depende da frase do usuário, e cada chamada NVIDIA custa ~5-15 s.
-        const [classificationResult, rawReply] = await Promise.all([
-          classifyUserMessage(parsedBody.message),
-          generateReply(system, parsedBody.message, { temperature: 0.7 }),
-        ]);
-        classification = classificationResult;
+        // Classificação fora do caminho crítico: ela nunca participou da resposta
+        // (o cliente deriva a emoção do texto localmente), só alimenta o webhook do
+        // n8n. Esperá-la pagava o tempo da chamada mais lenta das duas e um slot
+        // do rate limiter de 40 req/min.
+        classificationPending = classifyUserMessage(parsedBody.message).catch(() => null);
+
+        const rawReply = await generateReplyWithActions(
+          withCapabilities(system, capabilities),
+          parsedBody.message,
+          { temperature: 0.7 },
+        );
+        mark('llm');
 
         const parsedReply = parseProviderRaw(rawReply);
         if (!parsedReply.ok) throw new Error(parsedReply.error);
 
-        // 3) Planejamento de animação (depende da resposta gerada)
-        const animation = await planAnimation(parsedReply.reply, capabilities, { temperature: 0.3 });
+        // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
+        // background e o refino chega pela fila de comandos. Nunca bloqueia a
+        // resposta — a fala já está na mão do cliente.
+        if (!parsedReply.actions.length && capabilities) {
+          void refineAnimationInBackground(parsedReply.reply, capabilities);
+        }
+        mark('animation');
 
         parsed = {
           ok: true,
           reply: parsedReply.reply,
           gesture: parsedReply.gesture,
-          actions: animation.actions,
+          actions: parsedReply.actions,
           remember: parsedReply.remember,
-          classification,
           source: 'nvidia',
         };
       } catch (error) {
@@ -602,18 +666,29 @@ export function createChatHandler(options = {}) {
 
     // Dispara evento para o n8n (fire-and-forget): resposta, emoção,
     // ações de animação e afinidade. Não bloqueia o chat se o n8n estiver
-    // offline.
-    void sendToN8nWebhook('usami.response', {
+    // offline. A classificação chega depois da resposta quando está em voo —
+    // ela só alimenta este webhook, nunca o balão.
+    const emitResponse = emotion => void sendToN8nWebhook('usami.response', {
       userMessage: parsedBody.message,
       reply: parsed.reply,
       gesture: parsed.gesture,
       actions,
-      emotion: classification,
+      emotion,
       affinity: affinityPayload,
       source: parsed.source,
     });
+    if (classificationPending) void classificationPending.then(emitResponse);
+    else emitResponse(classification);
 
-    return send(200, { reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source, ...(affinityPayload || {}) });
+    const totalMs = now() - chatStartedAt;
+    console.log('[chat] llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
+      + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source);
+
+    return send(200, {
+      reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
+      timing: { llmMs: stageTimes.llm, animationMs: stageTimes.animation, totalMs },
+      ...(affinityPayload || {}),
+    });
   };
 }
 
@@ -744,19 +819,10 @@ export function createN8nCommandHandler(options = {}) {
         return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
       }
 
-      if (!isValidN8nCommand(cmd)) {
+      const entry = queueAvatarCommand(cmd);
+      if (!entry) {
         return send(400, { error: 'Comando inválido. Tipos válidos: say, gesture, set_expression, set_morph, set_mesh_visible, play_sequence.' });
       }
-
-      const entry = {
-        id: Math.random().toString(36).slice(2, 10),
-        timestamp: new Date().toISOString(),
-        ...cmd,
-      };
-      n8nCommandQueue.push(entry);
-
-      // Mantém a fila limitada para não crescer indefinidamente.
-      if (n8nCommandQueue.length > 100) n8nCommandQueue.shift();
 
       return send(200, { ok: true, id: entry.id, queued: n8nCommandQueue.length });
     }

@@ -16,7 +16,7 @@ process.env.USE_NVIDIA = 'false';
 const scratchMemoryDir = mkdtempSync(join(tmpdir(), 'usami-chat-memory-'));
 process.env.USAMI_DATA_DIR = scratchMemoryDir;
 
-const { createChatHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, sanitizeActions, sanitizeCapabilities, systemFor } = await import('../server.mjs');
+const { createChatHandler, createN8nCommandHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, refineAnimationInBackground, sanitizeActions, sanitizeCapabilities, systemFor, withCapabilities } = await import('../server.mjs');
 
 const scratchMemoryStore = createMemoryStore({ dataDir: scratchMemoryDir });
 scratchMemoryStore.load();
@@ -400,4 +400,48 @@ test('handler: timeout vira 502', async () => {
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 502);
   assert.match(JSON.parse(res.body).error, /expirou/);
+});
+
+// --- Geração única: catálogo no prompt + refino de animação em background ---
+
+test('withCapabilities: o catálogo chega ao prompt de quem escolhe as ações', () => {
+  const capabilities = { gestures: ['wave'], clips: [], morphs: [], expressions: ['01-prefab_happy01'], meshes: [], sequences: false };
+  const withCaps = withCapabilities('PERSONA', capabilities);
+  assert.match(withCaps, /^PERSONA Capabilidades disponíveis neste modelo: /);
+  assert.ok(JSON.parse(withCaps.match(/: (\{.*\})\.$/)[1]).expressions.includes('01-prefab_happy01'));
+  assert.equal(withCapabilities('PERSONA', null), 'PERSONA');
+  // systemFor é a mesma anexação sobre o DEFAULT_SYSTEM (caminho OpenRouter)
+  assert.match(systemFor(capabilities), /"actions"/);
+  assert.match(systemFor(capabilities), /Capabilidades disponíveis neste modelo: /);
+});
+
+test('refino em background: o diretor preenche a fila de comandos depois da resposta', async () => {
+  const capabilities = sanitizeCapabilities({
+    gestures: ['wave'], clips: ['Idle'], morphs: ['happy'], expressions: ['01-prefab_happy01'], meshes: [], sequences: false,
+  });
+  const planner = async () => ({
+    actions: [
+      { type: 'gesture', name: 'wave', delayMs: 400 },
+      { type: 'set_expression', name: '01-prefab_happy01', weight: 0.8 },
+      { type: 'play_clip', name: 'Idle' },
+      { type: 'gesture', name: 'facepalm' },
+    ],
+  });
+  await refineAnimationInBackground('oi!', capabilities, { planner });
+  const res = mockRes();
+  await createN8nCommandHandler()(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }), res);
+  const { commands } = JSON.parse(res.body);
+  // play_clip não é comando da fila e facepalm não está no catálogo do modelo:
+  // só o que o avatar realmente consegue fazer chega ao cliente.
+  assert.deepEqual(commands.map(command => command.type), ['gesture', 'set_expression']);
+  assert.equal(commands[0].name, 'wave');
+  assert.equal(commands[0].delayMs, 400);
+  assert.equal(commands[1].weight, 0.8);
+});
+
+test('refino em background: falha do diretor é silenciosa, nunca do turno', async () => {
+  await refineAnimationInBackground('oi!', null, { planner: async () => { throw new Error('rate limit'); } });
+  const res = mockRes();
+  await createN8nCommandHandler()(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }), res);
+  assert.deepEqual(JSON.parse(res.body).commands, []);
 });
