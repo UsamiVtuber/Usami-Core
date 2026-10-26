@@ -101,21 +101,34 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
   }
 }
 
-// --- Geração de texto (resposta da Usami) ---------------------------------
-
-export async function generateReply(systemPrompt, userMessage, { temperature = 0.7 } = {}) {
+// --- Geração (resposta + ações numa só chamada) ---------------------------
+//
+// O prompt de persona (src/persona.js) já pede {"reply","gesture","actions",
+// "remember"} e o chamador anexa as capacidades do avatar a ele; é dessa lista
+// que o modelo pega os verbos — ANIMATION_SYSTEM fica como está, porque
+// planAnimation continua sendo o refinamento em background.
+//
+// maxTokens 1100: o preâmbulo de raciocínio + reply (≤180 chars) + até 5
+// actions + remember não caberiam no orçamento antigo de 700, que devolvia
+// actions vazias.
+export async function generateReplyWithActions(
+  systemPrompt,
+  userMessage,
+  { temperature = 0.7, maxTokens = 1100, client = sharedClient } = {},
+) {
   if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage },
   ];
-  const answer = await sharedClient.chatJson({
+  const answer = await client.chatJson({
     model: GENERATION_MODEL,
     messages,
     temperature,
-    max_tokens: 700,
+    max_tokens: maxTokens,
   });
+  // Texto cru, como generateReply: parse e fallback OpenRouter são do chamador.
   return jsonText(answer, 'reply');
 }
 
