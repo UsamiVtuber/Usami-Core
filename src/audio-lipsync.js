@@ -5,6 +5,13 @@
 // derivava. Este module lê o sinal que realmente sai nos alto-falantes:
 //
 //   HTMLAudioElement → MediaElementSource → AnalyserNode → destination
+//   AudioBufferSourceNode (PCM em streaming) ↗
+//
+// As duas entradas compartilham o mesmo AnalyserNode: `getTap()` entrega
+// `{ context, input }` para o `playPcmStream` tocar o PCM do `/api/tts?stream`
+// sem HTMLAudioElement, e `beginExternal()`/`endExternal()` dizem a `update()`
+// que a fala do momento não passa pelo elemento (senão a boca fecharia porque
+// o elemento está pausado/sem src).
 //
 // O `AnalyserNode` (fftSize 256, smoothing 0.3) entrega o espectro em bytes;
 // os bins são reduzidos a um RMS contínuo normalizado (0–1) que vira a
@@ -63,6 +70,7 @@ export function createAudioLipSync({
   let source = null;
   let dataArray = null;
   let boundElement = null; // elemento já roteado ao source atual
+  let externalActive = false; // player de PCM usando o analyser diretamente
   let current = 0;
   let lastTime = null;
 
@@ -106,31 +114,40 @@ export function createAudioLipSync({
     dataArray = null;
     audioCtx = null;
     boundElement = null;
+    externalActive = false;
   };
 
-  // Criação preguiçosa: contexto e analyser nascem uma única vez; o source
-  // nasce por elemento. Qualquer falha vira fallback silencioso (failed).
-  const ensureGraph = el => {
+  // Contexto + analyser nascem uma única vez e NUNCA dependem do elemento: é o
+  // ponto de entrada do áudio em streaming (src/stream-audio-player.js), que
+  // conecta um AudioBufferSourceNode direto no analyser. Qualquer falha vira
+  // fallback silencioso (failed).
+  const ensureContext = () => {
     if (failed) return false;
-    if (!audioCtx) {
-      const Ctor = resolveContextCtor();
-      if (!Ctor) { failed = true; return false; }
-      try {
-        audioCtx = new Ctor();
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.3;
-        // O analyser devolve o som ao destino, senão o elemento ficaria mudo.
-        if (typeof analyser.connect === 'function') analyser.connect(audioCtx.destination);
-        dataArray = new Uint8Array(analyser.frequencyBinCount || 128);
-      } catch {
-        audioCtx = null;
-        analyser = null;
-        dataArray = null;
-        failed = true;
-        return false;
-      }
+    if (audioCtx && analyser) return true;
+    const Ctor = resolveContextCtor();
+    if (!Ctor) { failed = true; return false; }
+    try {
+      audioCtx = new Ctor();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.3;
+      // O analyser devolve o som ao destino, senão a fala sairia muda.
+      if (typeof analyser.connect === 'function') analyser.connect(audioCtx.destination);
+      dataArray = new Uint8Array(analyser.frequencyBinCount || 128);
+    } catch {
+      audioCtx = null;
+      analyser = null;
+      dataArray = null;
+      failed = true;
+      return false;
     }
+    return true;
+  };
+
+  // Caminho histórico: além do grafo, roteia o HTMLAudioElement. Um source por
+  // elemento (trocar de elemento recria só o source).
+  const ensureGraph = el => {
+    if (!ensureContext()) return false;
     if (boundElement !== el) {
       try {
         const nextSource = audioCtx.createMediaElementSource(el);
@@ -150,14 +167,20 @@ export function createAudioLipSync({
 
   // Chamado 1×/frame pelo rAF do Avatar.
   const update = () => {
+    if (!hasTargets || failed) { stopMouth(); return; }
     const el = audioElement;
-    if (!hasTargets || failed || !el || !el.src || (el.readyState || 0) < 2) {
-      stopMouth();
-      return;
+    if (externalActive) {
+      // PCM em streaming: não existe elemento tocando — o analyser é alimentado
+      // pelo AudioBufferSourceNode do player. Zerar a boca porque o elemento está
+      // pausado/sem src seria calar o avatar no meio da fala.
+      if (!ensureContext() || !dataArray) { stopMouth(); return; }
+    } else {
+      if (!el || !el.src || (el.readyState || 0) < 2) { stopMouth(); return; }
+      if (!ensureGraph(el)) { stopMouth(); return; }
+      if (el.paused || el.ended) { stopMouth(); return; }
     }
-    if (!ensureGraph(el)) { stopMouth(); return; }
-    if (el.paused || el.ended) { stopMouth(); return; }
-    // Política de autoplay: contexto suspenso é retomado a cada frame até ligar.
+    // Política de autoplay: contexto suspenso é retomado a cada frame até ligar
+    // — inclusive o criado sob demanda pelo tap do player de PCM.
     if (audioCtx.state === 'suspended' && typeof audioCtx.resume === 'function') { try { audioCtx.resume(); } catch {} }
     analyser.getByteFrequencyData(dataArray);
     let sum = 0;
@@ -197,6 +220,29 @@ export function createAudioLipSync({
     writeMouth(0);
   };
 
+  // Saída do grafo para um player de PCM: `{ context, input }` é exatamente o
+  // par que `playPcmStream` precisa — o AudioBufferSourceNode conecta em
+  // `input` (o AnalyserNode) e é medido pela mesma boca do caminho histórico.
+  // Não chama createMediaElementSource: não há elemento, só amostras.
+  const getTap = () => {
+    if (!hasTargets || !ensureContext()) return null;
+    return { context: audioCtx, input: analyser };
+  };
+
+  // Enquanto o PCM toca, `update()` lê o analyser em vez de checar o elemento.
+  const beginExternal = () => {
+    if (!hasTargets || failed) return false;
+    externalActive = true;
+    lastTime = null;
+    return true;
+  };
+
+  // Restaura o comportamento antigo (elemento parado = boca fechada) quadro a
+  // quadro, sem desmontar nada — o contexto segue vivo para a próxima fala.
+  const endExternal = () => {
+    externalActive = false;
+  };
+
   // Teardown: zera a boca, desconecta o source e fecha o contexto. O chamador
   // deve descartar o elemento consumido (ele não pode ser roteado de novo).
   const reset = () => {
@@ -210,6 +256,9 @@ export function createAudioLipSync({
     attach,
     clear,
     reset,
+    getTap,
+    beginExternal,
+    endExternal,
     get enabled() { return hasTargets && !failed; },
   };
 }

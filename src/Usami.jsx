@@ -17,6 +17,7 @@ import { createVrmIdleSway } from './vrm-idle-sway';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { calibrateArmAxes } from './vrm-bone-calibration';
 import { createAudioLipSync } from './audio-lipsync';
+import { playPcmStream } from './stream-audio-player';
 import { splitReplyParts } from './reply-parts';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
@@ -583,11 +584,14 @@ export function Usami() {
   // Fila de áudio da resposta: UMA síntese por vez. O provedor de voz não
   // tolera requisições concorrentes (5 POST /api/tts em paralelo = 5×504; com
   // uma em voo todas voltam 200), então cada parte é sintetizada, exibida e
-  // tocada em ordem. A síntese da próxima parte é disparada ANTES do playback
-  // da atual — continua havendo só uma requisição em voo, sem buraco de
-  // silêncio entre balões. O mesmo HTMLAudioElement é reutilizado (só pode
-  // passar por createMediaElementSource uma vez); cada blob: URL é revogado
-  // depois de tocar.
+  // tocada em ordem. Cada parte pede o áudio EM STREAMING: o servidor despeja
+  // PCM na medida em que o provedor gera e o primeiro som sai ~1 s depois do
+  // pedido, contra ~5,3 s do WAV inteiro. A próxima parte é pedida quando a
+  // rede da atual termina (onStreamEnd) — continua havendo uma requisição em
+  // vó e nenhum buraco de silêncio entre balões. O caminho de elemento
+  // (HTMLAudioElement reutilizado, blob: URL revogado depois de tocar) fica
+  // para o HIT de cache e para o modo quieto, que desacelera a voz pelo
+  // playbackRate — recurso que o PCM cru não tem.
   const speakReply = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
     const parts = (Array.isArray(reply) ? reply : splitReplyParts(String(reply ?? '')))
       .map(part => String(part || '').trim())
@@ -598,41 +602,62 @@ export function Usami() {
     // Sem áudio (mudo ou síntese quebrada) as ações agendadas não têm com que
     // se sincronizar: executar em vez de descartar, senão o corpo não reage.
     const flushTimedActions = () => { for (const action of timedActions) director.current?.execute([action]); };
+    // No streaming não existe elemento com 'ended'/duration para o
+    // speechScheduler, então as ações são agendadas contra o início da fala —
+    // que é exatamente o que delayMs significa. Mesmo esquema do modo chamada.
+    let actionsStarted = false;
+    const runActionsAtSpeechStart = () => {
+      if (actionsStarted) return;
+      actionsStarted = true;
+      for (const action of timedActions) {
+        if (action?.trigger === 'end') continue;
+        const delay = Number(action?.delayMs);
+        if (Number.isFinite(delay) && delay > 0) {
+          setTimeout(() => { if (alive()) director.current?.execute([action]); }, delay);
+        } else director.current?.execute([action]);
+      }
+    };
+    const runActionsAtSpeechEnd = () => {
+      if (!alive()) return;
+      for (const action of timedActions) if (action?.trigger === 'end') director.current?.execute([action]);
+    };
     // Mute: nunca pede /api/tts — os balões entram todos de uma vez e a boca
     // fica fechada (fallback mudo), como quando a síntese falha.
     if (voiceOffRef.current) { parts.forEach(part => onPart(part)); flushTimedActions(); return; }
     if (!ttsAudio.current) ttsAudio.current = new Audio();
     const audio = ttsAudio.current;
+    // Streaming exige o grafo Web Audio da camada de boca: é por ele que o PCM
+    // toca e é ele que mede o lábio. Sem AudioContext ou sem visemas, pede o
+    // blob direto — senão cada frase custaria dois pedidos ao provedor de voz.
+    const canStream = !quiet && Boolean(audioLipSync.current?.getTap?.());
     // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
     // requisição no ar — sem unhandled rejection.
-    const synth = text => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId }) })
+    const askTts = (text, stream) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId, stream }) })
       .then(async response => {
+        if (!response || !response.ok) return null;
+        // PCM cru atrás do header de stream; qualquer outra resposta de áudio é
+        // o blob do caminho normal (HIT de cache, provedor sem streaming).
+        if (stream && response.headers.get('x-tts-stream') === '1') return { stream: response };
         const type = response.headers.get('content-type') || '';
-        if (!response.ok || !type.includes('audio/')) throw new Error('tts-status-' + response.status);
-        return URL.createObjectURL(await response.blob());
+        if (!type.includes('audio/')) return null;
+        return { url: URL.createObjectURL(await response.blob()) };
       })
       .catch(() => null);
     let attached = false;
-    let pending = synth(parts[0]);
-    for (let index = 0; index < parts.length; index += 1) {
-      const url = await pending;
-      pending = null;
-      // Fila superseded ou mute durante a síntese: larga o resto.
-      if (!alive()) { if (url) URL.revokeObjectURL(url); break; }
-      // O balão nasce junto da fala dele. Sem áudio (síntese falhou) o texto
-      // ainda aparece — provedor quebrado não apaga resposta.
-      onPart(parts[index]);
-      if (!url) continue;
+    let played = false;
+    // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
+    // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
+    // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
+    // áudio pronto. Sem duração do servidor, sem timeline textual.
+    const playWithElement = async url => {
       if (!attached) {
-        // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
-        // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
-        // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
-        // áudio pronto. Sem duração do servidor, sem timeline textual.
         audioLipSync.current?.attach(audio);
         attached = true;
         // Frente 2: as timedActions do turno inteiro são agendadas com o áudio
-        // da PRIMEIRA parte (o scheduler não foi redesenhado).
-        if (timedActions.length > 0 && speechScheduler.current) {
+        // da PRIMEIRA parte, uma única vez — se o streaming já cuidou delas,
+        // o scheduler não repete.
+        if (!actionsStarted && timedActions.length > 0 && speechScheduler.current) {
+          actionsStarted = true;
           speechScheduler.current.schedule({
             actions: timedActions,
             audio,
@@ -642,16 +667,65 @@ export function Usami() {
           });
         }
       }
-      pending = index + 1 < parts.length ? synth(parts[index + 1]) : null;
       audio.playbackRate = quiet ? .8 : 1;
       await playAudioPart(audio, url);
       URL.revokeObjectURL(url);
+      played = true;
+    };
+    let pending = askTts(parts[0], canStream);
+    for (let index = 0; index < parts.length; index += 1) {
+      const job = await pending;
+      pending = null;
+      // Fila superseded ou mute durante a síntese: larga o resto.
+      if (!alive()) { if (job?.url) URL.revokeObjectURL(job.url); break; }
+      // O balão pode ter nascido com a primeira amostra de áudio (streaming);
+      // `shown` evita o segundo onPart da mesma frase.
+      let shown = false;
+      if (job?.stream) {
+        const tap = audioLipSync.current?.getTap?.() || null;
+        const external = tap ? audioLipSync.current.beginExternal() : false;
+        let outcome = { streamed: false };
+        if (tap) {
+          try {
+            outcome = await playPcmStream({
+              response: job.stream,
+              audioContext: tap.context,
+              input: tap.input,
+              shouldContinue: alive,
+              onFirstAudio: () => {
+                if (!alive()) return;
+                shown = true;
+                onPart(parts[index]);
+                runActionsAtSpeechStart();
+              },
+              onStreamEnd: () => {
+                if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
+              },
+            });
+          } finally {
+            if (external) audioLipSync.current.endExternal();
+          }
+        }
+        if (outcome.streamed) {
+          played = true;
+          runActionsAtSpeechEnd();
+          if (!alive()) break;
+          continue;
+        }
+        // Stream entregue mas mudo (Web Audio perdido no meio do turno, ou a
+        // rede caiu antes da primeira amostra): sem segunda síntese — pedir de
+        // novo custaria outro provedor inteiro. O texto ainda aparece abaixo.
+      }
+      if (!shown) onPart(parts[index]);
+      if (!job?.url) continue;
+      if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
+      await playWithElement(job.url);
       if (!alive()) break;
     }
     // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
     // revoga quando resolver. revoke em URL já revogada é no-op.
-    if (pending) Promise.resolve(pending).then(url => { if (url) URL.revokeObjectURL(url); });
-    if (!attached) { audioLipSync.current?.clear(); flushTimedActions(); }
+    if (pending) Promise.resolve(pending).then(late => { if (late?.url) URL.revokeObjectURL(late.url); });
+    if (!played) { audioLipSync.current?.clear(); flushTimedActions(); }
   };
   const awardXP = gains => {
     setIntimacy(previous => {

@@ -23,7 +23,7 @@ function makeAudioElement({ readyState = 2, paused = false, src = 'blob:usami-tt
   return element;
 }
 
-function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, withAnalyserConnect = true, state = 'running' } = {}) {
+function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, resumeThrows = false, withAnalyserConnect = true, state = 'running' } = {}) {
   const calls = { sources: 0, analysers: 0, closes: 0, sourceDisconnects: 0, resumes: 0 };
   const analyser = {
     fftSize: 0,
@@ -350,4 +350,141 @@ test('canal setWeight sem morphTargets (modelo via expressões) continua ativo',
   assert.ok(written[written.length - 1][1] > 0);
   layer.reset();
   assert.equal(written[written.length - 1][1], 0, 'reset zera pelo canal');
+});
+
+// --- tap do PCM em streaming (src/stream-audio-player.js) ---
+// O áudio do /api/tts?stream chega como PCM cru e é tocado por
+// AudioBufferSourceNode, sem HTMLAudioElement. Para a boca continuar sendo
+// dirigida pelo MESMO analyser, o layer precisa expor o grafo antes de
+// qualquer elemento existir e saber que a fala da vez não passa dele.
+
+function makeTapLayer({ data = new Uint8Array(128).fill(255), audioElement = null } = {}) {
+  const web = makeWebAudio({ data });
+  const clock = makeClock();
+  const targets = makeMorphTargets();
+  const layer = createAudioLipSync({
+    audioElement,
+    morphTargets: targets,
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  return { web, clock, targets, layer, data };
+}
+
+test('getTap cria contexto e analyser sem tocar em createMediaElementSource', () => {
+  const h = makeTapLayer();
+  const tap = h.layer.getTap();
+  assert.ok(tap, 'o grafo é entregue ao player de PCM');
+  assert.equal(tap.context, h.web.ctx);
+  assert.equal(tap.input, h.web.analyser, 'input é o próprio AnalyserNode da boca');
+  assert.equal(h.web.calls.sources, 0, 'sem elemento, sem MediaElementSource');
+  assert.equal(h.web.calls.analysers, 1);
+  assert.equal(h.web.analyser.fftSize, 256);
+  assert.equal(h.web.analyser.smoothingTimeConstant, 0.3);
+  const again = h.layer.getTap();
+  assert.equal(again.input, tap.input, 'tap idempotente');
+  assert.equal(h.web.calls.analysers, 1, 'o segundo getTap não recria o grafo');
+});
+
+test('getTap reaproveita o grafo já criado pelo caminho do elemento', () => {
+  const h = makeTapLayer({ audioElement: makeAudioElement() });
+  h.layer.update(); // caminho histórico: cria contexto + MediaElementSource
+  const tap = h.layer.getTap();
+  assert.equal(h.web.calls.analysers, 1, 'analyser compartilhado');
+  assert.equal(h.web.calls.sources, 1);
+  assert.equal(tap.input, h.web.analyser);
+});
+
+test('getTap sem AudioContext (SSR) ou sem visemas devolve null sem crash', () => {
+  const restore = setGlobal('AudioContext', undefined);
+  const restoreWebkit = setGlobal('webkitAudioContext', undefined);
+  try {
+    const targets = makeMorphTargets();
+    const layer = createAudioLipSync({ morphTargets: targets });
+    assert.equal(layer.getTap(), null);
+    assert.equal(layer.enabled, false, 'fallback silencioso, sem exceção');
+    layer.update();
+  } finally {
+    restore();
+    restoreWebkit();
+  }
+  const bare = createAudioLipSync({ morphTargets: [] });
+  assert.equal(bare.getTap(), null, 'modelo sem boca não expõe grafo algum');
+});
+
+test('modo externo: update dirige a boca pelo analyser mesmo sem elemento', () => {
+  const h = makeTapLayer();
+  h.layer.update();
+  assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'sem elemento a boca segue fechada');
+  assert.equal(h.web.calls.analysers, 0, 'e o grafo nem nasce');
+  assert.equal(h.layer.beginExternal(), true);
+  h.layer.update(); // dt 0 — cria o contexto do tap e ancora o relógio
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (const value of valuesOf(h.targets)) {
+    assert.ok(value > 0.9, `PCM no analyser abre a boca (veio ${value})`);
+  }
+  assert.equal(h.web.calls.sources, 0, 'o caminho do elemento não é invocado');
+  h.layer.endExternal();
+  h.layer.update();
+  assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'comportamento antigo restaurado');
+});
+
+test('modo externo: elemento pausado ou sem src não zera a boca no meio da fala', () => {
+  const element = makeAudioElement({ paused: true, src: '' });
+  const h = makeTapLayer({ audioElement: element });
+  h.layer.beginExternal();
+  h.layer.update();
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.9, 'a fala em streaming segue dirigida');
+  // O RMS zerado ainda fecha a boca pela rampa de release — não é stopMouth seco.
+  h.data.fill(0);
+  for (let step = 0; step < 6; step++) { h.clock.advance(RELEASE_TAU_MS); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) < 0.02, 'silêncio do fim do stream fecha a boca');
+});
+
+test('modo externo: contexto suspenso do tap é retomado a cada frame', () => {
+  const web = makeWebAudio({ state: 'suspended', data: new Uint8Array(128).fill(255) });
+  const clock = makeClock();
+  const targets = makeMorphTargets();
+  const layer = createAudioLipSync({ morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
+  assert.ok(layer.getTap(), 'contexto nasce suspenso (política de autoplay)');
+  layer.beginExternal();
+  layer.update();
+  assert.equal(web.calls.resumes, 1, 'resume também se aplica ao contexto do tap');
+  clock.advance(ATTACK_TAU_MS);
+  layer.update();
+  assert.ok(Math.max(...valuesOf(targets)) > 0, 'a boca continua sendo dirigida');
+});
+
+test('modo externo: clear e reset continuam seguros, reset derruba o modo', () => {
+  const h = makeTapLayer();
+  h.layer.beginExternal();
+  h.layer.update();
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  h.layer.clear();
+  assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'clear fecha a boca na hora');
+  for (let step = 0; step < 4; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.9, 'e o modo externo segue vivo depois do clear');
+  h.layer.reset();
+  assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0]);
+  assert.equal(h.web.calls.closes, 1, 'contexto fechado no teardown');
+  h.layer.update();
+  assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'sem modo externo pendurado após o reset');
+  assert.equal(h.layer.beginExternal(), true, 'rearmável para a próxima fala');
+  assert.ok(h.layer.getTap(), 'o tap volta a existir depois do reset');
+  assert.equal(h.web.calls.analysers, 2, 'novo grafo, não o nó fechado');
+});
+
+test('tap depois de uma falha do Web Audio devolve null e o modo externo desiste', () => {
+  const web = makeWebAudio({ sourceThrows: true });
+  const clock = makeClock();
+  const targets = makeMorphTargets();
+  const element = makeAudioElement();
+  const layer = createAudioLipSync({ audioElement: element, morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
+  layer.update();
+  assert.equal(layer.enabled, false, 'createMediaElementSource quebrou o caminho');
+  assert.equal(layer.getTap(), null, 'nada a conectar em um grafo morto');
+  assert.equal(layer.beginExternal(), false, 'player de PCM descobre que não há boca dirigida');
+  layer.update();
+  assert.deepEqual(valuesOf(targets), [0, 0, 0, 0, 0]);
 });
