@@ -16,6 +16,7 @@ import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences
 import { createVrmIdleSway } from './vrm-idle-sway';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { createAudioLipSync } from './audio-lipsync';
+import { splitReplyParts } from './reply-parts';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
 import { classifyFacs } from './facs-classifier.js';
@@ -24,6 +25,43 @@ import './usami.css';
 
 // Viseme morph names exposed by the VRM avatar (capital I).
 const VISEME_NAMES = ['a', 'I', 'u', 'e', 'o'];
+
+// Visemas como expressões no three-vrm 3.x: os presets VRM 0.x a/i/u/e/o são
+// renomeados para aa/ih/ou/ee/oh no expressionManager. A boca precisa ir por
+// esse canal — escrita bruta no morph é zerada todo frame pelo manager.
+const VISEME_EXPRESSION_NAMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
+
+// Toca uma parte do TTS e resolve no 'ended'. Navegador/codecs sem 'ended'
+// são cobertos por um timeout de segurança: conservador até `loadedmetadata`
+// trazer a duração real, rearmada junto do playbackRate.
+function playAudioPart(audio, url) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      // Só desliga o handler se ele ainda for o nosso: uma fila superseded
+      // não pode matar o 'ended' da fila nova no mesmo elemento.
+      if (audio.onended === finish) audio.onended = null;
+      try { audio.removeEventListener?.('loadedmetadata', onMeta); } catch {}
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+    const arm = ms => { if (timer) clearTimeout(timer); timer = setTimeout(finish, ms); };
+    const onMeta = () => {
+      const duration = Number(audio.duration);
+      const rate = Number(audio.playbackRate) || 1;
+      arm(((duration > 0 && Number.isFinite(duration) ? duration : 20) / rate) * 1000 + 2000);
+    };
+    audio.onended = finish;
+    try { audio.addEventListener?.('loadedmetadata', onMeta, { once: true }); } catch {}
+    arm(25000);
+    audio.src = url;
+    const playing = audio.play();
+    if (playing && typeof playing.catch === 'function') playing.catch(finish);
+  });
+}
 
 // Intimacy meters (visual-novel style bond): XP per interaction, cumulative level thresholds, localStorage persistence.
 const INTIMACY_KEY = 'usami.intimidade.v1';
@@ -237,7 +275,14 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       // speakReply faz o attach do HTMLAudioElement reutilizado e o grafo Web Audio
       // (AudioContext + AnalyserNode) só é criado de forma preguiçosa, no primeiro
       // update com áudio pronto. Sem Web Audio o layer se desativa sozinho.
-      audioLipSync.current = createAudioLipSync({ morphTargets: morphList.filter(m => VISEME_NAMES.includes(m.name)) });
+      // Em VRM a boca vai pelo expressionManager (o manager zera escrita bruta
+      // de morph no vrm.update de todo frame); GLB/FBX seguem no morph fallback.
+      const visemeExpressionNames = VISEME_EXPRESSION_NAMES.filter(name => expressionNames.includes(name));
+      audioLipSync.current = createAudioLipSync({
+        morphTargets: morphList.filter(m => VISEME_NAMES.includes(m.name)),
+        setWeight: vrm?.expressionManager ? (name, value) => vrm.expressionManager.setValue(name, value) : null,
+        visemeNames: visemeExpressionNames.length ? visemeExpressionNames : null,
+      });
       controller.current = {
         gesture(name) {
           // Etapa 4: layer do humanoid (VRM) primeiro — wave/tilt/idle em nós
@@ -427,6 +472,9 @@ export function Usami() {
   const lastIdleActive = useRef(false);
   const audioLipSync = useRef(null);
   const ttsAudio = useRef(null);
+  // Token da fila de TTS em reprodução: uma fala nova (ou mudo) invalida a
+  // fila anterior, que para de tocar partes ainda pendentes.
+  const ttsQueue = useRef(0);
   const expressionDriverRef = useRef(null);
   const speechScheduler = useRef(null);
   if (!speechScheduler.current) speechScheduler.current = createSpeechScheduler();
@@ -446,7 +494,11 @@ export function Usami() {
     const value = String(content || '').trim();
     if (!value) return;
     turnId.current += 1;
-    setConversation(previous => [...previous, { id: turnId.current, role, content: value, mode }]);
+    // O id é capturado AGORA: o updater só roda no flush do React, e duas
+    // chamadas no mesmo tick (resposta dividida em balões) leriam o mesmo
+    // `turnId.current` final — chaves duplicadas na lista.
+    const id = turnId.current;
+    setConversation(previous => [...previous, { id, role, content: value, mode }]);
   };
   const reportModel = useCallback(value => {
     setReport(value);
@@ -514,42 +566,68 @@ export function Usami() {
       if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     }
   };
+  // Fila de áudio da resposta: TODAS as partes são sintetizadas em paralelo
+  // (um POST /api/tts por parte, disparados de uma vez) e tocadas em série —
+  // a parte 1 fala enquanto a 2 ainda está sendo baixada/sintetizada. O
+  // mesmo HTMLAudioElement é reutilizado (só pode passar por
+  // createMediaElementSource uma vez); cada blob: URL é revogado após tocar.
   const speakReply = async (reply, styleId = 'neutral', timedActions = []) => {
     // Mute: nunca pede /api/tts — a boca fica fechada (fallback mudo), o mesmo
     // comportamento do catch abaixo quando o áudio não chega.
     if (voiceOffRef.current) return;
-    try {
-      const response = await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply, styleId }) });
-      const type = response.headers.get('content-type') || '';
-      if (!response.ok || !type.includes('audio/')) throw new Error('tts-status-' + response.status);
-      const url = URL.createObjectURL(await response.blob());
-      if (!ttsAudio.current) ttsAudio.current = new Audio();
-      const audio = ttsAudio.current;
-      audio.src = url;
-      audio.playbackRate = quiet ? .8 : 1;
-      audio.onended = () => { URL.revokeObjectURL(url); };
-      await audio.play();
-      // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
-      // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
-      // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
-      // áudio pronto. Sem duração do servidor, sem timeline textual.
-      audioLipSync.current?.attach(audio);
-      // Frente 2: agendar ações com timing para disparar durante a fala
-      // (start/middle/end ou delayMs). O scheduler gerencia setTimeout e
-      // audio.onended; cancela qualquer agendamento anterior.
-      if (timedActions.length > 0 && speechScheduler.current) {
-        speechScheduler.current.schedule({
-          actions: timedActions,
-          audio,
-          onAction: (action) => {
-            director.current?.execute([action]);
-          },
-        });
+    const parts = (Array.isArray(reply) ? reply : splitReplyParts(String(reply ?? '')))
+      .map(part => String(part || '').trim())
+      .filter(Boolean);
+    if (!parts.length) return;
+    const queueId = ++ttsQueue.current;
+    if (!ttsAudio.current) ttsAudio.current = new Audio();
+    const audio = ttsAudio.current;
+    // Requisições em paralelo; o resultado nunca rejeita (a fila pode ser
+    // abandonada no meio com requisições no ar — sem unhandled rejection).
+    const pending = parts.map(part => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: part, styleId }) })
+      .then(async response => {
+        const type = response.headers.get('content-type') || '';
+        if (!response.ok || !type.includes('audio/')) throw new Error('tts-status-' + response.status);
+        return URL.createObjectURL(await response.blob());
+      })
+      .then(url => ({ ok: true, url }, () => ({ ok: false, url: null }))));
+    let played = false;
+    let attached = false;
+    for (const promise of pending) {
+      // Parte falhou: segue para a seguinte. Fila superseded/mute: sai e o
+      // sweep abaixo revoga o que ainda resolver.
+      if (voiceOffRef.current || ttsQueue.current !== queueId) break;
+      const result = await promise;
+      if (!result.ok) continue;
+      if (voiceOffRef.current || ttsQueue.current !== queueId) { URL.revokeObjectURL(result.url); break; }
+      if (!attached) {
+        // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
+        // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
+        // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
+        // áudio pronto. Sem duração do servidor, sem timeline textual.
+        audioLipSync.current?.attach(audio);
+        attached = true;
+        // Frente 2: as timedActions do turno inteiro são agendadas com o áudio
+        // da PRIMEIRA parte (o scheduler não foi redesenhado).
+        if (timedActions.length > 0 && speechScheduler.current) {
+          speechScheduler.current.schedule({
+            actions: timedActions,
+            audio,
+            onAction: (action) => {
+              director.current?.execute([action]);
+            },
+          });
+        }
       }
-    } catch {
-      // Fallback mudo (áudio indisponível): a boca apenas fica fechada.
-      audioLipSync.current?.clear();
+      played = true;
+      audio.playbackRate = quiet ? .8 : 1;
+      await playAudioPart(audio, result.url);
+      URL.revokeObjectURL(result.url);
     }
+    // Sweep: URLs de partes resolvidas e nunca tocadas (fila abandonada).
+    // revoke em URL já revogada é no-op.
+    Promise.all(pending).then(results => { for (const r of results) if (r.ok) URL.revokeObjectURL(r.url); });
+    if (!played) audioLipSync.current?.clear();
   };
   const awardXP = gains => {
     setIntimacy(previous => {
@@ -692,12 +770,17 @@ export function Usami() {
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
+      // Respostas longas viram vários balões (~60 chars, máx 5, sem perder
+      // texto); o caption da chamada segue mostrando a resposta completa.
+      const replyParts = splitReplyParts(data.reply);
+      const bubbles = replyParts.length ? replyParts : [String(data.reply).trim()];
       if (spoken) {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
-        // HTMLAudioElement) — timing via utterance.onend / setTimeout.
+        // HTMLAudioElement) — timing via utterance.onend / setTimeout, sem
+        // fila de partes; só a exibição é dividida em balões.
         speakSpoken(data.reply, timedActions);
-      } else speakReply(data.reply, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions);
-      addTurn('assistant', data.reply, spoken ? 'voice' : 'text');
+      } else speakReply(bubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions);
+      bubbles.forEach(part => addTurn('assistant', part, spoken ? 'voice' : 'text'));
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
       if (!spoken) setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
