@@ -264,8 +264,9 @@ test('handler: 502 quando OpenRouter retorna erro HTTP', async () => {
 });
 
 test('handler: 502 quando provedor retorna formato inválido', async () => {
-  // Conteúdo vazio não tem como virar reply — 502. Texto livre (até JSON
-  // quebrado) é tolerado de propósito pelo parseProviderRaw.
+  // Conteúdo vazio não tem como virar reply — 502. Texto livre (sem começar
+  // por "{") é tolerado de propósito pelo parseProviderRaw; JSON truncado só
+  // aproveita o "reply" recuperável.
   const handler = createChatHandler({ getKey: async () => 'k', fetchImpl: async () => jsonResponse('   ') });
   const res = mockRes();
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
@@ -275,10 +276,92 @@ test('handler: 502 quando provedor retorna formato inválido', async () => {
 test('parseProviderRaw: texto livre vira reply; vazio ou gigante é 502', () => {
   assert.equal(parseProviderRaw('oi!').ok, true);
   assert.equal(parseProviderRaw('oi!').reply, 'oi!');
-  assert.equal(parseProviderRaw('{"bad":').reply, '{"bad":');
   assert.equal(parseProviderRaw('   ').ok, false);
   assert.equal(parseProviderRaw('x'.repeat(10001)).ok, false);
   assert.equal(parseProviderRaw(null).ok, false);
+});
+
+test('parseProviderRaw: JSON truncado recupera o "reply" e descarta actions', () => {
+  const truncated = '{"reply":"N-não é que eu me importe, b-baka! *desvia o olhar*","actions":[{"type":"set_expression","name":"16-prefab_awkward02","weight":0.8},{"type';
+  const result = parseProviderRaw(truncated);
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, 'N-não é que eu me importe, b-baka! *desvia o olhar*');
+  assert.equal(result.gesture, 'neutral');
+  assert.deepEqual(result.actions, []);
+  assert.equal(result.remember, null);
+});
+
+test('parseProviderRaw: aspa de abertura da chave ausente ainda recupera o reply', () => {
+  // Formato observado no chat vazando: o modelo emite `{reply":"...` e corta no max_tokens.
+  const result = parseProviderRaw('{reply":"F-fofa..?! *orelhas vermelhas até a base*","actions":[{"type":"set_expression","name":"15-prefab_awkward02","weight":0.8},{"type');
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, 'F-fofa..?! *orelhas vermelhas até a base*');
+  assert.deepEqual(result.actions, []);
+});
+
+test('parseProviderRaw: escapes do "reply" truncado são decodificados', () => {
+  const result = parseProviderRaw('{"reply":"linha1\\n\\"shiro\\"\\tcafé \\u00e9 bom","actions":[{"type"');
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, 'linha1\n"shiro"\tcafé é bom');
+});
+
+test('parseProviderRaw: preâmbulo de raciocínio antes do JSON não vaza e mantém actions', () => {
+  const raw = 'This is a classic tsundere response - denying while looking away.\n\nAvailable expressions: "16-prefab_awkward02" fits the mood.\n\n{"reply":"N-não fiquei! Hmph.","gesture":"neutral","actions":[{"type":"set_expression","name":"16-prefab_awkward02","weight":0.9}]}';
+  const result = parseProviderRaw(raw);
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, 'N-não fiquei! Hmph.');
+  assert.deepEqual(result.actions, [{ type: 'set_expression', name: '16-prefab_awkward02', weight: 0.9 }]);
+});
+
+test('parseProviderRaw: texto livre com chaves soltas continua sendo texto', () => {
+  const result = parseProviderRaw('olá {tudo} bem?');
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, 'olá {tudo} bem?');
+});
+
+test('parseProviderRaw: JSON truncado sem "reply" recuperável é 502 (texto bruto nunca vira reply)', () => {
+  for (const raw of [
+    '{"actions":[{"type":"set_expression","name":"16-prefab_awkward02"',
+    '{"bad":',
+    '{"reply":"   ","actions":[{"type',
+  ]) {
+    const result = parseProviderRaw(raw);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 502);
+    assert.equal(result.error, 'O modelo retornou uma resposta inválida.');
+  }
+});
+
+test('parseProviderRaw: reply longo é cortado em fronteira de sentença, sem elipse', () => {
+  const result = parseProviderRaw(JSON.stringify({ reply: 'Frase curta de chat. '.repeat(30) }));
+  assert.equal(result.ok, true);
+  assert.ok(result.reply.length <= 220, `esperava <=220, veio ${result.reply.length}`);
+  assert.ok(result.reply.length >= 180);
+  assert.ok(result.reply.endsWith('.'));
+  assert.ok(!result.reply.includes('…'));
+
+  // sem pontuação, com espaços: corta no último espaço antes do limite
+  const spaced = parseProviderRaw(JSON.stringify({ reply: 'palavra '.repeat(40) }));
+  assert.ok(spaced.reply.length <= 220);
+  assert.ok(spaced.reply.length >= 200);
+  assert.ok(!spaced.reply.endsWith(' '));
+
+  // sem pontuação nem espaço: corte duro no limite
+  const hard = parseProviderRaw(JSON.stringify({ reply: 'a'.repeat(300) }));
+  assert.equal(hard.reply.length, 220);
+});
+
+test('handler: 200 com reply recuperado de JSON truncado, sem vazar o payload bruto', async () => {
+  const handler = createChatHandler({
+    getKey: async () => 'k',
+    fetchImpl: async () => jsonResponse('{"reply":"Ora, vê com os próprios olhos! *sorri*","actions":[{"type"'),
+  });
+  const res = mockRes();
+  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const data = JSON.parse(res.body);
+  assert.equal(data.reply, 'Ora, vê com os próprios olhos! *sorri*');
+  assert.deepEqual(data.actions, []);
 });
 
 test('handler: timeout vira 502', async () => {

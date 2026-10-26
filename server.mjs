@@ -7,6 +7,7 @@ import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
 import { GESTURE_NAMES, DIRECTOR_VERBS, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
+import { extractJsonCandidate } from './src/json-salvage.js';
 import { createMemoryStore } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { buildServices } from './src/flow-services.js';
@@ -255,6 +256,55 @@ function normalizeRemember(value) {
   return trimmed.slice(0, 300);
 }
 
+// Teto do reply exibido no chat: falas viram balões curtos (decisão do
+// usuário), então o servidor corta em fronteira de sentença — não só o prompt.
+const REPLY_CHAR_LIMIT = 220;
+
+function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
+  if (reply.length <= limit) return reply;
+  const window = reply.slice(0, limit);
+  for (let i = window.length - 1; i >= 0; i -= 1) {
+    if ('.!?;:'.includes(window[i])) return window.slice(0, i + 1).trimEnd();
+  }
+  const space = window.lastIndexOf(' ');
+  return (space > 0 ? window.slice(0, space) : window).trimEnd();
+}
+
+// Extrai o valor da chave "reply" de JSON truncado/inválido: lê até a próxima
+// aspa não escapada OU o fim da string (payload cortado no max_tokens),
+// decodificando os escapes mais comuns. Retorna null sem conteúdo recuperável.
+// A aspa de abertura da chave é opcional: modelos truncados já emitiram
+// `{reply":"...` e o texto livre jamais deve chegar ao balão.
+function extractReplyFromBrokenJson(text) {
+  const keyMatch = /"?reply"?\s*:\s*"/.exec(text);
+  if (!keyMatch) return null;
+  let out = '';
+  for (let i = keyMatch.index + keyMatch[0].length; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '"') break;
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) {
+        out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16));
+        i += 5;
+        continue;
+      }
+      if (next === 'n') { out += '\n'; i += 1; continue; }
+      if (next === 't') { out += '\t'; i += 1; continue; }
+      if (next && '"\\/bfr'.includes(next)) {
+        out += next === 'b' ? '\b' : next === 'f' ? '\f' : next === 'r' ? '\r' : next;
+        i += 1;
+        continue;
+      }
+      // escape desconhecido: mantém o caractere, descarta a barra
+      if (next) { out += next; i += 1; }
+      continue;
+    }
+    out += ch;
+  }
+  return out.trim() || null;
+}
+
 export function parseProviderRaw(raw) {
   if (typeof raw !== 'string' || raw.length > 10000) {
     return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
@@ -263,23 +313,45 @@ export function parseProviderRaw(raw) {
   try {
     result = JSON.parse(raw.trim().replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, ''));
   } catch {
-    // Se a resposta parece JSON de erro ({"error": ...}), tenta extrair a mensagem
     const trimmed = raw.trim();
-    if (/^[{[]/.test(trimmed)) {
+    // Preâmbulo de raciocínio antes do JSON: o primeiro objeto balanceado ainda
+    // é a resposta. Sem isto o texto do "pensamento" inteiro viria no balão.
+    const embedded = extractJsonCandidate(trimmed);
+    if (embedded) {
       try {
-        const errorJson = JSON.parse(trimmed);
-        if (errorJson?.error?.message) {
-          return { ok: false, status: 502, error: errorJson.error.message };
-        }
-      } catch {}
+        result = JSON.parse(embedded);
+      } catch {
+        result = null;
+      }
     }
-    // Caso contrário, trata o texto bruto como resposta livre
-    result = { reply: trimmed, gesture: 'neutral' };
+    if (!result) {
+      // Se a resposta parece JSON de erro ({"error": ...}), tenta extrair a mensagem
+      if (/^[{[]/.test(trimmed)) {
+        try {
+          const errorJson = JSON.parse(trimmed);
+          if (errorJson?.error?.message) {
+            return { ok: false, status: 502, error: errorJson.error.message };
+          }
+        } catch {}
+      }
+      if (trimmed.startsWith('{')) {
+        // JSON truncado/inválido: recupera apenas o "reply". As actions de um
+        // payload incompleto são descartadas (decisão do usuário) e o texto
+        // bruto jamais vira reply — sem conteúdo recuperável, erro amigável.
+        const salvaged = extractReplyFromBrokenJson(trimmed);
+        if (!salvaged) {
+          return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
+        }
+        return { ok: true, reply: capReplyLength(salvaged), gesture: 'neutral', actions: [], remember: null };
+      }
+      // Caso contrário, trata o texto bruto como resposta livre
+      result = { reply: trimmed, gesture: 'neutral' };
+    }
   }
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
-  return { ok: true, reply: result.reply.trim(), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions), remember: normalizeRemember(result.remember) };
+  return { ok: true, reply: capReplyLength(result.reply.trim()), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions), remember: normalizeRemember(result.remember) };
 }
 
 export function createChatHandler(options = {}) {
@@ -443,7 +515,7 @@ export function createChatHandler(options = {}) {
           response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, max_tokens: 320, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
+            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
             signal: AbortSignal.timeout(45000),
           });
         } catch (error) {
