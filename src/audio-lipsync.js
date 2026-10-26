@@ -13,6 +13,15 @@
 // `expression-driver`: ataque rápido (30 ms) para a boca abrir junto da voz e
 // release natural (80 ms) para ela fechar.
 //
+// Canal de escrita: em VRMs a boca NÃO pode ser escrita direto em
+// `morphTargetInfluences` — `VRMExpressionManager.update()` (dentro do
+// `vrm.update(delta)`, que roda depois deste layer no loop) zera toda
+// expressão via `clearAppliedWeight()` antes de reaplicar seus próprios
+// pesos, apagando o visema todo frame. Por isso o layer aceita um canal
+// injetável (`setWeight` + `visemeNames`, tipicamente
+// `vrm.expressionManager.setValue` com `aa/ih/ou/ee/oh`); a escrita bruta em
+// morphs continua como fallback para modelos sem expressionManager (GLB/FBX).
+//
 // Web Audio é opcional. Sem `AudioContext` no ambiente (SSR) ou se
 // `createMediaElementSource` lançar, o layer se desativa em silêncio: o
 // elemento continua tocando normalmente e a boca apenas fica fechada — o rAF
@@ -30,15 +39,23 @@ const VISEME_NAMES = ['a', 'i', 'u', 'e', 'o'];
 export function createAudioLipSync({
   audioElement = null,
   morphTargets = [],
+  // Canal de expressão (VRM): quando fornecido, os pesos dos visemas vão por
+  // `setWeight(name, value)` — ex.: vrm.expressionManager.setValue. Sem ele,
+  // fallback de escrita bruta em morphTargetInfluences (GLB/FBX).
+  setWeight = null,
+  visemeNames = null,
   now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()),
   // Injetável para testes; o padrão resolve do globalThis (window no browser).
   AudioContextCtor = null,
   gain = 1,
 } = {}) {
-  const targets = (Array.isArray(morphTargets) ? morphTargets : []).filter(
+  const channel = typeof setWeight === 'function' && Array.isArray(visemeNames) && visemeNames.length > 0
+    ? visemeNames.map(name => String(name)).filter(Boolean)
+    : null;
+  const targets = channel ? [] : (Array.isArray(morphTargets) ? morphTargets : []).filter(
     m => m && m.object && Number.isInteger(m.index) && VISEME_NAMES.includes(String(m.name || '').toLowerCase()),
   );
-  const hasTargets = targets.length > 0;
+  const hasTargets = channel ? channel.length > 0 : targets.length > 0;
 
   let failed = false;
   let audioCtx = null;
@@ -55,7 +72,13 @@ export function createAudioLipSync({
     return g ? g.AudioContext || g.webkitAudioContext || null : null;
   };
 
-  const writeMorphs = value => {
+  // Escrita da boca no canal dono do peso: expressão (VRM) quando injetada,
+  // morphTargetInfluences (GLB/FBX) como fallback histórico.
+  const writeMouth = value => {
+    if (channel) {
+      for (const name of channel) { try { setWeight(name, value); } catch {} }
+      return;
+    }
     for (const m of targets) {
       const influences = m.object ? m.object.morphTargetInfluences : null;
       if (!influences) continue;
@@ -66,7 +89,7 @@ export function createAudioLipSync({
   // Zera a boca e limpa o estado da rampa; só escreve se algo mudou, para não
   // brigar com as outras camadas (expression driver, painel de morphs).
   const stopMouth = () => {
-    if (current !== 0) writeMorphs(0);
+    if (current !== 0) writeMouth(0);
     current = 0;
     lastTime = null;
   };
@@ -151,7 +174,7 @@ export function createAudioLipSync({
       const tau = target > current ? ATTACK_TAU_MS : RELEASE_TAU_MS;
       current += (target - current) * (1 - Math.exp(-dt / tau));
     }
-    writeMorphs(current);
+    writeMouth(current);
   };
 
   // Liga o layer ao HTMLAudioElement real (speakReply). Trocar de elemento
@@ -171,7 +194,7 @@ export function createAudioLipSync({
   const clear = () => {
     current = 0;
     lastTime = null;
-    writeMorphs(0);
+    writeMouth(0);
   };
 
   // Teardown: zera a boca, desconecta o source e fecha o contexto. O chamador

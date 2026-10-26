@@ -241,3 +241,91 @@ test('morph fora dos visemas nunca é escrito; modelo sem visemas fica inativo',
   bare.update();
   bare.reset();
 });
+
+// --- canal de expressão (vrm.expressionManager) ---
+// A escrita bruta em morphTargetInfluences é zerada todo frame pelo
+// clearAppliedWeight() do VRMExpressionManager dentro de vrm.update(delta);
+// em VRM a boca precisa ir pelo setValue do manager.
+
+function makeChannelLayer({ data = new Uint8Array(128).fill(255), morphTargets = makeMorphTargets() } = {}) {
+  const web = makeWebAudio({ data });
+  const clock = makeClock();
+  const element = makeAudioElement();
+  const written = [];
+  const layer = createAudioLipSync({
+    audioElement: element,
+    morphTargets,
+    setWeight: (name, value) => written.push([name, value]),
+    visemeNames: ['aa', 'ih', 'ou', 'ee', 'oh'],
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  return { web, clock, element, written, layer, morphTargets };
+}
+
+test('canal setWeight: boca vai ao expressionManager e os morphs ficam intactos', () => {
+  const h = makeChannelLayer();
+  h.layer.update();
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  assert.ok(h.written.length >= 5, 'cada frame escreve os 5 visemas do canal');
+  assert.deepEqual([...new Set(h.written.map(([name]) => name))].sort(), ['aa', 'ee', 'ih', 'oh', 'ou']);
+  const last = h.written[h.written.length - 1];
+  assert.ok(last[1] > 0.9, `visema ≈ aberto após 3×tau de ataque (veio ${last[1]})`);
+  assert.deepEqual(valuesOf(h.morphTargets), [0, 0, 0, 0, 0], 'fallback morph não é escrito com o canal ativo');
+  assert.equal(h.layer.enabled, true);
+});
+
+test('canal setWeight: clear e elemento pausado zeram pelo mesmo canal', () => {
+  const h = makeChannelLayer();
+  h.layer.update();
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  h.layer.clear();
+  for (const [name, value] of h.written.slice(-5)) assert.equal(value, 0, `clear escreveu 0 em ${name}`);
+  h.written.length = 0;
+  h.layer.update(); // reabre com o mesmo elemento
+  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  assert.ok(h.written[h.written.length - 1][1] > 0.9);
+  h.written.length = 0;
+  h.element.paused = true;
+  h.clock.advance(ATTACK_TAU_MS);
+  h.layer.update();
+  assert.ok(h.written.some(([, value]) => value === 0), 'pausado escreve 0 pelo canal');
+});
+
+test('setWeight sem visemeNames (ou vazio) cai no fallback de morph', () => {
+  const targets = makeMorphTargets();
+  const web = makeWebAudio({ data: new Uint8Array(128).fill(255) });
+  const clock = makeClock();
+  const layer = createAudioLipSync({
+    audioElement: makeAudioElement(),
+    morphTargets: targets,
+    setWeight: () => { throw new Error('não deveria usar o canal'); },
+    visemeNames: [],
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  layer.update();
+  for (let step = 0; step < 3; step++) { clock.advance(ATTACK_TAU_MS); layer.update(); }
+  assert.ok(valuesOf(targets).every(value => value > 0.9), 'escreve os morphs como antes');
+});
+
+test('canal setWeight sem morphTargets (modelo via expressões) continua ativo', () => {
+  const written = [];
+  const web = makeWebAudio({ data: new Uint8Array(128).fill(255) });
+  const clock = makeClock();
+  const layer = createAudioLipSync({
+    audioElement: makeAudioElement(),
+    morphTargets: [],
+    setWeight: (name, value) => written.push([name, value]),
+    visemeNames: ['aa'],
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  assert.equal(layer.enabled, true, 'só o canal já habilita o lip-sync');
+  layer.update();
+  clock.advance(ATTACK_TAU_MS);
+  layer.update();
+  assert.ok(written[written.length - 1][1] > 0);
+  layer.reset();
+  assert.equal(written[written.length - 1][1], 0, 'reset zera pelo canal');
+});
