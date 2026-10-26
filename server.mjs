@@ -796,28 +796,36 @@ export function createRagContextHandler(options = {}) {
 
 const DEFAULT_GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
-const DEFAULT_GEMINI_TTS_INSTRUCTION = 'Leia em português do Brasil, com tom acolhedor e animado: ';
+// Direção de estilo em TAG entre colchetes, não em frase: transcrevendo o áudio
+// com o whisper local, a instrução prosaica ("Leia em português do Brasil, com tom
+// acolhedor e animado: ...") era FALADA pela modelo antes do texto — a Usami
+// anunciava o próprio prompt. A tag entre colchetes muda a prosódia e nunca é lida.
+const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, tom acolhedor e animado] ';
 const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
-// Cláusulas de emoção por styleId, inseridas na instrução do gemini; neutral e
-// rótulos desconhecidos não têm cláusula — caem na instrução base (determinístico).
+// Cláusulas de emoção por styleId, fundidas na tag; neutral e rótulos desconhecidos
+// não têm cláusula — caem na tag base (determinístico).
 const STYLE_INSTRUCTIONS = {
-  happy: 'com voz alegre e brilhante',
-  sad: 'com voz triste e suave',
-  angry: 'com voz firme e irritada',
-  surprised: 'com voz espantada',
-  relaxed: 'com voz calma e serena',
-  soft: 'com voz doce e meiga',
-  shy: 'com voz tímida e envergonhada',
-  doubtful: 'com voz desconfiada',
+  happy: 'voz alegre e brilhante',
+  sad: 'voz triste e suave',
+  angry: 'voz firme e irritada',
+  surprised: 'voz espantada',
+  relaxed: 'voz calma e serena',
+  soft: 'voz doce e meiga',
+  shy: 'voz baixa e hesitante',
+  doubtful: 'voz desconfiada',
 };
 
-// Insere a cláusula da emoção antes do ": " final da instrução base; base sem
-// o delimitador recebe a cláusula anexada — sem cláusula conhecida, base intacta.
+// Monta a tag de estilo a partir da base configurada + cláusula da emoção. Uma base
+// legada em prosa (GEMINI_TTS_INSTRUCTION do .env) é convertida para tag, senão
+// voltaria a ser falada.
 function buildGeminiInstruction(base, styleId) {
+  const inner = String(base || '').trim()
+    .replace(/:\s*$/, '')
+    .replace(/^\[([\s\S]*)\]\s*$/, '$1')
+    .trim();
   const clause = STYLE_INSTRUCTIONS[styleId];
-  if (!clause) return base;
-  const trimmed = base.replace(/:\s*$/, '');
-  return trimmed + (trimmed === base ? ' ' : ', ') + clause + ': ';
+  const tag = [inner, clause].filter(Boolean).join(', ');
+  return tag ? `[${tag}] ` : '';
 }
 
 function normalizeTtsProvider(value) {
@@ -949,11 +957,18 @@ export function createTtsHandler(options = {}) {
       ? (options.geminiVoice || process.env.GEMINI_TTS_VOICE || config.geminiVoice || DEFAULT_GEMINI_TTS_VOICE)
       : null;
     const audioFormat = provider === 'gemini' ? 'audio/wav' : 'audio/mpeg';
+    // styleId conhecido ganha a cláusula da emoção; neutral/desconhecido fica na base.
+    // Calculada antes da chave: mudar a direção de estilo muda a fala, e uma chave
+    // que só vê o styleId serviria o áudio velho da cláusula anterior.
+    const geminiInstruction = provider === 'gemini'
+      ? buildGeminiInstruction(options.geminiInstruction || process.env.GEMINI_TTS_INSTRUCTION || DEFAULT_GEMINI_TTS_INSTRUCTION, parsedBody.styleId)
+      : '';
     const cacheKey = cache ? createTtsCacheKey({
       provider,
       model: provider === 'gemini' ? geminiModel : model,
       voiceId: provider === 'gemini' ? geminiVoice : config.voiceId,
       styleId: parsedBody.styleId,
+      instruction: geminiInstruction,
       rate: parsedBody.rate,
       pitch: parsedBody.pitch,
       format: audioFormat,
@@ -974,16 +989,13 @@ export function createTtsHandler(options = {}) {
     let response;
     try {
       if (provider === 'gemini') {
-        const baseInstruction = options.geminiInstruction || process.env.GEMINI_TTS_INSTRUCTION || DEFAULT_GEMINI_TTS_INSTRUCTION;
-        // styleId conhecido ganha a cláusula da emoção; neutral/desconhecido fica na base
-        const instruction = buildGeminiInstruction(baseInstruction, parsedBody.styleId);
         // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
         // instrução não conta no limite de 2000 chars, validado sobre o texto puro
         response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(geminiModel) + ':generateContent', {
           method: 'POST',
           headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: instruction + parsedBody.text }] }],
+            contents: [{ parts: [{ text: geminiInstruction + parsedBody.text }] }],
             generationConfig: {
               responseModalities: ['AUDIO'],
               // voz desenhada (voice_*) vai em voiceConfig.voice; pré-pronta permanece em prebuiltVoiceConfig
@@ -1028,8 +1040,15 @@ export function createTtsHandler(options = {}) {
         if (!pcm.length) {
           return send(502, { error: 'TTS falhou no provedor.' });
         }
-        // o provedor devolve PCM mono 16-bit; envelopa num WAV RIFF de 44 bytes
-        audio = pcmToWav(pcm, parseGeminiSampleRate(inlineData.mimeType));
+        // O provedor já devolve um WAV completo (mimeType "audio/wav"), com chunk
+        // `C2PA` de proveniência depois do `data`. Embrulhar isso num segundo
+        // header declara os metadados como amostras: ~63 ms de ruído em fundo de
+        // escala no fim de cada fala — o "estouro" que o Lucas ouviu. Passa
+        // intacto; o parser de WAV do navegador anda pelos chunks e ignora o resto.
+        const alreadyWav = pcm.length > 44
+          && pcm.slice(0, 4).toString('ascii') === 'RIFF'
+          && pcm.slice(8, 12).toString('ascii') === 'WAVE';
+        audio = alreadyWav ? pcm : pcmToWav(pcm, parseGeminiSampleRate(inlineData.mimeType));
       } else {
         audio = Buffer.from(await response.arrayBuffer());
       }

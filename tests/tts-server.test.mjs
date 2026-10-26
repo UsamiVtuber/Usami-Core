@@ -257,8 +257,8 @@ test('gemini: 200 devolve WAV (RIFF) e envia x-goog-api-key com responseModaliti
   assert.equal(calls[0].options.method, 'POST');
   assert.equal(calls[0].options.headers['x-goog-api-key'], GEMINI_TEST_KEY);
   const sent = JSON.parse(calls[0].options.body);
-  assert.ok(sent.contents[0].parts[0].text.startsWith('Leia em português do Brasil, com tom acolhedor e animado:'));
-  assert.ok(sent.contents[0].parts[0].text.endsWith('oi'));
+  // a direcao de estilo vai em TAG: em prosa o modelo lia a instrucao em voz alta
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado] oi');
   assert.deepEqual(sent.generationConfig.responseModalities, ['AUDIO']);
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
   // WAV: header RIFF de 44 bytes + PCM; a key não aparece na resposta
@@ -405,7 +405,7 @@ test('gemini: styleId happy insere a cláusula da emoção e mantém o voiceConf
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 1);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado, com voz alegre e brilhante: que bom te ver');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado, voz alegre e brilhante] que bom te ver');
   // a cláusula não altera a voz enviada ao Google
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, undefined);
@@ -419,7 +419,7 @@ test('gemini: styleId neutral mantém a instrução base exata', async () => {
   await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'tudo certo', styleId: 'neutral' }) }), res);
   assert.equal(res.statusCode, 200);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado: tudo certo');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado] tudo certo');
 });
 
 test('gemini: styleId desconhecido cai na instrução base (fallback determinístico)', async () => {
@@ -430,7 +430,93 @@ test('gemini: styleId desconhecido cai na instrução base (fallback determinís
   await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'estranho isso', styleId: 'estranho-x' }) }), res);
   assert.equal(res.statusCode, 200);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, 'Leia em português do Brasil, com tom acolhedor e animado: estranho isso');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado] estranho isso');
+});
+
+test('gemini: WAV completo do provedor passa intacto — sem segundo header nem estouro no fim', async () => {
+  // O provedor devolve hoje um WAV válido (mimeType audio/wav) com um chunk C2PA de
+  // proveniência depois do data. Embrulhar isso de novo declara os metadados como
+  // amostras: ~63 ms de ruído em fundo de escala ao final de cada fala.
+  const pcm = Buffer.alloc(200, 0);
+  for (let i = 0; i < 100; i++) pcm.writeInt16LE(i * 50, i * 2);
+  const meta = Buffer.from('{"digitalsourcetype/trainedAlgorithmicMedia}');
+  const inner = Buffer.concat([
+    (() => {
+      const h = Buffer.alloc(44);
+      h.write('RIFF', 0, 'ascii');
+      h.writeUInt32LE(36 + pcm.length + meta.length + 8, 4);
+      h.write('WAVE', 8, 'ascii');
+      h.write('fmt ', 12, 'ascii');
+      h.writeUInt32LE(16, 16);
+      h.writeUInt16LE(1, 20);
+      h.writeUInt16LE(1, 22);
+      h.writeUInt32LE(24000, 24);
+      h.writeUInt32LE(48000, 28);
+      h.writeUInt16LE(2, 32);
+      h.writeUInt16LE(16, 34);
+      h.write('data', 36, 'ascii');
+      h.writeUInt32LE(pcm.length, 40);
+      return h;
+    })(),
+    pcm,
+    Buffer.concat([Buffer.from('C2PA', 'ascii'), (() => { const s = Buffer.alloc(4); s.writeUInt32LE(meta.length, 0); return s; })(), meta]),
+  ]);
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse({ pcm: inner, mimeType: 'audio/wav' }); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'oi de novo', styleId: 'neutral' }) }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['Content-Type'], 'audio/wav');
+  // byte a byte o que o provedor mandou — nada de header duplicado
+  assert.ok(res.body.equals(inner), 'o payload do provedor deve passar intacto');
+  assert.equal(res.body.readUInt32LE(40), 200, 'o chunk data continua com o tamanho do provedor');
+  assert.ok(!res.body.subarray(44, 48).equals(Buffer.from('RIFF')), 'sem segundo header RIFF dentro dos samples');
+});
+
+test('handler: cache local separa a direção de estilo, não só o styleId', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const cacheDir = await mkdtemp(join(tmpdir(), 'usami-tts-instr-'));
+  let calls = 0;
+  const handlerFor = instruction => createTtsHandler({
+    cache: true,
+    cacheDir,
+    provider: 'gemini',
+    geminiInstruction: instruction,
+    getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }),
+    fetchImpl: async () => { calls++; return geminiAudioResponse(); },
+  });
+  try {
+    // Mesmo texto e mesmo styleId: trocar a cláusula da emoção tem que mudar o áudio.
+    const before = handlerFor('[em português, voz tímida e envergonhada] ');
+    const first = mockRes();
+    await before(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'não é nada disso', styleId: 'shy' }) }), first);
+    const hit = mockRes();
+    await before(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'não é nada disso', styleId: 'shy' }) }), hit);
+    assert.equal(calls, 1);
+    assert.equal(hit.headers['X-TTS-Cache'], 'HIT');
+
+    const after = handlerFor('[em português, voz baixa e hesitante] ');
+    const miss = mockRes();
+    await after(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'não é nada disso', styleId: 'shy' }) }), miss);
+    assert.equal(calls, 2);
+    assert.equal(miss.headers['X-TTS-Cache'], undefined);
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test('gemini: cláusula de timidez suave — sem "envergonhada", que a modelo encena repetindo', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse(); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'hmph', styleId: 'shy' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, tom acolhedor e animado, voz baixa e hesitante] hmph');
 });
 
 test('handler: cache local evita nova chamada e separa estilos', async () => {

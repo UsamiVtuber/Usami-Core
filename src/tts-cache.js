@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const CACHE_VERSION = 1;
+// 3: a direção de estilo do gemini entrou na chave. Antes, mudar a cláusula de uma
+// emoção servia o áudio sintetizado com a cláusula velha — a chave só via o styleId.
+// (2: o WAV do provedor passou a ir intacto e a direção virou tag.)
+const CACHE_VERSION = 3;
 
 function boundedText(value, fallback = '') {
   return String(value ?? fallback).normalize('NFC').trim().replace(/\s+/gu, ' ').slice(0, 2000);
@@ -20,6 +23,7 @@ export function normalizeTtsCacheInput(input = {}) {
     model: boundedStyle(input.model || 'default'),
     voiceId: boundedStyle(input.voiceId || 'default'),
     styleId: boundedStyle(input.styleId || 'neutral'),
+    instruction: boundedText(input.instruction),
     rate: Number.isFinite(Number(input.rate)) ? Math.max(.5, Math.min(2, Number(input.rate))) : 1,
     pitch: Number.isFinite(Number(input.pitch)) ? Math.max(.5, Math.min(2, Number(input.pitch))) : 1,
     format: boundedStyle(input.format || 'audio/mpeg'),
