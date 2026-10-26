@@ -19,6 +19,10 @@ import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 import { classifyUserMessage, generateReply, planAnimation, structureTechnique } from './src/llm-router.js';
 import { readRagContext } from './src/rag.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
+import { createTechniqueIndex } from './src/technique-index.js';
+import { writeTechniqueNote } from './src/technique-docs.js';
+import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
+import { createLearningMemory } from './src/learning-memory.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
@@ -1251,12 +1255,33 @@ export function parseTechniqueBody(raw) {
   };
 }
 
+export function parseTechniqueNoteBody(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return { ok: false, status: 400, error: 'JSON inválido.' };
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, status: 400, error: 'Corpo deve ser um objeto JSON.' };
+  }
+  const id = typeof input.id === 'string' ? input.id.trim() : '';
+  if (!/^tc-[0-9a-f]{12}$/.test(id)) return { ok: false, status: 400, error: 'id de técnica inválido.' };
+  const sourceId = typeof input.sourceId === 'string' ? input.sourceId.trim() : '';
+  return { ok: true, id, sourceId: sourceId || null, vaultDir: typeof input.vaultDir === 'string' ? input.vaultDir : undefined };
+}
+
 export function createTechniqueHandler(options = {}) {
-  const store = options.store || createTechniqueStore({ dataDir: options.dataDir || 'data' });
-  const readFicha = options.readFicha || (sourceId => readIngestedFicha(sourceId, { dataDir: options.dataDir || 'data' }));
+  const dataDir = options.dataDir || 'data';
+  const store = options.store || createTechniqueStore({ dataDir });
+  const readFicha = options.readFicha || (sourceId => readIngestedFicha(sourceId, { dataDir }));
   const llm = options.llm || (prompt => structureTechnique(prompt));
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const timeoutMs = options.timeoutMs || TECHNIQUE_TIMEOUT_MS;
+  // O índice é derivado dos JSON: se ele falhar, a rota volta a ler a base
+  // direto do disco. Nunca é fonte da verdade.
+  const index = options.index || createTechniqueIndex({ dataDir });
+  const writeNote = options.writeNote || writeTechniqueNote;
 
   return async function handleTechnique(req, res) {
     const send = (status, data) => {
@@ -1274,6 +1299,30 @@ export function createTechniqueHandler(options = {}) {
     if (req.method === 'GET' && (route === '/api/technique' || route === '/api/techniques')) {
       if (route === '/api/techniques') {
         const statusFilter = target.searchParams.get('status');
+        const wantsSearch = ['q', 'shape', 'tag', 'sourceId', 'limit'].some(key => target.searchParams.has(key));
+        if (wantsSearch && index) {
+          try {
+            // O índice é derivado: re-indexar antes de buscar evita confiar em
+            // estado de processo (a rota também serve um servidor de minutos).
+            index.refresh();
+            const results = index.search({
+              query: target.searchParams.get('q') || '',
+              shape: target.searchParams.get('shape') || undefined,
+              tag: target.searchParams.get('tag') || undefined,
+              status: statusFilter || undefined,
+              sourceId: target.searchParams.get('sourceId') || undefined,
+              limit: Number(target.searchParams.get('limit')) || undefined,
+            });
+            return send(200, { techniques: results, total: results.length, backend: 'index' });
+          } catch (error) {
+            // status inválido é erro de contrato do cliente, não motivo para
+            // fingir que a busca não existe e devolver a lista inteira.
+            if (/status de busca inválido/.test(String(error?.message))) {
+              return send(400, { error: String(error.message) });
+            }
+            return send(500, { error: 'Índice de técnicas indisponível.' });
+          }
+        }
         const all = await store.list();
         const techniques = TECHNIQUE_STATUSES.includes(statusFilter)
           ? all.filter(technique => technique.status === statusFilter)
@@ -1286,7 +1335,7 @@ export function createTechniqueHandler(options = {}) {
       return send(200, { technique: found.technique });
     }
 
-    if (req.method !== 'POST' || route !== '/api/technique') {
+    if (req.method !== 'POST' || (route !== '/api/technique' && route !== '/api/technique/note')) {
       return send(404, { error: 'Não encontrado.' });
     }
 
@@ -1305,6 +1354,22 @@ export function createTechniqueHandler(options = {}) {
       }
     }
     if (tooLarge) return send(413, { error: 'Corpo muito longo.' });
+
+    // --- camada documental: JSON é a verdade, a nota é derivada e opcional ---
+    if (route === '/api/technique/note') {
+      const noteBody = parseTechniqueNoteBody(body);
+      if (!noteBody.ok) return send(noteBody.status, { error: noteBody.error });
+      const found = await store.get(noteBody.id);
+      if (!found.ok) return send(404, { error: found.errors.join('; ') });
+      const source = noteBody.sourceId ? await readFicha(noteBody.sourceId) : null;
+      const written = await writeNote(found.technique, {
+        vaultDir: noteBody.vaultDir,
+        source: source?.ok ? source.ficha : undefined,
+      });
+      if (!written.ok) return send(422, { error: written.error });
+      console.log(`[technique] nota ${written.path}`);
+      return send(200, { path: written.path, techniqueId: noteBody.id });
+    }
 
     const parsed = parseTechniqueBody(body);
     if (!parsed.ok) return send(parsed.status, { error: parsed.error });
@@ -1358,6 +1423,124 @@ export function createTechniqueHandler(options = {}) {
   };
 }
 
+// --- POST /api/plan: a base de conhecimento escolhe o movimento (Fase 5) ----
+
+// Nada aqui fala com o avatar: o plano é devolvido ao cliente, que já tem o
+// motion director e o manifesto de capacidades. O planner é determinístico e o
+// histórico de aprendizagem entra na conta — por isso a rota não chama modelo.
+const PLAN_BODY_LIMIT = 8 * 1024;
+
+export function parsePlanBody(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return { ok: false, status: 400, error: 'JSON inválido.' };
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, status: 400, error: 'Corpo deve ser um objeto JSON.' };
+  }
+  const request = {};
+  for (const key of ['text', 'shape', 'tags', 'mood', 'intent']) {
+    if (input[key] !== undefined) request[key] = input[key];
+  }
+  if (!request.intent) request.intent = intentFromText(request.text ?? '');
+  const check = validatePlanRequest(request);
+  if (!check.ok) return { ok: false, status: 400, error: check.errors.join('; ') };
+  return { ok: true, request: check.value, capabilities: sanitizeCapabilities(input.capabilities) };
+}
+
+export function createPlannerHandler(options = {}) {
+  const dataDir = options.dataDir || 'data';
+  const techniques = options.techniques || (() => (options.store || createTechniqueStore({ dataDir })).list());
+  const memory = options.memory || createLearningMemory({ dataDir });
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+
+  return async function handlePlan(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    const route = new URL(req.url || '/api/plan', 'http://127.0.0.1:8787').pathname;
+
+    // A memória de aprendizagem é separada da conversacional: leitura para o
+    // painel/auditoria e um único ponto de escrita (o veredito humano).
+    if (req.method === 'GET' && route === '/api/learning') {
+      try {
+        return send(200, memory.export());
+      } catch (error) {
+        return send(500, { error: `Memória de aprendizagem ilegível: ${String(error?.message || error).slice(0, 200)}` });
+      }
+    }
+
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+
+    let body = '';
+    let tooLarge = false;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > PLAN_BODY_LIMIT) { tooLarge = true; break; }
+    }
+    if (tooLarge) return send(413, { error: 'Corpo muito longo.' });
+
+    if (route === '/api/learning/verdict') {
+      const verdict = parseLearningVerdict(body);
+      if (!verdict.ok) return send(verdict.status, { error: verdict.error });
+      try {
+        const record = memory.noteVisualVerdict(verdict.value);
+        return send(200, { record });
+      } catch (error) {
+        return send(422, { error: `Veredito rejeitado: ${String(error?.message || error).slice(0, 200)}` });
+      }
+    }
+
+    if (route !== '/api/plan') return send(404, { error: 'Não encontrado.' });
+    const parsed = parsePlanBody(body);
+    if (!parsed.ok) return send(parsed.status, { error: parsed.error });
+
+    let plan;
+    try {
+      plan = await planAnimationSelection(parsed.request, {
+        techniques,
+        capabilities: parsed.capabilities,
+        memory,
+        now: options.now,
+      });
+    } catch (error) {
+      return send(422, { error: `Planner recusou o pedido: ${String(error?.message || error).slice(0, 200)}` });
+    }
+    console.log(`[plan] ${explainPlan(plan)}`);
+    return send(200, { plan, actions: planToActions(plan), explanation: explainPlan(plan) });
+  };
+}
+
+const VERDICT_NOTE_LIMIT = 500;
+
+export function parseLearningVerdict(raw) {
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return { ok: false, status: 400, error: 'JSON inválido.' };
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { ok: false, status: 400, error: 'Corpo deve ser um objeto JSON.' };
+  }
+  const note = input.note === undefined || input.note === null
+    ? undefined
+    : (typeof input.note === 'string' ? input.note.slice(0, VERDICT_NOTE_LIMIT) : null);
+  if (note === null) return { ok: false, status: 400, error: 'note deve ser texto.' };
+  return {
+    ok: true,
+    value: { techniqueId: input.techniqueId, signature: input.signature, verdict: input.verdict, note },
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
@@ -1368,6 +1551,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
   const handleTechnique = createTechniqueHandler();
+  const handlePlan = createPlannerHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
@@ -1376,7 +1560,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
-    if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
+    if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
+      || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
+    if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
+      || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });

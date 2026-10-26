@@ -22,24 +22,56 @@ Browser (Vite :5173 ou preview :4173)
 Node API (127.0.0.1:8787)
  ├─ POST /api/chat → OpenRouter
  ├─ POST /api/tts  → Gemini TTS, com fallback ElevenLabs
- └─ POST /api/stt  → faster-whisper local (Python)
+ ├─ POST /api/stt  → faster-whisper local (Python)
+ ├─ POST /api/ingest → pipeline Python de ficha de tutorial (FFmpeg + Whisper)
+ ├─ GET/POST /api/technique[s] + /api/technique/note → base de técnicas
+ ├─ POST /api/plan → planner de animação (determinístico, sem LLM)
+ └─ GET /api/learning + POST /api/learning/verdict → memória de aprendizagem
         │
-        ├─ data/memory.json   memória e afinidade locais
-        └─ data/tts-cache/    cache de áudio local
+        ├─ data/memory.json            memória e afinidade conversacionais
+        ├─ data/techniques/*.json      técnicas validadas (fonte da verdade)
+        ├─ data/techniques-index.sqlite  índice derivado, descartável
+        ├─ data/learning.json            histórico de tentativas por técnica
+        ├─ data/experiments.json         medidas do motor de experimentação
+        ├─ data/ingest/src-*/            fichas ingeridas (não versionadas)
+        └─ data/tts-cache/               cache de áudio local
 ```
 
 Chaves ficam fora do Git, em um arquivo apontado por `USAMI_KEYS_FILE` ou nos
 locais configurados pelo servidor. `data/`, modelos 3D e assets Live2D também
 não são versionados.
 
-## Estado confirmado em 24 de outubro de 2026
+## Estado confirmado em 25 de outubro de 2026
 
-- A suíte local passou com 198 testes e o build gerou o pacote de Sites.
+- `npm test` passou com 459 testes (421 em Node + 38 em Python) e o build gerou
+  o pacote de Sites.
 - Uma chamada real para `/api/chat` retornou HTTP 200.
 - Uma chamada real para `/api/tts` retornou um WAV válido (`RIFF`) via o
   provedor configurado.
 - `faster_whisper` pode ser importado pelo Python local; uma transcrição real
   ainda precisa de captura de áudio pelo navegador.
+- O ciclo ingestão → técnica → índice → planner → aprendizagem foi exercitado
+  com dados reais (uma ficha, `tc-9fe76b5b8d9e`); a seleção do planner ainda
+  depende de aprovação humana da técnica, e o veredito visual continua manual.
+
+## Subsistema de animação autônoma
+
+Movimento nunca vem de LLM: o único vocabulário aceito são os shapes
+paramétricos e os clipes do VRM, orquestrados por contrato de sequências
+validado antes de executar. A pipeline de conhecimento (tutorial → ficha →
+técnica → experimentos → planner) está em
+[`docs/animation-learning.md`](animation-learning.md); o que precisa ficar
+aqui é a fronteira:
+
+- `data/techniques/*.json` é a fonte da verdade. O índice SQLite é derivado e
+  pode ser apagado a qualquer momento — nunca é autoridade.
+- Só técnica com `status: "validada"` alimenta o planner. `proposta` fica
+  indexada e revisável, mas nunca vira movimento.
+- `data/learning.json` é a memória de aprendizagem, separada de
+  `data/memory.json`. Métrica objetiva não substitui veredito humano; ela o
+  pondera.
+- O n8n só lê e agenda (revisão de propostas, notas no vault). Ele não emite
+  movimento nem muda `status` de técnica.
 
 ## Fronteira de fluxo
 
@@ -75,3 +107,8 @@ eventos da Usami e salva notas no vault Obsidian. A integração deve escrever
 somente em uma área explícita de automações, por exemplo `Inbox/Automations/`;
 ele não deve receber acesso irrestrito ao vault nem a credenciais do runtime da
 Usami.
+
+Os exports versionados e a descrição de cada workflow (incluindo o agendado
+"Usami - Revisao de Tecnicas", que só lê `/api/techniques` e produz nota de
+revisão) estão em `../../infra/n8n-local/workflows/README.md` do workspace.
+Nenhum deles é publicado nem ativado sem autorização explícita.
