@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { curateExpressions } from './expressions-catalog.js';
 
 // A capability manifest describes what a loaded model can do, in a stable,
 // serializable shape: meshes (with skeleton info), bones, morph targets,
@@ -62,7 +63,10 @@ export function summarizeCapabilities(manifest) {
     format: manifest.format ?? '',
     clips: (manifest.clips ?? []).slice(0, 40).map(clip => clip?.name).filter(Boolean),
     morphs: (manifest.morphs ?? []).slice(0, 60).filter(name => typeof name === 'string' && name.length > 0),
-    expressions: (manifest.expressions ?? []).slice(0, 20).filter(name => typeof name === 'string' && name.length > 0),
+    // Cura antes do corte: a ordem crua do modelo empilha presets (Neutral,
+    // visemas, blink) na frente e espreme os prefabs de emoção para fora do
+    // limite de 20 — o servidor então descartava as reações em silêncio.
+    expressions: curateExpressions(manifest.expressions ?? [], { limit: 20 }).curated.map(item => item.name),
     meshes: (manifest.meshes ?? []).slice(0, 100).map(mesh => ({ name: mesh?.name, accessory: mesh?.skinned === false })).filter(mesh => typeof mesh.name === 'string' && mesh.name.length > 0),
     // Lista curta de propósito no prompt: os proceduralmente possíveis estão no
     // modelo, mas o LLM só precisa dos que valem a pena citar (o director valida
