@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { createExpressionDriver, ATTACK_TAU_MS, RELEASE_TAU_MS, DEFAULT_TTL_MS, EPSILON } from '../src/expression-driver.js';
 
 // Fábrica de harness: relógio fake + setRaw gravador, no idioma dos testes locais.
-function makeHarness({ blinkName = null, withSetRaw = true } = {}) {
+function makeHarness({ blinkName = null, withSetRaw = true, gains = null } = {}) {
   let t = 1000;
   const calls = [];
   const driver = createExpressionDriver({
     setRaw: withSetRaw ? (name, weight) => calls.push([name, weight]) : null,
     blinkName,
+    gains,
     now: () => t,
   });
   return {
@@ -139,4 +140,34 @@ test('sem setRaw o set retorna false e nada quebra', () => {
   h.driver.releaseAll();
   h.driver.clear();
   assert.equal(h.driver.getWeight('01-prefab_happy04'), 0);
+});
+
+test('gains equalizam o peso antes da rampa; nome sem ganho passa intacto', () => {
+  const h = makeHarness({ gains: { '11-prefab_angry05': 0.29, '19-prefab_doubt': 3.71 } });
+  h.driver.set('11-prefab_angry05', 1);
+  h.driver.set('19-prefab_doubt', 0.7);
+  h.driver.set('02-prefab_happy02', 0.6);
+  const byName = Object.fromEntries(h.driver.active().map(item => [item.name, item.target]));
+  assert.ok(Math.abs(byName['11-prefab_angry05'] - 0.29) < 1e-9, 'forte cortada');
+  assert.ok(Math.abs(byName['19-prefab_doubt'] - 1) < 1e-9, 'fraca empurrada até o teto 1.0');
+  assert.equal(byName['02-prefab_happy02'], 0.6, 'sem medição: peso do LLM intacto');
+});
+
+test('extend empurra o vencimento das vivas, revive nada e ignora valores inválidos', () => {
+  const h = makeHarness();
+  h.driver.set('15-prefab_awkward01', 1, { ttlMs: 1000 });
+  h.driver.set('02-prefab_happy02', 1, { ttlMs: 1000 });
+  h.advance(500); // t = 1500; ambas vencem em 2000
+  assert.equal(h.driver.extend(2000), 2, 'renova as duas vivas');
+  h.advance(1000); // t = 2500: sem o extend já estariam liberando
+  h.driver.update();
+  assert.ok(h.driver.active().every(item => item.target === 1), 'seguem vivas depois do TTL antigo');
+  h.driver.set('15-prefab_awkward01', 0); // release
+  h.driver.update();
+  assert.equal(h.driver.extend(5000), 1, 'quem está soltando não volta');
+  assert.equal(h.driver.active().find(item => item.name === '15-prefab_awkward01').target, 0);
+  const before = h.driver.active().map(item => item.name);
+  assert.equal(h.driver.extend(0), 0);
+  assert.equal(h.driver.extend(Number.NaN), 0);
+  assert.deepEqual(h.driver.active().map(item => item.name), before, 'sem efeito com prazo inválido');
 });

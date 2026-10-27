@@ -24,3 +24,6 @@ header,.controls{z-index:3}.scrim{z-index:7}
 .stage.history-open.text-mode .avatar{transform:translateX(7%)}.stage.voice-mode .controls{bottom:16px}.stage.voice-mode .avatar{inset:-1% 0 5%}.stage.voice-mode .chat-history{bottom:142px}.stage.text-mode .composer{box-shadow:0 15px 50px #000a}
 @media(max-width:900px){.stage.history-open.text-mode .avatar{transform:translateX(10%)}.chat-history{width:320px;max-height:39vh}.corner{flex-direction:column;align-items:flex-end;gap:5px}.corner .credit{font-size:9px}.bond-bars{top:calc(100% + 26px)}}
 @media(max-width:700px){.chat-history{left:12px;right:12px;bottom:82px;width:auto;max-height:34vh}.stage.history-open.text-mode .avatar{transform:none}.stage.voice-mode .chat-history{bottom:132px}.voice-caption{max-height:64px}.privacy-note{display:none}}
+
+/* O histórico precisa de flex:1/min-height:0 para rolar dentro do max-height do painel */
+.chat-scroll{flex:1;min-height:0}

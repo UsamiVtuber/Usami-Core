@@ -19,8 +19,9 @@ export const EPSILON = 0.01;        // abaixo disso a expressão é considerada 
 const clamp01 = value => (Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0);
 
 // `setRaw` injetado desacopla o driver do three-vrm; `now` injetado permite
-// o relógio fake dos testes.
-export function createExpressionDriver({ setRaw, blinkName = null, now = () => performance.now() } = {}) {
+// o relógio fake dos testes; `gains` equaliza a visibilidade entre expressões
+// (ver expression-gains.js) — o peso do LLM é intenção, não milímetro.
+export function createExpressionDriver({ setRaw, blinkName = null, gains = null, now = () => performance.now() } = {}) {
   if (typeof now !== 'function') now = () => performance.now();
 
   // name -> { target, current, expiresAt }
@@ -29,7 +30,9 @@ export function createExpressionDriver({ setRaw, blinkName = null, now = () => p
 
   function set(name, weight = 1, { ttlMs = DEFAULT_TTL_MS } = {}) {
     if (!setRaw || name === blinkName) return false;
-    const target = clamp01(weight);
+    const raw = clamp01(weight);
+    const gain = gains?.[name];
+    const target = Number.isFinite(gain) ? clamp01(raw * gain) : raw;
     const previous = entries.get(name);
     if (target <= 0) {
       // release: alvo zero, current preservado para a rampa de decaimento.
@@ -42,6 +45,22 @@ export function createExpressionDriver({ setRaw, blinkName = null, now = () => p
     // até o primeiro update seria engolido (dt = 0) e a rampa não começaria.
     if (lastUpdateMs === null) lastUpdateMs = currentMs;
     return true;
+  }
+
+  // Empurra o vencimento das expressões vivas para pelo menos `ttlMs` a partir
+  // de agora. É como a fala manda no rosto: cada balão que começa a tocar
+  // renova o prazo das expressões do turno, e a cara só solta um pouco depois
+  // da última sílaba. Entradas já em release (target 0) não voltam.
+  function extend(ttlMs = DEFAULT_TTL_MS) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) return 0;
+    const deadline = now() + ttlMs;
+    let touched = 0;
+    for (const entry of entries.values()) {
+      if (entry.target <= 0) continue;
+      touched += 1;
+      if (entry.expiresAt < deadline) entry.expiresAt = deadline;
+    }
+    return touched;
   }
 
   function update() {
@@ -84,5 +103,5 @@ export function createExpressionDriver({ setRaw, blinkName = null, now = () => p
     return Array.from(entries, ([name, entry]) => ({ name, current: entry.current, target: entry.target }));
   }
 
-  return { set, update, releaseAll, clear, getWeight, active };
+  return { set, update, extend, releaseAll, clear, getWeight, active };
 }

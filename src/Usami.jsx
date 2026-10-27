@@ -3,13 +3,15 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Phone, PhoneOff, Send, Settings, Moon, X, Upload, Volume2, VolumeX, Info, ImagePlus, MessagesSquare } from 'lucide-react';
+import { Keyboard, Mic, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
 import { createMotionDirector, SHAPE_NAMES } from './motion-director';
 import { createAutoMotion } from './auto-motion';
 import { createExpressionDriver } from './expression-driver';
+import { buildExpressionGains } from './expression-gains';
+import { createSpeechPace } from './speech-pace';
 import { createEmotionEngine } from './emotion-engine';
 import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
@@ -165,7 +167,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const light = new THREE.DirectionalLight(0xffebd8, 2);
     light.position.set(2, 4, 4);
     scene.add(light);
-    let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null;
+    let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null, idlePose = null;
     const localTextures = [];
     // O loop de renderização também usa esta lista para blink e lip sync.
     // Ela precisa viver no escopo do effect, não apenas dentro do callback do loader.
@@ -217,6 +219,13 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         setArm('leftUpperArm', 1);
         setArm('rightUpperArm', -1);
         vrm.humanoid.update?.();
+        // Pose de repouso em pé (braços para baixo). É o alvo do retorno ao idle
+        // quando um clipe termina; o sway é somado por cima todo frame.
+        idlePose = new Map();
+        for (const name of Object.keys(vrm.humanoid.humanBones ?? {})) {
+          const node = vrm.humanoid.getNormalizedBoneNode?.(name);
+          if (node) idlePose.set(node, { rotation: node.quaternion.clone(), position: node.position.clone(), scale: node.scale.clone() });
+        }
       }
       if (vrm?.humanoid) {
         // Subtle idle sway (breath + lateral) driven through normalized nodes;
@@ -245,6 +254,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         });
         vrmGestures.current = createVrmGestureLayer({ humanoid: vrm.humanoid, axisTable });
       }
+
       if (vrm?.lookAt) {
         // three-vrm 3.x: assigning an Object3D to vrm.lookAt.target makes
         // vrm.update(delta) aim the gaze rig at its world position.
@@ -267,6 +277,20 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         }
       });
       mixer = new THREE.AnimationMixer(avatar);
+      // Clipe de uma ação só: ao terminar, devolve o rig à pose de repouso para
+      // o sway procedural assumir de novo (sem pose presa no último frame).
+      mixer.addEventListener('finished', event => {
+        if (disposed) return;
+        event.action?.stop();
+        if (idlePose) {
+          for (const [node, pose] of idlePose) {
+            node.quaternion.copy(pose.rotation);
+            node.position.copy(pose.position);
+            node.scale.copy(pose.scale);
+          }
+        }
+        vrm?.humanoid?.update?.();
+      });
       const animations = (loaded.animations || []).map(clip => inspectAnimation(clip, avatar));
       const expressionNames = vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [];
       const detectedBlink = detectBlinkName(expressionNames, morphs);
@@ -281,6 +305,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       expressionDriver = createExpressionDriver({
         setRaw: (name, weight) => vrm?.expressionManager?.setValue(name, weight),
         blinkName: detectedBlink,
+        // O peso que o LLM escolhe é intenção, não milímetro: a régua medida no
+        // shiro equaliza a visibilidade entre as 20 expressões do rosto.
+        gains: buildExpressionGains(expressionNames),
       });
       if (expressionDriverRef) expressionDriverRef.current = expressionDriver;
       // Etapa 3: o engine de emoções só existe para VRMs com expressionManager
@@ -319,7 +346,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           if (!vrmGestures.current) return false;
           return vrmGestures.current.playSequence(request) === true;
         },
-        play(index) { const animation = animations[index]; if (!animation?.clip || animation.excludedTracks) return; gesture = null; customMotion.stop(); mixer.stopAllAction(); mixer.clipAction(animation.clip).reset().play(); },
+        play(index) { const animation = animations[index]; if (!animation?.clip || animation.excludedTracks) return; gesture = null; customMotion.stop(); mixer.stopAllAction(); const action = mixer.clipAction(animation.clip); action.reset().setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = false; action.play(); },
         stop() { mixer.stopAllAction(); gesture = null; customMotion.stop(); vrmGestures.current?.stopGesture(); },
         idle() { if (vrmGestures.current?.gesture('idle')) return true; gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
         wave() { if (vrmGestures.current?.gesture('wave')) return true; gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
@@ -343,7 +370,8 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       manifest.customTilt = boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt);
       manifest.sequences = Boolean(vrmGestures.current?.available.sequences);
       manifest.gestures = vrmGestures.current?.gestureNames ?? [];
-      onReport({ format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: manifest.customIdle, customWave: manifest.customWave, customTilt: manifest.customTilt, sequences: manifest.sequences, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: manifest.gestures, meshList: manifest.meshes, manifest });
+      const reportPayload = { format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: manifest.customIdle, customWave: manifest.customWave, customTilt: manifest.customTilt, sequences: manifest.sequences, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: manifest.gestures, meshList: manifest.meshes, manifest };
+      onReport(reportPayload);
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
     const resize = () => {
       camera.aspect = element.clientWidth / element.clientHeight;
@@ -353,11 +381,12 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     resize();
-    const clock = new THREE.Clock();
+    const timer = new (THREE.Timer || THREE.Clock)();
     let frame;
-    const draw = () => {
+    const draw = (timestamp) => {
       frame = requestAnimationFrame(draw);
-      const delta = Math.min(clock.getDelta(), .1);
+      timer.update?.(timestamp);
+      const delta = Math.min(timer.getDelta(), .1);
       const state = auto?.current?.update?.();
       if (state?.blink !== undefined && blinkMode?.current && blinkName?.current) {
         // Etapa 3: emoções de olhos fechados suprimem o blink (gate do emotion-engine).
@@ -459,7 +488,6 @@ export function Usami() {
   const [modelPath, setModelPath] = useState('');
   const [report, setReport] = useState(null);
   const [meshPrefs, setMeshPrefs] = useState({});
-  const [panel, setPanel] = useState(false);
   const [chat, setChat] = useState(true);
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
@@ -491,6 +519,7 @@ export function Usami() {
   // fila anterior, que para de tocar partes ainda pendentes.
   const ttsQueue = useRef(0);
   const expressionDriverRef = useRef(null);
+  const speechPaceRef = useRef(null);
   const speechScheduler = useRef(null);
   if (!speechScheduler.current) speechScheduler.current = createSpeechScheduler();
   const voiceOffRef = useRef(false);
@@ -581,6 +610,13 @@ export function Usami() {
       if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     }
   };
+  // O rosto acompanha a fala, não um cronômetro fixo: `holdFace` empurra o
+  // vencimento das expressões vivas para o tempo que a fala ainda vai ocupar,
+  // `learnPace` corrige o ritmo com a duração real de cada balão já tocado.
+  const pace = () => (speechPaceRef.current ??= createSpeechPace());
+  const holdFace = text => expressionDriverRef.current?.extend(pace().holdMs(String(text ?? '').length));
+  const learnPace = (text, elapsedMs) => pace().observe(String(text ?? '').length, elapsedMs);
+
   // Fila de áudio da resposta: UMA síntese por vez. O provedor de voz não
   // tolera requisições concorrentes (5 POST /api/tts em paralelo = 5×504; com
   // uma em voo todas voltam 200), então cada parte é sintetizada, exibida e
@@ -681,6 +717,7 @@ export function Usami() {
       // O balão pode ter nascido com a primeira amostra de áudio (streaming);
       // `shown` evita o segundo onPart da mesma frase.
       let shown = false;
+      const partStartedAt = performance.now();
       if (job?.stream) {
         const tap = audioLipSync.current?.getTap?.() || null;
         const external = tap ? audioLipSync.current.beginExternal() : false;
@@ -697,6 +734,7 @@ export function Usami() {
                 shown = true;
                 onPart(parts[index]);
                 runActionsAtSpeechStart();
+                holdFace(parts[index]);
               },
               onStreamEnd: () => {
                 if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
@@ -708,6 +746,7 @@ export function Usami() {
         }
         if (outcome.streamed) {
           played = true;
+          learnPace(parts[index], performance.now() - partStartedAt);
           runActionsAtSpeechEnd();
           if (!alive()) break;
           continue;
@@ -719,7 +758,9 @@ export function Usami() {
       if (!shown) onPart(parts[index]);
       if (!job?.url) continue;
       if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
+      holdFace(parts[index]);
       await playWithElement(job.url);
+      learnPace(parts[index], performance.now() - partStartedAt);
       if (!alive()) break;
     }
     // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
@@ -865,6 +906,10 @@ export function Usami() {
       if (resolved.applied && resolved.emotion) vrmGestures.current?.setEmotion(resolved.emotion.label, resolved.emotion.intensity, 4500);
       const [immediateActions, timedActions] = partitionByTiming(resolved.actions);
       const results = director.current?.execute(immediateActions)?.results || [];
+      // A expressão do turno nasce com prazo proporcional à resposta inteira: a
+      // síntese do primeiro balão pode levar mais que o TTL padrão, e o rosto
+      // não pode sumir antes de a fala começar. Cada balão renova no seu início.
+      if (!voiceOffRef.current) holdFace(data.reply);
       if (results.some(result => result.applied)) poke();
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
@@ -955,7 +1000,7 @@ export function Usami() {
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
       : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} />}
-    <header><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
+    <header><button className="icon" onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat}><MessagesSquare size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
       <div className="chat-scroll">
@@ -979,23 +1024,8 @@ export function Usami() {
         <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
         <button className={'round '+(voiceOff?'selected':'')} onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={19}/>:<Volume2 size={19}/>}</button>
         <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
-        <button className="round" onClick={() => setPanel(true)} aria-label="Detalhes do avatar"><Info size={19}/></button>
       </div>}
       {!call && !chat && <button className="history-toggle" onClick={() => setChat(true)}><MessagesSquare size={16}/> Mostrar conversa</button>}
     </div>
-    {panel && <div className="scrim" onClick={() => setPanel(false)}><aside onClick={event => event.stopPropagation()}><div className="panel-head"><div><span className="eyebrow">LABORATÓRIO</span><h2>Avatar & rig</h2></div><button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button></div><p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p><input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/><button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button><label className="rig-label">Modelo local (public/)<input placeholder="/models/exemplo.vrm" value={modelPath} onChange={e => setModelPath(e.target.value)} /></label><div className="rig-actions"><button onClick={() => loadFromPath(modelPath)}>Carregar caminho</button></div><p>Arquivos grandes não cabem no upload; caminhos servidos por /public. Ex.: /models/shiro.vrm</p><h3>Inspeção do modelo</h3>{!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
-      <dl>{Object.entries({Formato:report.format,Meshes:report.meshes,Bones:report.bones,Triângulos:report.triangles,Animações:report.animations.length,'Morph targets':report.morphs.length,Expressões:report.expressions.length}).map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
-      {report.live2d && <p>Live2D ativo: o modelo usa os parâmetros, a física e o idle criados pela riggadora. Arraste o cursor sobre ela para o olhar acompanhar.</p>}
-      {report.format === 'FBX' && <p>{sourceName.toLowerCase() === 'felis.fbx' ? 'Felis: usando as texturas-base locais quando disponíveis. Os shaders e efeitos do Unity não são reproduzidos.' : 'FBX em teste: texturas externas e materiais do Unity podem não acompanhar este arquivo.'}</p>}
-      {!report.live2d && <><h3>Movimentos personalizados</h3><p>Testes para o rig Autumn. O idle é contínuo; o aceno dura alguns segundos. Não estão ligados às respostas da IA.</p><div className="rig-actions"><button disabled={!report.customIdle} onClick={() => { controller.current?.idle(); poke(); }}>Iniciar idle</button><button disabled={!report.customWave} onClick={() => { controller.current?.wave(); poke(); }}>Acenar</button><button onClick={() => controller.current?.stop()}>Parar movimentos</button></div>{(!report.customIdle || !report.customWave) && <p>Alguns ossos necessários não foram encontrados neste modelo.</p>}
-      {Boolean(report.gestures?.length) && <><h3>Gestos</h3><p>Gestos procedurais sobre o rig humanoid; valem para qualquer VRM com braços. Os de pose ficam até você parar.</p><div className="rig-actions">{report.gestures.map(name => <button key={name} onClick={() => { controller.current?.gesture(name); poke(); }}>{GESTURE_LABELS[name] ?? name}</button>)}<button onClick={() => controller.current?.stop()}>Parar gesto</button></div></>}
-      {report.sequences && <><h3>Sequências</h3><p>Shapes paramétricas expandidas em keyframes — o mesmo caminho que a IA usa em play_sequence.</p><div className="rig-actions">{SHAPE_NAMES.map(shape => <button key={shape} onClick={() => { controller.current?.playSequence({ shape }); poke(); }}>{shape}</button>)}<button onClick={() => controller.current?.stop()}>Parar sequência</button></div></>}
-      <h3>Meshes</h3>{meshList.length ? <>{meshList.map(mesh => <label className="rig-label" key={mesh.name}>{mesh.name} {mesh.skinned ? '(rig)' : '(sem rig)'}<input type="checkbox" checked={isMeshVisible(mesh)} onChange={() => toggleMesh(mesh)} /></label>)}<div className="rig-actions"><button onClick={resetMeshes}>Restaurar visibilidade padrão</button></div><p>Modelos sem esqueleto começam ocultos; desmarque para esconder acessórios ou mostre o que quiser.</p></> : <p>Nenhuma mesh presente.</p>}
-      <h3>Animações</h3>{report.animations.length ? <><label className="rig-label">Clip<select value={selectedClip} onChange={e => setSelectedClip(e.target.value)}>{report.animations.map((clip,i) => <option key={i} value={i}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label><p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p><div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => { controller.current?.play(Number(selectedClip)); poke(); }}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div></> : <p>Este modelo não contém clips.</p>}
-      <h3>Ossos</h3><p>Rotação local limitada; iniciar uma animação pode sobrescrever o ajuste.</p><label className="rig-label">Osso<select value={boneIndex} onChange={e => {setBoneIndex(Number(e.target.value));setAngle(0);}}>{report.boneNames.map(b => <option key={b.index} value={b.index}>{b.name} [{b.index}]</option>)}</select></label><label className="rig-label">Eixo<select value={axis} onChange={e => {setAxis(e.target.value);setAngle(0);}}><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label><label className="rig-label">Rotação: {angle}°<input type="range" min="-45" max="45" value={angle} onChange={e => {const value=Number(e.target.value);setAngle(value);controller.current?.bone(boneIndex,axis,value);}} /></label>
-      <h3>Expressões</h3>{(() => { const curated = curateExpressions(report.expressions || [], { limit: Infinity }).curated; return curated.length ? <div className="rig-actions">{curated.map(item => <button key={item.name} title={`${item.tag}: ${item.name}`} onClick={() => { controller.current?.setExpression?.(item.name, 1); setTimeout(() => controller.current?.setExpression?.(item.name, 0), 3000); poke(); }}>{labelExpression(item.name)}</button>)}</div> : <p>Nenhuma expressão no modelo.</p>; })()}
-      <h3>Morph targets</h3>{report.morphs.length ? report.morphs.map(name => <label className="rig-label" key={name}>{name}: {Math.round((morphValues[name] || 0)*100)}%<input type="range" min="0" max="1" step=".01" value={morphValues[name] || 0} onChange={e => {const value=Number(e.target.value);setMorphValues(old => ({...old,[name]:value}));controller.current?.morph(name,value);}} /></label>) : <p>Nenhum morph target encontrado.</p>}
-      <button className="upload" onClick={() => {controller.current?.reset();setAngle(0);setMorphValues({});}}>Restaurar pose inicial</button></>}
-    </>}<h3>Intimidade</h3><BondMeters intimacy={intimacy} values /><p className="disclaimer">Teste inicial de texto com OpenRouter. A chamada de voz usa o reconhecimento e a síntese de voz do navegador. O teste de clips reproduz apenas canais identificados nos ossos.</p></aside></div>}
   </main>;
 }
