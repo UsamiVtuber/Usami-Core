@@ -8,6 +8,7 @@ import { GESTURE_NAMES, DIRECTOR_VERBS, SHAPE_NAMES } from './src/motion-directo
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { extractJsonCandidate } from './src/json-salvage.js';
+import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { buildServices } from './src/flow-services.js';
@@ -359,6 +360,14 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
   return (space > 0 ? window.slice(0, space) : window).trimEnd();
 }
 
+// O balão mostra a fala; as tags não-verbais (<laugh>, <sigh>...) vão só para o
+// /api/tts. O campo `speechTags` só existe quando há tag — payloads antigos e
+// testes que comparam o objeto inteiro continuam idênticos.
+function cleanReply(reply) {
+  const { text, tags } = extractSpeechTags(stripStageDirections(reply));
+  return { display: capReplyLength(text), tags };
+}
+
 // Extrai o valor da chave "reply" de JSON truncado/inválido: lê até a próxima
 // aspa não escapada OU o fim da string (payload cortado no max_tokens),
 // decodificando os escapes mais comuns. Retorna null sem conteúdo recuperável.
@@ -431,19 +440,34 @@ export function parseProviderRaw(raw) {
         if (!salvaged) {
           return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
         }
-        return { ok: true, reply: capReplyLength(stripStageDirections(salvaged)), gesture: 'neutral', actions: [], remember: null };
+        const cleaned = cleanReply(salvaged);
+        if (!cleaned.display) {
+          return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
+        }
+        return { ok: true, reply: cleaned.display, gesture: 'neutral', actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
       }
       // Caso contrário, trata o texto bruto como resposta livre
       result = { reply: trimmed, gesture: 'neutral' };
     }
   }
   // A rubrica sai ANTES das validações: reply que era só descrição de ação não
-  // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente.
-  if (result && typeof result.reply === 'string') result.reply = stripStageDirections(result.reply);
+  // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente. As tags
+  // não-verbais também saem do texto exibido e voltam em `speechTags`.
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
-  return { ok: true, reply: capReplyLength(result.reply.trim()), gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral', actions: sanitizeActions(result.actions), remember: normalizeRemember(result.remember) };
+  const cleaned = cleanReply(result.reply);
+  if (!cleaned.display) {
+    return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
+  }
+  return {
+    ok: true,
+    reply: cleaned.display,
+    gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral',
+    actions: sanitizeActions(result.actions),
+    remember: normalizeRemember(result.remember),
+    ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}),
+  };
 }
 
 export function createChatHandler(options = {}) {
@@ -606,6 +630,7 @@ export function createChatHandler(options = {}) {
           gesture: parsedReply.gesture,
           actions: parsedReply.actions,
           remember: parsedReply.remember,
+          ...(parsedReply.speechTags ? { speechTags: parsedReply.speechTags } : {}),
           source: 'nvidia',
         };
       } catch (error) {
@@ -745,6 +770,7 @@ export function createChatHandler(options = {}) {
 
     return send(200, {
       reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
+      ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
       // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
       // renomear. contextMs é adição. animationMs é o que a animação custou
       // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
@@ -810,11 +836,13 @@ export function createFlowChatHandler(options = {}) {
         voiceOff: true,
       });
 
+      const spoken = extractSpeechTags(result.reply);
       return send(200, {
-        reply: result.reply,
+        reply: spoken.text,
         gesture: result.gesture,
         actions: result.actions,
         emotion: result.emotion,
+        ...(spoken.tags.length ? { speechTags: spoken.tags } : {}),
         audioBuffer: result.audioBuffer ? 'base64_placeholder' : null, // actual audio via /api/tts
         debug: result.debug,
       });
@@ -947,7 +975,9 @@ const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
 // com o whisper local, a instrução prosaica ("Leia em português do Brasil, com tom
 // acolhedor e animado: ...") era FALADA pela modelo antes do texto — a Usami
 // anunciava o próprio prompt. A tag entre colchetes muda a prosódia e nunca é lida.
-const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, tom acolhedor e animado] ';
+// A base abaixo acompanha a voz desenhada `voice_ess199w2ioks` (take "d"): o
+// timbre adulto da Kore/da voz anterior vinha de ressonância, não só de pitch.
+const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa] ';
 const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
 // Vozes desenhadas (Voice Design/Replication) têm id com prefixo voice_ e vão em
 // voiceConfig.voice; pré-prontas (Kore, Puck...) permanecem em prebuiltVoiceConfig.
@@ -955,14 +985,18 @@ const CUSTOM_VOICE_PREFIX = 'voice_';
 // Cláusulas de emoção por styleId, fundidas na tag; neutral e rótulos desconhecidos
 // não têm cláusula — caem na tag base (determinístico).
 const STYLE_INSTRUCTIONS = {
-  happy: 'voz alegre e brilhante',
-  sad: 'voz triste e suave',
-  angry: 'voz firme e irritada',
-  surprised: 'voz espantada',
-  relaxed: 'voz calma e serena',
-  soft: 'voz doce e meiga',
-  shy: 'voz baixa e hesitante',
-  doubtful: 'voz desconfiada',
+  happy: 'super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy',
+  sad: 'triste e embargada, mais lenta e baixa, com suspiros',
+  angry: 'protesto manhoso e dramatizado, aguda, emburrada, birra fofa sem agressividade',
+  surprised: 'espantada e aguda, salto de pitch, animada',
+  relaxed: 'calma e serena, mais baixa e lenta, sorriso suave',
+  soft: 'doce e apegada, sorriso na voz, tom manhoso e carinhoso',
+  shy: 'baixinha, hesitante e doce, quase sussurrada, com vergonha',
+  doubtful: 'desconfiada e aguda, entonação de hã?, brincalhona',
+  // Aliases do guia de voz: o LLM/cliente pode pedir o modo diretamente.
+  clingy: 'aguda, brilhante e apegada, sorriso na voz, tom manhoso',
+  pout: 'protesto manhoso e dramatizado, agudo, emburrada, birra fofa',
+  hype: 'super energetica, hiperexpressiva, consoantes punchy, aguda e empolgada',
 };
 
 // Monta a tag de estilo a partir da base configurada + cláusula da emoção. Uma base

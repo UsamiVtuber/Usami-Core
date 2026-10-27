@@ -365,6 +365,16 @@ test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {
   assert.equal(parseProviderRaw('{"reply":"*silêncio*"}').ok, false);
 });
 
+test('parseProviderRaw: tags não-verbais vão para speechTags, nunca para o balão', () => {
+  const result = parseProviderRaw('{"reply":"Pai! Você demorou! <chuckle>"}');
+  assert.equal(result.reply, 'Pai! Você demorou!');
+  assert.deepEqual(result.speechTags, ['chuckle']);
+  // Sem tag o objeto continua idêntico ao formato antigo.
+  assert.equal('speechTags' in parseProviderRaw('{"reply":"Oi"}'), false);
+  // Só tag não é fala.
+  assert.equal(parseProviderRaw('{"reply":"<laugh>"}').ok, false);
+});
+
 test('stripStageDirections: preserva a fala e a quebra de linha dos balões', () => {
   assert.equal(stripStageDirections('sem rubrica aqui'), 'sem rubrica aqui');
   const multiline = stripStageDirections('Bom dia!\n*espreguiça* Vamos continuar?');

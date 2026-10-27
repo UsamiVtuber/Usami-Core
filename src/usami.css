@@ -27,3 +27,18 @@ header,.controls{z-index:3}.scrim{z-index:7}
 
 /* O histórico precisa de flex:1/min-height:0 para rolar dentro do max-height do painel */
 .chat-scroll{flex:1;min-height:0}
+.header-actions{display:flex;align-items:center;gap:8px}
+.chat-history-actions{display:flex;align-items:center;gap:4px}
+.chat-history-head button:disabled{opacity:.35;cursor:not-allowed}
+.panel-tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap;border-bottom:1px solid #ffffff1a;padding-bottom:8px}
+.panel-tabs button{background:transparent;border:1px solid transparent;border-radius:8px;padding:8px 14px;font-size:11px;font-weight:600;color:#c9c3cc;transition:all .2s}
+.panel-tabs button:hover{background:#ffffff10;border-color:#ffffff20}
+.panel-tabs button.active{background:#8d24f0;border-color:#b969ff;color:#fff}
+.settings-label{display:block;font-size:12px;color:#d7cadb;margin:16px 0 6px}
+.settings-label input,.settings-label select,.settings-label textarea{display:block;margin-top:6px;width:100%;background:#29212f;color:#fff;border:1px solid #ffffff30;border-radius:8px;padding:10px;font:inherit}
+.settings-hint{font-size:11px;color:#9f97a3;margin-top:4px;line-height:1.5}
+.settings-hint a{color:#c68cf2}
+.settings-hint code{background:#ffffff10;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:10px}
+.panel-content{overflow-y:auto;max-height:calc(100% - 120px)}
+.panel-footer{margin-top:24px;padding-top:16px;border-top:1px solid #ffffff1a}
+aside ul{padding-left:18px;margin:10px 0;color:#c5b8c7;font-size:13px;line-height:1.7}

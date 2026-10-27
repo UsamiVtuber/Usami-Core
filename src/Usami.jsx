@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare } from 'lucide-react';
+import { Keyboard, Mic, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2 } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
@@ -21,6 +21,8 @@ import { calibrateArmAxes } from './vrm-bone-calibration';
 import { createAudioLipSync } from './audio-lipsync';
 import { playPcmStream } from './stream-audio-player';
 import { splitReplyParts } from './reply-parts';
+import { stripSpeechTags } from './speech-tags';
+import { loadConversation, saveConversation, clearStoredConversation, latestTurnId, MAX_STORED_TURNS } from './conversation-storage';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
 import { classifyFacs } from './facs-classifier.js';
@@ -491,7 +493,7 @@ export function Usami() {
   const [chat, setChat] = useState(true);
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
-  const [conversation, setConversation] = useState([]);
+  const [conversation, setConversation] = useState(loadConversation);
   const [quiet, setQuiet] = useState(false);
   const [voiceOff, setVoiceOff] = useState(false);
   const [boneIndex, setBoneIndex] = useState(0);
@@ -504,6 +506,8 @@ export function Usami() {
   const [callSeconds, setCallSeconds] = useState(0);
   const [intimacy, setIntimacy] = useState(loadIntimacy);
   const [bondOpen, setBondOpen] = useState(false);
+  const [panel, setPanel] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('chat');
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
@@ -530,7 +534,7 @@ export function Usami() {
   const speakingRef = useRef(false);
   const busyRef = useRef(false);
   const submitRef = useRef(null);
-  const turnId = useRef(0);
+  const turnId = useRef(latestTurnId(conversation));
   const recognitionSupported = typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
   const synthesisSupported = typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function';
   const poke = () => auto.current?.notifyActivity();
@@ -542,7 +546,28 @@ export function Usami() {
     // chamadas no mesmo tick (resposta dividida em balões) leriam o mesmo
     // `turnId.current` final — chaves duplicadas na lista.
     const id = turnId.current;
-    setConversation(previous => [...previous, { id, role, content: value, mode }]);
+    setConversation(previous => {
+      const next = [...previous, { id, role, content: value, mode }];
+      // O estado guarda a conversa inteira da sessão; o navegador fica com as
+      // últimas 100 mensagens para não crescer sem limite.
+      saveConversation(next);
+      return next;
+    });
+  };
+  const clearChat = () => {
+    turnId.current = 0;
+    setConversation([]);
+    clearStoredConversation();
+  };
+  const exportChat = () => {
+    if (!conversation.length) return;
+    const blob = new Blob([JSON.stringify(conversation, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `usami-conversa-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   };
   const reportModel = useCallback(value => {
     setReport(value);
@@ -917,21 +942,33 @@ export function Usami() {
       // texto); o caption da chamada segue mostrando a resposta completa.
       const replyParts = splitReplyParts(data.reply);
       const bubbles = replyParts.length ? replyParts : [String(data.reply).trim()];
+      // Tags não-verbais (<laugh>, <short pause>...) vão só para o TTS, no fim
+      // do último balão; o balão exibido continua sendo a fala limpa.
+      const speechTags = Array.isArray(data.speechTags) ? data.speechTags : [];
+      const ttsBubbles = speechTags.length
+        ? bubbles.map((part, index) => (index === bubbles.length - 1 ? `${part} ${speechTags.join(' ')}` : part))
+        : bubbles;
       if (spoken) {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
         // HTMLAudioElement) nem pela fila de partes — timing via
-        // utterance.onend / setTimeout e balões exibidos de uma vez.
+        // utterance.onend / setTimeout e balões exibidos de uma vez. Tags de
+        // som não se aplicam aqui; a fala sintetizada é só o texto exibido.
         speakSpoken(data.reply, timedActions);
         bubbles.forEach(part => addTurn('assistant', part, 'voice'));
       } else {
         // Cada balão é exibido por speakReply no instante em que a fala dele
         // toca: mensagem → áudio → mensagem → áudio, um atrás do outro.
-        speakReply(bubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions, part => addTurn('assistant', part, 'text'));
+        speakReply(ttsBubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
       }
       setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
-      if (!spoken) setText('');
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
-    finally { busyRef.current = false; setBusy(false); }
+    finally {
+      busyRef.current = false;
+      setBusy(false);
+      // Limpa mesmo quando a resposta falha: o texto enviado não fica preso no
+      // composer esperando um novo clique. No modo voz o campo é outro fluxo.
+      if (!spoken) setText('');
+    }
   };
   useEffect(() => { submitRef.current = submitMessage; });
 
@@ -1000,9 +1037,9 @@ export function Usami() {
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
       : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} />}
-    <header><button className="icon" onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat}><MessagesSquare size={19}/></button><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
+    <header><div className="header-actions"><button className="icon" onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat}><MessagesSquare size={19}/></button><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></div><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
-      <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div>
+      <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><div className="chat-history-actions"><button onClick={exportChat} disabled={!conversation.length} aria-label="Exportar histórico" title="Exportar histórico"><Download size={14}/></button><button onClick={clearChat} disabled={!conversation.length} aria-label="Limpar histórico" title="Limpar histórico"><Trash2 size={15}/></button><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div></div>
       <div className="chat-scroll">
         {conversation.length ? conversation.map(turn => <div className={'chat-turn ' + turn.role} key={turn.id}><span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span><p>{turn.content}</p></div>) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
         {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
@@ -1027,5 +1064,106 @@ export function Usami() {
       </div>}
       {!call && !chat && <button className="history-toggle" onClick={() => setChat(true)}><MessagesSquare size={16}/> Mostrar conversa</button>}
     </div>
+    {panel && <div className="scrim" onClick={() => setPanel(false)}>
+      <aside onClick={event => event.stopPropagation()} aria-label="Configurações da Usami">
+        <div className="panel-head">
+          <div><span className="eyebrow">CONFIGURAÇÕES</span><h2>Usami</h2></div>
+          <button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button>
+        </div>
+        <div className="panel-tabs" role="tablist">
+          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
+        </div>
+        <div className="panel-content" role="tabpanel">
+          {settingsTab === 'chat' && <div>
+            <h3>Histórico da conversa</h3>
+            <p>As últimas {MAX_STORED_TURNS} mensagens ficam salvas apenas neste navegador.</p>
+            <div className="rig-actions">
+              <button onClick={exportChat} disabled={!conversation.length}>Exportar JSON</button>
+              <button onClick={clearChat} disabled={!conversation.length}>Limpar histórico</button>
+            </div>
+            <h3>Intimidade</h3>
+            <div className="rig-actions">
+              <button onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); try { localStorage.removeItem(INTIMACY_KEY); } catch {} }}>Zerar medidores</button>
+            </div>
+            <p className="settings-hint">Zerar os medidores não apaga a conversa.</p>
+          </div>}
+          {settingsTab === 'voice' && <div>
+            <h3>Voz oficial</h3>
+            <p>Gemini 3.8 Flash TTS com a voz desenhada para a Usami. A configuração fica no servidor local, não neste navegador.</p>
+            <p>O tom muda por emoção e o texto pode pedir sons curtos como <code>&lt;laugh&gt;</code>, <code>&lt;chuckle&gt;</code>, <code>&lt;sigh&gt;</code> e <code>&lt;short pause&gt;</code>. A tag vira áudio e não aparece no balão.</p>
+            <p className="settings-hint">Para trocar voz ou modelo, ajuste <code>GEMINI_TTS_VOICE</code> e <code>GEMINI_TTS_MODEL</code> no <code>.env</code> e reinicie <code>npm run api</code>.</p>
+            <h3>Privacidade</h3>
+            <p>A chave da API permanece no servidor. O painel não pede nem guarda chaves.</p>
+          </div>}
+          {settingsTab === 'avatar' && <div>
+            <h3>Modelo</h3>
+            <p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p>
+            <input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/>
+            <button className="upload" onClick={() => fileInput.current?.click()}><Upload size={17}/> Escolher GLB, VRM ou FBX</button>
+            <label className="rig-label">Modelo local (public/)<input placeholder="/models/exemplo.vrm" value={modelPath} onChange={event => setModelPath(event.target.value)} /></label>
+            <div className="rig-actions"><button onClick={() => loadFromPath(modelPath)}>Carregar caminho</button></div>
+            <p>Arquivos grandes não cabem no upload; caminhos servidos por /public. Ex.: /models/shiro.vrm</p>
+            <h3>Inspeção do modelo</h3>
+            {!report ? <p>Carregando modelo...</p> : report.error ? <p role="alert">{report.error}</p> : <>
+              <dl>{Object.entries({ Formato: report.format, Meshes: report.meshes, Bones: report.bones, Triângulos: report.triangles, Animações: report.animations.length, 'Morph targets': report.morphs.length, Expressões: report.expressions.length }).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
+              {report.live2d && <p>Live2D ativo: o modelo usa os parâmetros, a física e o idle criados pela riggadora. Arraste o cursor sobre ela para o olhar acompanhar.</p>}
+              {report.format === 'FBX' && <p>{sourceName.toLowerCase() === 'felis.fbx' ? 'Felis: usando as texturas-base locais quando disponíveis. Os shaders e efeitos do Unity não são reproduzidos.' : 'FBX em teste: texturas externas e materiais do Unity podem não acompanhar este arquivo.'}</p>}
+              {!report.live2d && <>
+                <h3>Movimentos personalizados</h3>
+                <p>Testes para o rig Autumn. O idle é contínuo; o aceno dura alguns segundos. Não estão ligados às respostas da IA.</p>
+                <div className="rig-actions">
+                  <button disabled={!report.customIdle} onClick={() => { controller.current?.idle(); poke(); }}>Iniciar idle</button>
+                  <button disabled={!report.customWave} onClick={() => { controller.current?.wave(); poke(); }}>Acenar</button>
+                  <button onClick={() => controller.current?.stop()}>Parar movimentos</button>
+                </div>
+                {(!report.customIdle || !report.customWave) && <p>Alguns ossos necessários não foram encontrados neste modelo.</p>}
+                <h3>Meshes</h3>
+                {meshList.length ? <>
+                  {meshList.map(mesh => <label className="rig-label" key={mesh.name}>{mesh.name} {mesh.skinned ? '(rig)' : '(sem rig)'}<input type="checkbox" checked={isMeshVisible(mesh)} onChange={() => toggleMesh(mesh)} /></label>)}
+                  <div className="rig-actions"><button onClick={resetMeshes}>Restaurar visibilidade padrão</button></div>
+                  <p>Modelos sem esqueleto começam ocultos; desmarque para esconder acessórios ou mostre o que quiser.</p>
+                </> : <p>Nenhuma mesh presente.</p>}
+                <h3>Animações</h3>
+                {report.animations.length ? <>
+                  <label className="rig-label">Clip<select value={selectedClip} onChange={event => setSelectedClip(event.target.value)}>{report.animations.map((clip, index) => <option key={index} value={index}>{clip.name} — {clip.boneTracks ? `rig (${clip.boneTracks} canais)` : 'sem canais de ossos'}</option>)}</select></label>
+                  <p>{!report.animations[Number(selectedClip)]?.boneTracks ? 'Este clip não tem canais de ossos identificados; ele pode pertencer ao cenário ou a outros objetos.' : report.animations[Number(selectedClip)].excludedTracks ? `Teste bloqueado: ${report.animations[Number(selectedClip)].excludedTracks} canais não são de ossos e a reprodução parcial pode deslocar o avatar. Este clip precisa de análise adicional.` : 'Teste dos canais de ossos. A presença de canais não garante movimento visível.'}</p>
+                  <div className="rig-actions"><button disabled={!report.animations[Number(selectedClip)]?.boneTracks || report.animations[Number(selectedClip)]?.excludedTracks > 0} onClick={() => { controller.current?.play(Number(selectedClip)); poke(); }}>Reproduzir</button><button onClick={() => controller.current?.stop()}>Parar</button></div>
+                </> : <p>Este modelo não contém clips.</p>}
+                <h3>Ossos</h3>
+                <p>Rotação local limitada; iniciar uma animação pode sobrescrever o ajuste.</p>
+                <label className="rig-label">Osso<select value={boneIndex} onChange={event => { setBoneIndex(Number(event.target.value)); setAngle(0); }}>{report.boneNames.map(bone => <option key={bone.index} value={bone.index}>{bone.name} [{bone.index}]</option>)}</select></label>
+                <label className="rig-label">Eixo<select value={axis} onChange={event => { setAxis(event.target.value); setAngle(0); }}><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select></label>
+                <label className="rig-label">Rotação: {angle}°<input type="range" min="-45" max="45" value={angle} onChange={event => { const value = Number(event.target.value); setAngle(value); controller.current?.bone(boneIndex, axis, value); }} /></label>
+                <h3>Expressões</h3>
+                {(() => { const curated = curateExpressions(report.expressions || [], { limit: Infinity }).curated; return curated.length ? <div className="rig-actions">{curated.map(item => <button key={item.name} title={`${item.tag}: ${item.name}`} onClick={() => { controller.current?.setExpression?.(item.name, 1); setTimeout(() => controller.current?.setExpression?.(item.name, 0), 3000); poke(); }}>{labelExpression(item.name)}</button>)}</div> : <p>Nenhuma expressão no modelo.</p>; })()}
+                <h3>Morph targets</h3>
+                {report.morphs.length ? report.morphs.map(name => <label className="rig-label" key={name}>{name}: {Math.round((morphValues[name] || 0) * 100)}%<input type="range" min="0" max="1" step=".01" value={morphValues[name] || 0} onChange={event => { const value = Number(event.target.value); setMorphValues(old => ({ ...old, [name]: value })); controller.current?.morph(name, value); }} /></label>) : <p>Nenhum morph target encontrado.</p>}
+                <button className="upload" onClick={() => { controller.current?.reset(); setAngle(0); setMorphValues({}); }}>Restaurar pose inicial</button>
+              </>}
+            </>}
+          </div>}
+          {settingsTab === 'about' && <div>
+            <h3>Usami Companion</h3>
+            <p>Versão 0.1.0 — companion com avatar 3D/Live2D e voz própria.</p>
+            <h3>Tecnologias</h3>
+            <ul>
+              <li>React 19 + Vite</li>
+              <li>Three.js + @pixiv/three-vrm (VRM/GLB)</li>
+              <li>Live2D Cubism 3 (opcional)</li>
+              <li>OpenRouter / NVIDIA (LLM) + Gemini (TTS)</li>
+              <li>Web Speech API para a chamada de voz</li>
+            </ul>
+            <h3>Créditos</h3>
+            <ul>
+              <li>Modelo 3D: <b>白ー (shiro)</b> por <a href="https://github.com/Sweet-nya555" target="_blank" rel="noopener">Sweet_nya555</a></li>
+              <li>Ícones: <a href="https://lucide.dev" target="_blank" rel="noopener">Lucide</a></li>
+            </ul>
+            <h3>Privacidade</h3>
+            <p>Texto e voz passam pela API local em <code>127.0.0.1:8787</code>, que lê as chaves do <code>.env</code>. O histórico da conversa fica no <code>localStorage</code> deste navegador.</p>
+          </div>}
+          <div className="panel-footer"><BondMeters intimacy={intimacy} values /><p className="disclaimer">Texto e voz usam os provedores configurados no servidor. O teste de clips reproduz apenas canais identificados nos ossos.</p></div>
+        </div>
+      </aside>
+    </div>}
   </main>;
 }
