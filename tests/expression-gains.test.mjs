@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FACE_P90_MM, REFERENCE_P90_MM, MAX_BOOST, MAX_CUT, gainFor, buildExpressionGains } from '../src/expression-gains.js';
+import { FACE_P90_MM, REFERENCE_P90_MM, MAX_BOOST, MAX_CUT, MIN_VISIBLE_P90_MM, gainFor, buildExpressionGains, isExpressive } from '../src/expression-gains.js';
 
 test('a régua cobre as 20 expressões curadas do shiro', () => {
   assert.equal(Object.keys(FACE_P90_MM).length, 20);
@@ -48,3 +48,12 @@ test('referência alternativa recalibra sem editar a régua', () => {
   assert.equal(gainFor('11-prefab_angry05', { reference: 300 }), MAX_BOOST);
 });
 
+test('isExpressive retira do catálogo o que o ganho não consegue tornar visível', () => {
+  assert.equal(isExpressive('09-prefab_angry03'), false, '0,7 mm: a peso 1,0 saturado ficou igual ao repouso');
+  assert.equal(isExpressive('19-prefab_doubt'), true, '3,8 mm: verificado visível com boost');
+  assert.equal(isExpressive('21-prefab_emoji'), true, 'sem medição não há evidência para esconder');
+  assert.equal(isExpressive(undefined), true);
+  for (const [name, mm] of Object.entries(FACE_P90_MM)) {
+    assert.equal(isExpressive(name), mm >= MIN_VISIBLE_P90_MM, `${name} mede ${mm} mm`);
+  }
+});

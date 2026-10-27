@@ -66,3 +66,15 @@ export function buildExpressionGains(names, options) {
   return gains;
 }
 
+// Piso de visibilidade para o recorte de catálogo. Na calibração visual de
+// 2026-10-27, 0,7 mm (09-prefab_angry03) a peso 1,0 saturado ficou idêntico ao
+// repouso, e 3,8 mm (19-prefab_doubt) mudou o rosto de forma legível. O corte
+// em 2 mm fica entre os dois pontos medidos; não medimos a transição.
+export const MIN_VISIBLE_P90_MM = 2;
+
+// O que nunca foi medido passa: sem régua não há evidência para esconder uma
+// expressão de outro modelo.
+export function isExpressive(name) {
+  const measured = FACE_P90_MM[name];
+  return !Number.isFinite(measured) || measured >= MIN_VISIBLE_P90_MM;
+}

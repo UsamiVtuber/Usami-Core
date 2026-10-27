@@ -66,6 +66,10 @@ test('summarizeCapabilities cura expressões antes do corte de 20 (prefabs sobre
   // Visemas e piscar vão por último no corte, nunca encabeçam a lista
   assert.ok(!summary.expressions.includes('blink'));
   assert.ok(!summary.expressions.includes('aa'));
+  // 09-prefab_angry03 mede 0,7 mm: a peso 1,0 saturado ficou igual ao repouso na
+  // calibração visual, então oferecê-lo ao modelo é prometer reação que não existe.
+  assert.ok(!summary.expressions.includes('09-prefab_angry03'), 'morph invisível fora do catálogo do prompt');
+  assert.ok(summary.expressions.includes('19-prefab_doubt'), '3,8 mm com boost continua no catálogo');
 });
 
 test('summarizeCapabilities omite tilt quando customTilt é false', () => {
