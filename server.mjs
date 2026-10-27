@@ -123,11 +123,11 @@ export async function refineAnimationInBackground(reply, capabilities, { planner
     const queued = filterActionsByCatalog(actions ?? [], capabilities)
       .map(action => queueAvatarCommand(action))
       .filter(Boolean).length;
-    console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila em '
-      + (Date.now() - startedAt) + 'ms (fora do totalMs do turno)');
+    console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila, queuedMs='
+      + (Date.now() - startedAt));
   } catch (error) {
-    console.warn('[animacao] refino em background falhou após ' + (Date.now() - startedAt)
-      + 'ms: ' + describeFetchError(error));
+    console.warn('[animacao] refino em background falhou, queuedMs=' + (Date.now() - startedAt)
+      + ': ' + describeFetchError(error));
   }
 }
 
