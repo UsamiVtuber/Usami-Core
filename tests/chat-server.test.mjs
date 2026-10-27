@@ -71,6 +71,24 @@ test('parseProviderRaw: JSON válido e fence', () => {
   assert.equal(parseProviderRaw('[' + 'x'.repeat(2100)).ok, false);
 });
 
+test('parseProviderRaw: remember vira {fact, section}; string antiga cai em other', () => {
+  assert.deepEqual(
+    parseProviderRaw('{"reply":"oi","remember":{"section":"preferences","fact":"gosta de café gelado"}}').remember,
+    { fact: 'gosta de café gelado', section: 'preferences' },
+  );
+  // O modelo ainda devolve string às vezes: perder a seção é melhor que perder o fato.
+  assert.deepEqual(
+    parseProviderRaw('{"reply":"oi","remember":"gosta de café gelado"}').remember,
+    { fact: 'gosta de café gelado', section: 'other' },
+  );
+  // Seção inventada não inventa categoria: cai em other.
+  assert.deepEqual(
+    parseProviderRaw('{"reply":"oi","remember":{"section":"inventada","fact":"x"}}').remember,
+    { fact: 'x', section: 'other' },
+  );
+  assert.equal(parseProviderRaw('{"reply":"oi","remember":{"section":"user","fact":"  "}}').remember, null);
+});
+
 test('sanitizeActions elimina verbs desconhecidos e limita a 5', () => {
   const sanitized = sanitizeActions([
     { type: 'gesture', name: 'wave' },

@@ -53,7 +53,7 @@ export function createEmotionNode({ id = 'emotion', textKey = 'llmResult.reply',
   });
 }
 
-/** Node: Memory load → injects coreFacts, recentFacts, history, affinity into context for LLM */
+/** Node: Memory load → injects sections, recentFacts, history, affinity into context for LLM */
 export function createMemoryLoadNode({ id = 'memoryLoad' } = {}) {
   return createAsyncNode({
     id, type: 'memoryLoad', inputKeys: [], outputKey: 'memorySnapshot',
@@ -61,7 +61,7 @@ export function createMemoryLoadNode({ id = 'memoryLoad' } = {}) {
       const { memory } = services;
       const data = memory.load();
       return {
-        coreFacts: memory.getCoreFacts(),
+        sections: memory.getSections(),
         recentFacts: memory.getRecentFacts(now()),
         history: memory.getTodayHistory(),
         affinity: memory.getAffinity(),
@@ -77,9 +77,9 @@ export function createCapabilitiesNode({ id = 'capabilities', memKey = 'memorySn
     id, type: 'capabilities', inputs: [{ source: sourceNodeId, key: memKey }], outputs: ['capabilities'],
     process: async ({ [memKey]: mem }, { summarizeCapabilities }) => {
       if (!mem) return { expressions: [], gestures: [], clips: [], morphs: [] };
-      const { coreFacts, recentFacts, affinity, user } = mem;
+      const { sections, recentFacts, affinity, user } = mem;
       const manifest = {
-        coreFacts: coreFacts?.slice(-5) || [],
+        coreFacts: Object.values(sections || {}).flat().slice(-5),
         recentFacts: recentFacts?.slice(-3) || [],
         affinity: affinity?.score || 0,
         userName: user?.nickname || user?.name,

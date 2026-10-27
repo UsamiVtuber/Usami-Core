@@ -71,13 +71,13 @@ export function createMemoryService({ memoryStore }) {
   return {
     load: () => memoryStore.load(),
     save: (data) => memoryStore.save(data),
-    getCoreFacts: () => memoryStore.getCoreFacts(),
+    getSections: () => memoryStore.getSections(),
     getRecentFacts: (nowIso) => memoryStore.getRecentFacts(nowIso),
     getTodayHistory: (day) => memoryStore.getTodayHistory(day),
     getAffinity: () => memoryStore.getAffinity(),
     appendHistory: (role, content, timestamp) => memoryStore.appendHistory(role, content, timestamp),
-    addCoreFact: (fact) => memoryStore.addCoreFact(fact),
-    addRecentFact: (fact, ttlDays) => memoryStore.addRecentFact(fact, ttlDays),
+    addCoreFact: (fact, section) => memoryStore.addCoreFact(fact, section),
+    addRecentFact: (fact, ttlDays, section) => memoryStore.addRecentFact(fact, ttlDays, section),
     setAffinity: (score, day) => memoryStore.setAffinity(score, day),
     getAll: () => memoryStore.getAll(),
   };

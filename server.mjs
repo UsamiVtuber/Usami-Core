@@ -9,7 +9,7 @@ import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { extractJsonCandidate } from './src/json-salvage.js';
 import { extractSpeechTags } from './src/speech-tags.js';
-import { createMemoryStore } from './src/memory-store.js';
+import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -326,12 +326,25 @@ export function withCapabilities(system, capabilities) {
   return system + ' Capabilidades disponíveis neste modelo: ' + JSON.stringify(capabilities) + '.';
 }
 
-// Fato "remember" do schema da persona: string curta e útil, ou null.
+// Fato "remember" do schema da persona: string (v1) ou {fact, section}.
+// A string antiga ainda é aceita e cai em "other" — o modelo às vezes ignora
+// o formato novo, e perder o fato seria pior que perdê-lo sem seção.
 function normalizeRemember(value) {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') return null;
-  return trimmed.slice(0, 300);
+  const cleanFact = (fact) => {
+    if (typeof fact !== 'string') return null;
+    const trimmed = fact.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') return null;
+    return trimmed.slice(0, 300);
+  };
+  if (typeof value === 'string') {
+    const fact = cleanFact(value);
+    return fact ? { fact, section: 'other' } : null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const fact = cleanFact(value.fact);
+  if (!fact) return null;
+  const section = MEMORY_SECTIONS.includes(value.section) ? value.section : 'other';
+  return { fact, section };
 }
 
 // Teto do reply exibido no chat: falas viram balões curtos (decisão do
@@ -547,7 +560,7 @@ export function createChatHandler(options = {}) {
     const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
     let system = buildPersona({
       affinity: mem.affinity.score,
-      coreFacts: mem.coreFacts,
+      sections: memoryStore.getSections(),
       recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
       history: memoryStore.getTodayHistory(today),
       username: mem.user.nickname || 'você',
@@ -720,8 +733,8 @@ export function createChatHandler(options = {}) {
     try {
       const remember = parsed.remember;
       if (remember) {
-        if (DURABLE_FACT.test(remember)) memoryStore.addCoreFact(remember);
-        else memoryStore.addRecentFact(remember);
+        if (DURABLE_FACT.test(remember.fact)) memoryStore.addCoreFact(remember.fact, remember.section);
+        else memoryStore.addRecentFact(remember.fact, 7, remember.section);
       }
       const turnTimestamp = new Date().toISOString();
       memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
@@ -966,6 +979,130 @@ export function createRagContextHandler(options = {}) {
       hasContext: Boolean(context),
       source: 'vault-obsidian',
     });
+  };
+}
+
+// --- Memória: inspeção e exclusão granular ---------------------------------
+
+// Snapshot para a UI: fatos por seção, recentes, resumos, dias de histórico e
+// afinidade. O conteúdo das mensagens não sai daqui — a aba só precisa do que
+// dá para apagar.
+function memorySnapshot(store, nowIso = new Date().toISOString()) {
+  const data = store.getAll();
+  return {
+    version: data.version,
+    user: { name: data.user.name, nickname: data.user.nickname, createdAt: data.user.createdAt },
+    sections: store.getSections(),
+    recentFacts: data.recentFacts.map((item) => ({ ...item, expired: item.expiresAt <= nowIso })),
+    summaries: store.getSummaries(),
+    history: Object.entries(data.dailyHistory)
+      .filter(([, messages]) => messages.length)
+      .map(([date, messages]) => ({ date, count: messages.length }))
+      .sort((a, b) => (a.date < b.date ? -1 : 1)),
+    affinity: store.getAffinity(),
+  };
+}
+
+const FORGET_CONFIRMATION = 'APAGAR';
+const FORGET_KINDS = new Set(['fact', 'recent', 'section', 'summary', 'history', 'all']);
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export function createMemoryHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.memoryStore || installMemoryStore;
+
+  return async function handleMemory(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    if (req.method === 'GET' && req.url === '/api/memory') {
+      return send(200, { ok: true, memory: memorySnapshot(store) });
+    }
+
+    if (req.method !== 'POST' || req.url !== '/api/memory/forget') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    let body = '';
+    let tooLarge = false;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 8192) {
+        tooLarge = true;
+        break;
+      }
+    }
+    if (tooLarge) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+
+    const kind = payload?.kind;
+    if (!FORGET_KINDS.has(kind)) {
+      return send(400, { error: 'Tipo inválido. Use fact, recent, section, summary, history ou all.' });
+    }
+    // Confirmação escrita: nada é apagado sem o token exato no corpo.
+    if (String(payload.confirm ?? '').trim().toUpperCase() !== FORGET_CONFIRMATION) {
+      return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
+    }
+
+    let removed = 0;
+    switch (kind) {
+      case 'fact': {
+        if (!MEMORY_SECTIONS.includes(payload.section)) return send(400, { error: 'Seção inválida.' });
+        if (typeof payload.fact !== 'string' || !payload.fact.trim()) return send(400, { error: 'Fato ausente.' });
+        removed = store.deleteFact(payload.section, payload.fact) ? 1 : 0;
+        break;
+      }
+      case 'recent': {
+        if (typeof payload.fact !== 'string' || !payload.fact.trim()) return send(400, { error: 'Fato ausente.' });
+        removed = store.deleteRecentFact(payload.fact) ? 1 : 0;
+        break;
+      }
+      case 'section': {
+        if (!MEMORY_SECTIONS.includes(payload.section)) return send(400, { error: 'Seção inválida.' });
+        removed = store.clearSection(payload.section);
+        break;
+      }
+      case 'summary': {
+        if (!DATE_PATTERN.test(String(payload.date ?? ''))) return send(400, { error: 'Data inválida (YYYY-MM-DD).' });
+        removed = store.deleteSummary(payload.date) ? 1 : 0;
+        break;
+      }
+      case 'history': {
+        if (payload.date !== undefined) {
+          if (!DATE_PATTERN.test(String(payload.date))) return send(400, { error: 'Data inválida (YYYY-MM-DD).' });
+          removed = (store.getAll().dailyHistory[payload.date] || []).length;
+          store.clearTodayHistory(payload.date);
+        } else {
+          removed = store.clearAllHistory();
+        }
+        break;
+      }
+      case 'all': {
+        store.reset();
+        break;
+      }
+    }
+
+    return send(200, { ok: true, forgotten: kind, removed, memory: memorySnapshot(store) });
   };
 }
 
@@ -1884,6 +2021,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleStt = createSttHandler();
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
+  const handleMemory = createMemoryHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const server = createServer((req, res) => {
@@ -1894,6 +2032,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
+    if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
     if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'

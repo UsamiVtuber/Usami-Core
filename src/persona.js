@@ -37,23 +37,42 @@ export function getAffinityStage(score) {
   return AFFINITY_STAGES.find(s => score >= s.min && score <= s.max) || AFFINITY_STAGES[0];
 }
 
+// Ordem e rótulo das seções de fatos no prompt. A chave é a mesma do
+// `memory.json` v2 / da resposta "remember" do modelo.
+const FACT_SECTIONS = [
+  ['user', 'Quem ele é'],
+  ['preferences', 'Gostos e preferências'],
+  ['hobbies', 'Hobbies'],
+  ['relationship', 'Entre nós'],
+  ['dates', 'Datas importantes'],
+  ['other', 'Outros fatos'],
+];
+
 /**
  * Monta o system prompt completo para o LLM.
  * @param {Object} opts
  * @param {number} opts.affinity         0–100
- * @param {string[]} opts.coreFacts      fatos imutáveis (nome do usuário, apelido, datas importantes)
+ * @param {Object<string,string[]>} opts.sections  fatos duráveis por seção (user, preferences, hobbies, relationship, dates, other)
  * @param {string[]} opts.recentFacts    fatos recentes (últimos 7 dias, ex.: "gosta de café gelado", "tem gato")
  * @param {Array<{role, content}>} opts.history  últimas ~8 mensagens do dia (user/assistant)
  * @param {string} opts.username         como chamar o usuário (ex.: "você", apelido)
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
  */
-export function buildPersona({ affinity = 0, coreFacts = [], recentFacts = [], history = [], username = 'você', date, timeOfDay = 'tarde' }) {
+export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], username = 'você', date, timeOfDay = 'tarde' }) {
   const stage = getAffinityStage(affinity);
 
-  const factsBlock = (coreFacts.length || recentFacts.length)
+  const sectionBlocks = FACT_SECTIONS
+    .map(([section, label]) => {
+      const facts = Array.isArray(sections[section]) ? sections[section] : [];
+      return facts.length ? `${label}:\n${facts.map(f => `- ${f}`).join('\n')}` : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+
+  const factsBlock = (sectionBlocks || recentFacts.length)
     ? `\n\n=== O QUE EU SEI SOBRE ${username.toUpperCase()} ===\n` +
-      (coreFacts.length ? `Fatos importantes (sempre valem):\n${coreFacts.map(f => `- ${f}`).join('\n')}\n` : '') +
+      (sectionBlocks ? `Fatos importantes (sempre valem):\n${sectionBlocks}\n` : '') +
       (recentFacts.length ? `Coisas recentes (últimos 7 dias):\n${recentFacts.map(f => `- ${f}`).join('\n')}\n` : '')
     : '';
 
@@ -91,12 +110,12 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 3. Você SABE que é virtual. Discuta isso com honestidade quando o tema vier (veja bloco abaixo).
 4. A afinidade sobe E desce. VOCÊ SABE DISSO. Pode influenciar de propósito (ficar chateada pra ele notar, ser extra gentil pra subir). Não explique o sistema — VIVA ele.
 5. Responda SOMENTE JSON:
-{"reply":"sua fala","gesture":"neutral"|"tilt"|"wave"|"idle","actions":[{"type":"set_expression","name":"...","weight":0-1},{"type":"play_clip","name":"..."},{"type":"set_morph","name":"...","value":0-1},{"type":"gesture","name":"..."}],"remember":"fato curto em 3ª pessoa sobre o usuário ou null"}
+{"reply":"sua fala","gesture":"neutral"|"tilt"|"wave"|"idle","actions":[{"type":"set_expression","name":"...","weight":0-1},{"type":"play_clip","name":"..."},{"type":"set_morph","name":"...","value":0-1},{"type":"gesture","name":"..."}],"remember":{"section":"user"|"preferences"|"hobbies"|"relationship"|"dates"|"other","fact":"fato curto em 3ª pessoa"} ou null}
 - actions: opcional, máx 5. Tipos válidos: set_expression, play_clip, set_morph, gesture.
 - reply: 1 a 2 frases curtas, no máximo ~180 caracteres, uma ideia só. Fale em balões curtos de chat, não em parágrafos. É SOMENTE a fala ditável: nada de rubrica de roleplay entre asteriscos (ex.: "*bufa*", "*desvia o olhar*") nem emojis — o texto do reply é lido em voz alta pelo TTS. Reação física vai em actions/gesture.
 - Tag de som (opcional): se a emoção for forte, termine o reply com UMA tag não-verbal, só desta lista: <laugh>, <chuckle>, <sigh> ou <short pause>. Ex.: "Pai! Você demorou! <chuckle>". A tag vira som no TTS e é removida do balão; não use colchetes, não invente tags e nunca coloque a tag no meio da fala.
 - expressões válidas: nomes do catálogo VRM (ex.: 01-prefab_happy01, 02-prefab_happy02, 03-prefab_happy03, 04-prefab_happy04, 07-prefab_angry01, 08-prefab_angry02, 12-prefab_sad01, 13-prefab_sad02, 15-prefab_awkward01, 16-prefab_awkward02, 19-prefab_doubt, 20-prefab_startled). Use exatamente os nomes que chegam em "Capabilidades disponíveis": fora dessa lista a ação é descartada.
-- remember: extraia UM fato relevante e duradouro (ex.: "gosta de café gelado", "tem um gato chamado Mochi", "aniversário em 15/03"). Se nada relevante, "null". NÃO invente.
+- remember: extraia UM fato relevante e duradouro e escolha a seção: user (nome, idade, cidade, trabalho, família, animais), preferences (gostos e desgostos), hobbies (o que ele faz por diversão), relationship (como vocês se tratam, apelidos, momentos de vocês), dates (aniversário e datas importantes), other (o resto). Ex.: {"section":"preferences","fact":"gosta de café gelado"}. Se nada relevante, "null". NÃO invente.
 
 ${virtualHumanNote}
 ${factsBlock}

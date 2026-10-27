@@ -483,6 +483,155 @@ function BondMeters({ intimacy, values }) {
   </div>;
 }
 
+// Rótulos da memória v2 (as chaves são as mesmas do memory.json e do prompt).
+const MEMORY_SECTION_LABELS = {
+  user: 'Quem ele é',
+  preferences: 'Gostos e preferências',
+  hobbies: 'Hobbies',
+  relationship: 'Entre nós',
+  dates: 'Datas importantes',
+  other: 'Outros',
+};
+
+const FORGET_CONFIRMATION = 'APAGAR';
+
+function MemoryPanel() {
+  const [memory, setMemory] = useState(null);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState('');
+  const [confirmText, setConfirmText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const unlocked = confirmText.trim().toUpperCase() === FORGET_CONFIRMATION;
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/api/memory');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Falha ao ler a memória.');
+      setMemory(data.memory);
+      setError(null);
+    } catch (cause) {
+      setError(cause?.message || 'Falha ao ler a memória.');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const forget = useCallback(async (payload, label) => {
+    if (!unlocked || busy) return;
+    setBusy(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/memory/forget', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, confirm: confirmText.trim() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Falha ao apagar.');
+      setMemory(data.memory);
+      setError(null);
+      setNotice(label + ' apagado.');
+    } catch (cause) {
+      setError(cause?.message || 'Falha ao apagar.');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, confirmText, unlocked]);
+
+  if (!memory) {
+    return error
+      ? <p className="memory-error">{error}</p>
+      : <p className="settings-hint">Lendo a memória da Usami…</p>;
+  }
+
+  const totalFacts = Object.values(memory.sections).reduce((count, facts) => count + facts.length, 0);
+  const deleteButton = (onClick, label) => (
+    <button
+      disabled={!unlocked || busy}
+      onClick={onClick}
+      aria-label={label}
+      title={unlocked ? label : 'Digite APAGAR para liberar as exclusões'}
+    >×</button>
+  );
+
+  return <div>
+    <h3>O que ela guardou</h3>
+    <p className="settings-hint">
+      {totalFacts} fato(s) durável(is) · {memory.recentFacts.length} recente(s) · {memory.summaries.length} resumo(s) · afinidade {memory.affinity.score}/100.
+      Tudo fica no <code>memory.json</code> do servidor local.
+    </p>
+
+    <label className="settings-label">Digite APAGAR para liberar as exclusões
+      <input
+        value={confirmText}
+        onChange={(event) => setConfirmText(event.target.value)}
+        placeholder={FORGET_CONFIRMATION}
+        autoComplete="off"
+        spellCheck={false}
+      />
+    </label>
+    <p className="settings-hint">Sem a palavra, nenhum botão apaga. As exclusões são imediatas e não têm desfazer.</p>
+
+    {Object.entries(MEMORY_SECTION_LABELS).map(([section, label]) => {
+      const facts = memory.sections[section] || [];
+      if (!facts.length) return null;
+      return <div className="memory-section" key={section}>
+        <h3>{label}</h3>
+        <ul className="memory-list">
+          {facts.map((fact) => <li key={fact}>
+            <span>{fact}</span>
+            {deleteButton(() => forget({ kind: 'fact', section, fact }, 'Fato'), 'Apagar fato: ' + fact)}
+          </li>)}
+        </ul>
+      </div>;
+    })}
+    {!totalFacts ? <p className="memory-empty">Nenhum fato duradouro ainda.</p> : null}
+
+    {memory.recentFacts.length ? <div className="memory-section">
+      <h3>Recentes (7 dias)</h3>
+      <ul className="memory-list">
+        {memory.recentFacts.map((item) => <li key={item.fact}>
+          <span>{item.fact}<small>{MEMORY_SECTION_LABELS[item.section]} · até {item.expiresAt}{item.expired ? ' (expirado)' : ''}</small></span>
+          {deleteButton(() => forget({ kind: 'recent', fact: item.fact }, 'Fato recente'), 'Apagar fato recente: ' + item.fact)}
+        </li>)}
+      </ul>
+    </div> : null}
+
+    {memory.summaries.length ? <div className="memory-section">
+      <h3>Resumos diários</h3>
+      <ul className="memory-list">
+        {memory.summaries.map((item) => <li key={item.date}>
+          <span>{item.summary}<small>{item.date}</small></span>
+          {deleteButton(() => forget({ kind: 'summary', date: item.date }, 'Resumo de ' + item.date), 'Apagar resumo de ' + item.date)}
+        </li>)}
+      </ul>
+    </div> : null}
+
+    {memory.history.length ? <div className="memory-section">
+      <h3>Histórico de conversa</h3>
+      <ul className="memory-list">
+        {memory.history.map((item) => <li key={item.date}>
+          <span>{item.date}<small>{item.count} mensagem(ns) guardada(s)</small></span>
+          {deleteButton(() => forget({ kind: 'history', date: item.date }, 'Histórico de ' + item.date), 'Apagar histórico de ' + item.date)}
+        </li>)}
+      </ul>
+    </div> : null}
+
+    {notice ? <p className="memory-notice">{notice}</p> : null}
+    {error ? <p className="memory-error">{error}</p> : null}
+
+    <div className="rig-actions memory-actions">
+      <button
+        className="memory-danger"
+        disabled={!unlocked || busy}
+        onClick={() => forget({ kind: 'all' }, 'Toda a memória')}
+      >Apagar tudo</button>
+    </div>
+    <p className="settings-hint">O histórico do navegador (aba Conversa) é separado disso.</p>
+  </div>;
+}
+
 export function Usami() {
   const [source, setSource] = useState('/models/shiro.vrm');
   const [sourceType, setSourceType] = useState('gltf');
@@ -1071,7 +1220,7 @@ export function Usami() {
           <button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button>
         </div>
         <div className="panel-tabs" role="tablist">
-          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
+          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['memory', 'Memória'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
         </div>
         <div className="panel-content" role="tabpanel">
           {settingsTab === 'chat' && <div>
@@ -1142,6 +1291,7 @@ export function Usami() {
               </>}
             </>}
           </div>}
+          {settingsTab === 'memory' && <MemoryPanel />}
           {settingsTab === 'about' && <div>
             <h3>Usami Companion</h3>
             <p>Versão 0.1.0 — companion com avatar 3D/Live2D e voz própria.</p>

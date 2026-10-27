@@ -37,6 +37,12 @@ Usuário escolheu um HUD minimalista, baseado no mock de referência: sem texto 
 - A boca do VRM é escrita pelo `vrm.expressionManager` (`aa/ih/ou/ee/oh`), nunca em `morphTargetInfluences` direto: `VRMExpressionManager.update()`, dentro de `vrm.update(delta)`, zera toda expressão a cada frame e apagaria o visema. Escrita bruta em morphs continua apenas como fallback para GLB/FBX sem expressionManager.
 - As `expressions` enviadas ao servidor passam por `curateExpressions` antes do corte de 20 nomes: na ordem crua do shiro os 13 presets (visemas, blink, look) ocupavam a lista e os prefabs de emoção eram filtrados em silêncio por `filterActionsByCatalog`.
 
+## Memória (decisão do usuário)
+
+- Fatos duráveis moram em seções fixas: `user`, `preferences`, `hobbies`, `relationship`, `dates`, `other` (`src/memory-store.js`, `memory.json` v2). O modelo devolve `remember: {section, fact}`; string antiga ou seção inventada cai em `other`. A migração v1 → v2 nunca perde fato e não reescreve o disco no load.
+- Exclusão é granular e sempre exige confirmação escrita (`APAGAR`) no corpo de `POST /api/memory/forget`; a aba **Memória** do painel só habilita os botões depois que a palavra é digitada. Não trocar por `confirm()` do navegador.
+- Resumos diários em background, consolidação de fatos e busca FTS5 no vault estão decididos para as próximas fases e **ainda não implementados**. O campo `summaries` já existe no schema, mas fica vazio até a Fase 1 — não descrever como pronto.
+
 ## Chamadas NVIDIA (por que a Usami "não reage")
 
 - Toda chamada que pede JSON usa `sharedClient.chatJson` (`response_format: json_object`) e `jsonText`: o NEMOTRON escreve o raciocínio em `reasoning_content`, mas quando esse raciocínio estoura o orçamento ele **transborda para `content` e o JSON nunca nasce** — a resposta vem como prosa ("The user wants me to create animation actions...") e as `actions` voltam `[]`. Com `json_object` o modelo vai direto ao JSON (3–12 s, contra 19 s medidos). `chat_template_kwargs.enable_thinking` deixa de pensar mas fica mais lento, e `thinking_cost` é recusado (400) — não tentar de novo.

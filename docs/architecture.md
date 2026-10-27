@@ -26,9 +26,10 @@ Node API (127.0.0.1:8787)
  ├─ POST /api/ingest → pipeline Python de ficha de tutorial (FFmpeg + Whisper)
  ├─ GET/POST /api/technique[s] + /api/technique/note → base de técnicas
  ├─ POST /api/plan → planner de animação (determinístico, sem LLM)
+ ├─ GET/POST /api/memory + POST /api/memory/forget → memória v2 (seções, exclusão com confirmação)
  └─ GET /api/learning + POST /api/learning/verdict → memória de aprendizagem
         │
-        ├─ data/memory.json            memória e afinidade conversacionais
+        ├─ data/memory.json            memória e afinidade (v2: fatos por seção, recentes, resumos)
         ├─ data/techniques/*.json      técnicas validadas (fonte da verdade)
         ├─ data/techniques-index.sqlite  índice derivado, descartável
         ├─ data/learning.json            histórico de tentativas por técnica

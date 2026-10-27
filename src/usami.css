@@ -42,3 +42,19 @@ header,.controls{z-index:3}.scrim{z-index:7}
 .panel-content{overflow-y:auto;max-height:calc(100% - 120px)}
 .panel-footer{margin-top:24px;padding-top:16px;border-top:1px solid #ffffff1a}
 aside ul{padding-left:18px;margin:10px 0;color:#c5b8c7;font-size:13px;line-height:1.7}
+
+/* Aba Memória: fatos por seção, recentes, resumos e exclusão granular */
+.memory-section{margin-top:18px}.memory-section h3{margin:0 0 8px}
+.memory-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px}
+.memory-list li{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;font-size:12px;line-height:1.45;color:#e7dfea;background:#ffffff0a;border:1px solid #ffffff14;border-radius:9px;padding:8px 10px}
+.memory-list li>span{flex:1;min-width:0;overflow-wrap:anywhere}
+.memory-list small{display:block;margin-top:3px;font-size:10px;color:#a79aad}
+.memory-list button{border:0;background:transparent;color:#d3a3e4;border-radius:6px;padding:2px 6px;line-height:1.2;font-size:14px}
+.memory-list button:hover:not(:disabled){background:#ffffff14;color:#fff}
+.memory-list button:disabled{opacity:.3;cursor:not-allowed}
+.memory-empty{font-size:12px;color:#9f97a3;margin:8px 0 0}
+.memory-actions{margin-top:18px}
+.rig-actions .memory-danger{background:#5a2330;border-color:#e5484d66;color:#ffdfe3}
+.rig-actions .memory-danger:disabled{opacity:.4;cursor:not-allowed}
+.memory-notice{margin-top:10px;font-size:11px;color:#9be3c2}
+.memory-error{margin-top:10px;font-size:11px;color:#ffb3b8;line-height:1.5}
