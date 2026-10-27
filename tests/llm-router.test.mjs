@@ -138,6 +138,35 @@ test('generateReplyWithActions: repassa model/messages/temperature/max_tokens ao
   ]);
 });
 
+// --- knob de raciocínio (NVIDIA_LLM_THINKING) ------------------------------
+//
+// O raciocínio é o que domina o turno (medido: 23,8s/527 tokens com thinking,
+// 2,2s/72 sem), mas a comparação de fala ainda não foi feita — então o padrão é
+// o comportamento de sempre e o desligamento é knob de teste, lido por chamada.
+
+async function callWithThinkingEnv(value) {
+  const previous = process.env.NVIDIA_LLM_THINKING;
+  if (value === undefined) delete process.env.NVIDIA_LLM_THINKING;
+  else process.env.NVIDIA_LLM_THINKING = value;
+  const client = fakeClient({ result: { content: '{"reply":"oi"}', reasoning: '', finishReason: 'stop' } });
+  try {
+    await withFakeKey(() => generateReplyWithActions('SYSTEM', 'usuário', { client }));
+  } finally {
+    if (previous === undefined) delete process.env.NVIDIA_LLM_THINKING;
+    else process.env.NVIDIA_LLM_THINKING = previous;
+  }
+  return client.calls[0].extra;
+}
+
+test('thinking: sem o knob o extra é null (raciocínio ligado, como sempre foi)', async () => {
+  assert.equal(await callWithThinkingEnv(undefined), null);
+  assert.equal(await callWithThinkingEnv('on'), null);
+});
+
+test('thinking: NVIDIA_LLM_THINKING=off manda enable_thinking false no corpo', async () => {
+  assert.deepEqual(await callWithThinkingEnv('off'), { chat_template_kwargs: { enable_thinking: false } });
+});
+
 test('generateReplyWithActions: defaults de temperatura e orçamento de tokens', async () => {
   const client = fakeClient({ result: { content: '{"reply":"oi"}' } });
   await withFakeKey(() => generateReplyWithActions('s', 'u', { client }));

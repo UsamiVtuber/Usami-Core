@@ -30,6 +30,20 @@ const CLASSIFICATION_MODEL = envOr('NVIDIA_CLASSIFICATION_MODEL', DEFAULT_CLASSI
 const GENERATION_MODEL = envOr('NVIDIA_GENERATION_MODEL', DEFAULT_GENERATION_MODEL);
 const ANIMATION_MODEL = envOr('NVIDIA_ANIMATION_MODEL', DEFAULT_ANIMATION_MODEL);
 
+// O raciocínio do nemotron é o que domina o turno. No MESMO prompt de fala+ações:
+// 23,0s/515 tokens, 9,0s/356 e 23,8s/527 com thinking; 1,35s/53, 5,5s/57 e
+// 2,2s/72 com `enable_thinking: false` (JSON válido nos seis casos). No diretor de
+// animação: 32,1s/428 -> 9,6s/21. Documentado na referência do modelo; a doc avisa
+// que em alguns modelos hospedados a chave não tem efeito — aqui tem, medido.
+// O cinto continua sendo o max_tokens de cada chamada (500/900/1100), então o
+// padrão é o comportamento de sempre. NVIDIA_LLM_THINKING=off desliga o raciocínio
+// para comparar latência e fala sem mexer em código — lido por chamada, então
+// val = 'off' na API já vale para os turnos seguintes.
+const NO_THINKING = { chat_template_kwargs: { enable_thinking: false } };
+function llmExtra() {
+  return process.env.NVIDIA_LLM_THINKING === 'off' ? NO_THINKING : null;
+}
+
 // Prompt do classificador: devolve JSON com emoção + AUs FACS + confiança.
 const CLASSIFICATION_SYSTEM = `Você é um classificador de emoção e expressão facial para um avatar virtual (VRM "Shiro").
 Analise a frase do USUÁRIO e devolva SOMENTE JSON:
@@ -79,6 +93,7 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
       temperature: 0.2,
       // Orçamento p/ o preâmbulo de raciocínio do modelo; 200 morria antes do JSON.
       max_tokens: 500,
+      extra: llmExtra(),
     });
     const parsed = parseJsonSafe(jsonText(answer, 'emotion'), { label: 'de classificação', answer });
     return {
@@ -127,6 +142,7 @@ export async function generateReplyWithActions(
     messages,
     temperature,
     max_tokens: maxTokens,
+    extra: llmExtra(),
   });
   // Texto cru, como generateReply: parse e fallback OpenRouter são do chamador.
   return jsonText(answer, 'reply');
@@ -150,6 +166,7 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
       // O diretor de animação raciocina antes de devolver o JSON: com 300
       // tokens o texto morria no raciocínio e as actions voltavam vazias.
       max_tokens: 900,
+      extra: llmExtra(),
     });
     const parsed = parseJsonSafe(jsonText(answer, 'actions'), { label: 'de animação', answer });
     const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
