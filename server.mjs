@@ -723,7 +723,8 @@ export function createChatHandler(options = {}) {
 
     const totalMs = now() - chatStartedAt;
     stageTimes.total = totalMs;
-    console.log('[chat] llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
+    console.log('[chat] inicio=' + chatStartedAt + ' fim=' + now()
+      + ' llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
       + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source
       + (nvidiaFailed && parsed.source !== 'nvidia' ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 

@@ -63,3 +63,30 @@ test('chatJson: pede response_format json_object e devolve content, reasoning e 
     else process.env.NVIDIA_API_KEY = envKey;
   }
 });
+
+test('extra: chatJson repassa chat_template_kwargs para o corpo da requisição', async () => {
+  const envKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'chave-de-teste';
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }) };
+  };
+  try {
+    const client = new NvidiaClient({ rateLimiter: createRateLimiter({ rateLimit: 50, windowMs: 1000 }) });
+    await client.chatJson({
+      model: 'm', messages: [{ role: 'user', content: 'oi' }],
+      extra: { chat_template_kwargs: { enable_thinking: false } },
+    });
+    assert.deepEqual(bodies[0].chat_template_kwargs, { enable_thinking: false });
+    assert.equal(bodies[0].response_format.type, 'json_object', 'extra nao deve substituir o response_format');
+
+    await client.chatJson({ model: 'm', messages: [{ role: 'user', content: 'oi' }] });
+    assert.equal('chat_template_kwargs' in bodies[1], false, 'sem extra o corpo fica como sempre foi');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (envKey === undefined) delete process.env.NVIDIA_API_KEY;
+    else process.env.NVIDIA_API_KEY = envKey;
+  }
+});

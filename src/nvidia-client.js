@@ -93,10 +93,11 @@ export class NvidiaClient {
     this.timeoutMs = timeoutMs;
   }
 
-  async chatCompletions({ model, messages, temperature = 0.7, max_tokens = 320, response_format = null }) {
+  async chatCompletions({ model, messages, temperature = 0.7, max_tokens = 320, response_format = null, extra = null }) {
     const key = await resolveApiKey();
     if (!key) throw new Error('NVIDIA_API_KEY não configurada (defina NVIDIA_API_KEY ou A:\\.env)');
 
+    const requestedAt = Date.now();
     await this.rateLimiter.waitForSlot();
 
     const body = {
@@ -106,10 +107,22 @@ export class NvidiaClient {
       max_tokens,
     };
     if (response_format) body.response_format = response_format;
+    // Pass-through para controles do próprio provedor (orçamento de raciocínio,
+    // chat_template_kwargs). Só para medição por enquanto; o motivo é o decode
+    // dominar llmMs (~11,5s de 17,9s medidos em 335 tokens de saída).
+    if (extra) Object.assign(body, extra);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
+    // [llm] por chamada: separa "espera do provedor" de "custo de geração".
+    // Sem o usage não há como dizer se um 16s é fila até o primeiro token ou
+    // tokens de raciocínio — são alavancas diferentes.
+    const startedAt = Date.now();
+    const waitedSlotMs = startedAt - requestedAt;
+    let status = 0;
+    let finishReason = '-';
+    let usage = null;
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -121,6 +134,7 @@ export class NvidiaClient {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      status = response.status;
 
       if (!response.ok) {
         const text = await response.text().catch(() => '');
@@ -128,9 +142,20 @@ export class NvidiaClient {
       }
 
       const data = await response.json();
+      usage = data?.usage ?? null;
+      finishReason = data?.choices?.[0]?.finish_reason ?? '-';
       return data;
     } finally {
       clearTimeout(timeoutId);
+      const httpMs = Date.now() - startedAt;
+      console.log('[llm] ' + model
+        + ' inicio=' + requestedAt + ' fim=' + Date.now()
+        + ' espera-fila=' + waitedSlotMs + 'ms http=' + httpMs + 'ms'
+        + ' status=' + status + ' finish=' + finishReason
+        + ' entrada=' + (usage?.prompt_tokens ?? '-')
+        + ' saida=' + (usage?.completion_tokens ?? '-')
+        + ' raciocinio=' + (usage?.completion_tokens_details?.reasoning_tokens ?? '-')
+        + ' max_tokens=' + max_tokens + ' json=' + (response_format ? 'sim' : 'nao'));
     }
   }
 
@@ -144,10 +169,11 @@ export class NvidiaClient {
   // tokens ele transborda para `content` e o JSON nunca nasce — com
   // response_format o modelo vai direto ao JSON (11.7s vs 19.4s medidos).
   // Retorna os três campos para o chamador poder resgatar o JSON do raciocínio.
-  async chatJson({ model, messages, temperature = 0.7, max_tokens = 320 }) {
+  async chatJson({ model, messages, temperature = 0.7, max_tokens = 320, extra = null }) {
     const data = await this.chatCompletions({
       model, messages, temperature, max_tokens,
       response_format: { type: 'json_object' },
+      extra,
     });
     const choice = data?.choices?.[0];
     const message = choice?.message || {};
