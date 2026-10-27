@@ -65,7 +65,7 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
         applied = true;
       }
     } else if (verb === 'gesture') {
-      const name = GESTURE_NAMES.includes(action?.name) ? action.name : null;
+      const name = typeof action?.name === 'string' ? action.name : '';
       // O manifesto diz o que este modelo consegue; sem lista de gestos, vale o legado.
       const known = new Set([
         ...(manifest.customTilt !== false ? ['tilt'] : []),
