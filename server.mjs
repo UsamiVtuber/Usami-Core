@@ -113,15 +113,21 @@ function queueAvatarCommand(cmd) {
 // o gesto pela fila de comandos (o cliente consome em poll de 2 s). Troca ~4 s
 // de latência por um gesto que chega no meio da frase — sem ação nenhuma era o
 // resultado de antes quando o plano demorava.
+// Decisão de timing: como o refino nunca está no caminho do balão, ele NÃO
+// contribui para animationMs/totalMs do turno. Medimos a duração própria aqui,
+// no log, para continuar visível sem o chat esperar por ele.
 export async function refineAnimationInBackground(reply, capabilities, { planner = planAnimation } = {}) {
+  const startedAt = Date.now();
   try {
     const { actions } = await planner(reply, capabilities, { temperature: 0.3 });
     const queued = filterActionsByCatalog(actions ?? [], capabilities)
       .map(action => queueAvatarCommand(action))
       .filter(Boolean).length;
-    console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila');
+    console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila em '
+      + (Date.now() - startedAt) + 'ms (fora do totalMs do turno)');
   } catch (error) {
-    console.warn('[animacao] refino em background falhou:', describeFetchError(error));
+    console.warn('[animacao] refino em background falhou após ' + (Date.now() - startedAt)
+      + 'ms: ' + describeFetchError(error));
   }
 }
 
@@ -160,9 +166,25 @@ const flowExecutor = createFlowExecutor({ services, config: {} });
 
 // --- Webhook de saída: Usami → n8n -----------------------------------------
 
-// Endereço do webhook genérico do n8n local. Fire-and-forget: nunca derruba
-// o chat se o n8n estiver indisponível.
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/usami-events';
+// Endereço do webhook do n8n. Fire-and-forget: nunca derruba o chat se o n8n
+// estiver indisponível. A resolução vem do environment OU do .env do projeto,
+// porque nada popula process.env a partir dele — o mesmo caminho usado para a
+// chave NVIDIA. Sem isso, o default `localhost:5678` sempre vence e o evento
+// vai para lugar nenhum (a stack do Windows está desligada; o n8n real é o do
+// Nyarch, e o `WEBHOOK_URL` do compose dele é http://10.42.0.1:5678).
+function resolveN8nWebhookUrl() {
+  if (process.env.N8N_WEBHOOK_URL) return process.env.N8N_WEBHOOK_URL;
+  try {
+    const text = readFileSync(process.env.USAMI_KEYS_FILE || 'A:/Usami Project/.env', 'utf8');
+    const match = text.match(/^N8N_WEBHOOK_URL\s*=\s*(.+)$/m);
+    if (match) return match[1].trim();
+  } catch {
+    // arquivo ausente ou ilegível → mantém o default local
+  }
+  return 'http://localhost:5678/webhook/usami-events';
+}
+
+const N8N_WEBHOOK_URL = resolveN8nWebhookUrl();
 
 export async function sendToN8nWebhook(eventType, payload) {
   try {
@@ -513,12 +535,27 @@ export function createChatHandler(options = {}) {
 
     // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
     // otimização vira chute. Um log por turno basta para ver quem manda.
+    // As etapas SOMAM (+=): com o fallback NVIDIA→OpenRouter a tentativa do
+    // NVIDIA (inclusive o tempo gasto até ela falhar) entra em llmMs junto da
+    // chamada que produziu a resposta — o fallback fica visível, nunca escondido.
     const stageTimes = { context: 0, llm: 0, animation: 0, total: 0 };
     let stageAt = chatStartedAt;
+    let nvidiaFailed = false;
     const mark = key => {
       const at = now();
-      stageTimes[key] = at - stageAt;
+      stageTimes[key] += at - stageAt;
       stageAt = at;
+    };
+    // Mede a chamada ao provedor diretamente (não o vão entre marks): o
+    // `finally` conta também a tentativa que lança — é o custo do fallback.
+    const timeStage = async (key, fn) => {
+      const startedAt = now();
+      try {
+        return await fn();
+      } finally {
+        stageTimes[key] += now() - startedAt;
+        stageAt = now();
+      }
     };
     mark('context');
 
@@ -531,12 +568,11 @@ export function createChatHandler(options = {}) {
         // do rate limiter de 40 req/min.
         classificationPending = classifyUserMessage(parsedBody.message).catch(() => null);
 
-        const rawReply = await generateReplyWithActions(
+        const rawReply = await timeStage('llm', () => generateReplyWithActions(
           withCapabilities(system, capabilities),
           parsedBody.message,
           { temperature: 0.7 },
-        );
-        mark('llm');
+        ));
 
         const parsedReply = parseProviderRaw(rawReply);
         if (!parsedReply.ok) throw new Error(parsedReply.error);
@@ -558,6 +594,7 @@ export function createChatHandler(options = {}) {
           source: 'nvidia',
         };
       } catch (error) {
+        nvidiaFailed = true;
         console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
         // Fallback para OpenRouter abaixo
       }
@@ -597,12 +634,12 @@ export function createChatHandler(options = {}) {
       } else {
         let response;
         try {
-          response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+          response = await timeStage('llm', () => fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
             signal: AbortSignal.timeout(45000),
-          });
+          }));
         } catch (error) {
           console.warn('OpenRouter falhou:', describeFetchError(error));
           return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
@@ -614,7 +651,7 @@ export function createChatHandler(options = {}) {
 
         let data;
         try {
-          data = await response.json();
+          data = await timeStage('llm', () => response.json());
         } catch {
           return send(502, { error: 'Resposta inválida do provedor.' });
         }
@@ -630,6 +667,10 @@ export function createChatHandler(options = {}) {
           classification,
           source: 'openrouter',
         };
+        // Contribuição da animação no caminho do balão: aqui só o pós-processamento
+        // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
+        // e é medido à parte em refineAnimationInBackground, fora do totalMs.
+        mark('animation');
       }
     }
 
@@ -681,12 +722,18 @@ export function createChatHandler(options = {}) {
     else emitResponse(classification);
 
     const totalMs = now() - chatStartedAt;
+    stageTimes.total = totalMs;
     console.log('[chat] llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
-      + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source);
+      + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source
+      + (nvidiaFailed && parsed.source !== 'nvidia' ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
     return send(200, {
       reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
-      timing: { llmMs: stageTimes.llm, animationMs: stageTimes.animation, totalMs },
+      // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
+      // renomear. contextMs é adição. animationMs é o que a animação custou
+      // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
+      // fire-and-forget e aparece só no log [animacao], fora do totalMs.
+      timing: { llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
       ...(affinityPayload || {}),
     });
   };

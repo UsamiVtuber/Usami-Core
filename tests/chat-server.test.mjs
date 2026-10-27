@@ -253,6 +253,32 @@ test('handler: 200 com resposta válida', async () => {
   assert.equal(calls, 1);
 });
 
+test('handler: timing povoa as etapas do turno (llmMs mede a chamada ao provedor)', async () => {
+  // fetchImpl falso que demora de verdade: sem isto o cronômetro enganava e
+  // a resposta vinha com llmMs=0 mesmo havendo chamada ao provedor — o bug
+  // que motivou a medição (turno real de 21,9 s reportando etapas zeradas).
+  const handler = chatHandler({
+    getKey: async () => 'k',
+    fetchImpl: async () => {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return jsonResponse('{"reply":"olá","gesture":"neutral"}');
+    },
+  });
+  const res = mockRes();
+  await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const { timing } = JSON.parse(res.body);
+  assert.ok(timing, 'a resposta 200 deve trazer timing');
+  // chaves antigas preservadas (o navegador lê este objeto) + contextMs adicionada
+  for (const key of ['llmMs', 'animationMs', 'totalMs', 'contextMs']) {
+    assert.equal(typeof timing[key], 'number', `timing.${key} deve ser número`);
+  }
+  assert.ok(timing.llmMs > 0, `llmMs deve medir a chamada ao provedor, veio ${timing.llmMs}`);
+  assert.ok(timing.totalMs >= timing.llmMs, `totalMs (${timing.totalMs}) deve cobrir llmMs (${timing.llmMs})`);
+  assert.ok(timing.animationMs >= 0);
+  assert.ok(timing.contextMs >= 0);
+});
+
 test('handler: 200 applies the actions returned by the LLM in a single call', async () => {
   let calls = 0;
   const fetchImpl = async () => {
