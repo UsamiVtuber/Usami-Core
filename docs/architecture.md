@@ -100,6 +100,14 @@ ssh -N -L 5678:127.0.0.1:5678 luke@10.42.0.1
 
 Após estabelecer o túnel, o n8n fica acessível em `http://localhost:5678`.
 
+Para o runtime, porém, o túnel não é o caminho: o `usami/server.mjs` publica o
+evento `usami.response` direto em `http://10.42.0.1:5678/webhook/usami-events`
+( valor de `N8N_WEBHOOK_URL` no `A:/Usami Project/.env`, lido na inicialização
+porque nada popula `process.env` a partir desse arquivo). O serviço escuta em
+`127.0.0.1:8787` — ou seja, o Nyarch **não** alcança a API da Usami; workflows
+que precisem ler `/api/...` precisam de uma decisão de exposição antes de serem
+publicados.
+
 ### Workflow Obsidian
 
 O workflow **"Usami - Obsidian Inbox"** (`/workflow/NnWm0PoOh4IBjtQS`) recebe

@@ -17,7 +17,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     strictPort: true,
-    proxy: { "/api": "http://127.0.0.1:8787" },
+    proxy: { "/api": { target: "http://127.0.0.1:8787", changeOrigin: false } },
     allowedHosts: ["terminal.local"],
     warmup: {
       clientFiles: ["./src/main.jsx"],
