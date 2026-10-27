@@ -15,6 +15,10 @@ data/
 # Descartável: logs de servidor, mídia de demonstração e saídas de verificação
 /tmp/
 
+# O dev server às vezes é lançado com saída redirecionada na raiz; não é conteúdo do repo
+/vite.log
+/vite.err.log
+
 # Bytecode Python (tools/ingest)
 __pycache__/
 *.pyc
