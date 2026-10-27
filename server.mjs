@@ -337,6 +337,18 @@ function normalizeRemember(value) {
 // usuário), então o servidor corta em fronteira de sentença — não só o prompt.
 const REPLY_CHAR_LIMIT = 220;
 
+// Rubrica de roleplay: o modelo descreve a ação DENTRO de reply ("*bufa, braços
+// cruzados*"). O balão e o /api/tts falam o texto cru, então a rubrica é lida em
+// voz alta. A fala é só o que se diz; reação física tem canal próprio (actions/
+// gesture), então o texto descritivo não tem para onde ir além de sair.
+export function stripStageDirections(reply) {
+  return String(reply ?? '')
+    .replace(/\*+[^*\n]*\*+/g, ' ')
+    .replace(/\*/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
 function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
   if (reply.length <= limit) return reply;
   const window = reply.slice(0, limit);
@@ -419,12 +431,15 @@ export function parseProviderRaw(raw) {
         if (!salvaged) {
           return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
         }
-        return { ok: true, reply: capReplyLength(salvaged), gesture: 'neutral', actions: [], remember: null };
+        return { ok: true, reply: capReplyLength(stripStageDirections(salvaged)), gesture: 'neutral', actions: [], remember: null };
       }
       // Caso contrário, trata o texto bruto como resposta livre
       result = { reply: trimmed, gesture: 'neutral' };
     }
   }
+  // A rubrica sai ANTES das validações: reply que era só descrição de ação não
+  // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente.
+  if (result && typeof result.reply === 'string') result.reply = stripStageDirections(result.reply);
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }

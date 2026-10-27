@@ -93,7 +93,7 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 5. Responda SOMENTE JSON:
 {"reply":"sua fala","gesture":"neutral"|"tilt"|"wave"|"idle","actions":[{"type":"set_expression","name":"...","weight":0-1},{"type":"play_clip","name":"..."},{"type":"set_morph","name":"...","value":0-1},{"type":"gesture","name":"..."}],"remember":"fato curto em 3ª pessoa sobre o usuário ou null"}
 - actions: opcional, máx 5. Tipos válidos: set_expression, play_clip, set_morph, gesture.
-- reply: 1 a 2 frases curtas, no máximo ~180 caracteres, uma ideia só. Fale em balões curtos de chat, não em parágrafos.
+- reply: 1 a 2 frases curtas, no máximo ~180 caracteres, uma ideia só. Fale em balões curtos de chat, não em parágrafos. É SOMENTE a fala ditável: nada de rubrica de roleplay entre asteriscos (ex.: "*bufa*", "*desvia o olhar*") nem emojis — o texto do reply é lido em voz alta pelo TTS. Reação física vai em actions/gesture.
 - expressões válidas: nomes do catálogo VRM (ex.: 01-prefab_happy01, 02-prefab_happy02, 03-prefab_happy03, 04-prefab_happy04, 07-prefab_angry01, 08-prefab_angry02, 12-prefab_sad01, 13-prefab_sad02, 15-prefab_awkward01, 16-prefab_awkward02, 19-prefab_doubt, 20-prefab_startled). Use exatamente os nomes que chegam em "Capabilidades disponíveis": fora dessa lista a ação é descartada.
 - remember: extraia UM fato relevante e duradouro (ex.: "gosta de café gelado", "tem um gato chamado Mochi", "aniversário em 15/03"). Se nada relevante, "null". NÃO invente.
 

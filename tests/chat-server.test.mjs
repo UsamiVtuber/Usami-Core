@@ -16,7 +16,7 @@ process.env.USE_NVIDIA = 'false';
 const scratchMemoryDir = mkdtempSync(join(tmpdir(), 'usami-chat-memory-'));
 process.env.USAMI_DATA_DIR = scratchMemoryDir;
 
-const { createChatHandler, createN8nCommandHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, refineAnimationInBackground, sanitizeActions, sanitizeCapabilities, systemFor, withCapabilities } = await import('../server.mjs');
+const { createChatHandler, createN8nCommandHandler, filterActionsByCatalog, isAllowedOrigin, parseChatBody, parseProviderRaw, refineAnimationInBackground, sanitizeActions, sanitizeCapabilities, stripStageDirections, systemFor, withCapabilities } = await import('../server.mjs');
 
 const scratchMemoryStore = createMemoryStore({ dataDir: scratchMemoryDir });
 scratchMemoryStore.load();
@@ -341,7 +341,7 @@ test('parseProviderRaw: JSON truncado recupera o "reply" e descarta actions', ()
   const truncated = '{"reply":"N-não é que eu me importe, b-baka! *desvia o olhar*","actions":[{"type":"set_expression","name":"16-prefab_awkward02","weight":0.8},{"type';
   const result = parseProviderRaw(truncated);
   assert.equal(result.ok, true);
-  assert.equal(result.reply, 'N-não é que eu me importe, b-baka! *desvia o olhar*');
+  assert.equal(result.reply, 'N-não é que eu me importe, b-baka!');
   assert.equal(result.gesture, 'neutral');
   assert.deepEqual(result.actions, []);
   assert.equal(result.remember, null);
@@ -351,8 +351,25 @@ test('parseProviderRaw: aspa de abertura da chave ausente ainda recupera o reply
   // Formato observado no chat vazando: o modelo emite `{reply":"...` e corta no max_tokens.
   const result = parseProviderRaw('{reply":"F-fofa..?! *orelhas vermelhas até a base*","actions":[{"type":"set_expression","name":"15-prefab_awkward02","weight":0.8},{"type');
   assert.equal(result.ok, true);
-  assert.equal(result.reply, 'F-fofa..?! *orelhas vermelhas até a base*');
+  assert.equal(result.reply, 'F-fofa..?!');
   assert.deepEqual(result.actions, []);
+});
+
+test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {
+  // O balão e o /api/tts falam o texto cru: "*bufa*" virava voz.
+  assert.equal(parseProviderRaw('{"reply":"Hmph... *bufa, braços cruzados* Não diga que é fofo."}').reply, 'Hmph... Não diga que é fofo.');
+  assert.equal(parseProviderRaw('{"reply":"**engasga** Q-que?!"}').reply, 'Q-que?!');
+  // Órfão (sem fechamento) também sai — continuaria sendo lido.
+  assert.equal(parseProviderRaw('{"reply":"*desvia o olhar N-nada..."}').reply, 'desvia o olhar N-nada...');
+  // Só rubrica não é fala: erro amigável em vez de balão vazio.
+  assert.equal(parseProviderRaw('{"reply":"*silêncio*"}').ok, false);
+});
+
+test('stripStageDirections: preserva a fala e a quebra de linha dos balões', () => {
+  assert.equal(stripStageDirections('sem rubrica aqui'), 'sem rubrica aqui');
+  const multiline = stripStageDirections('Bom dia!\n*espreguiça* Vamos continuar?');
+  assert.ok(multiline.includes('\n') && !multiline.includes('*'), multiline);
+  assert.equal(stripStageDirections('a  *b*  c'), 'a c');
 });
 
 test('parseProviderRaw: escapes do "reply" truncado são decodificados', () => {
@@ -416,7 +433,7 @@ test('handler: 200 com reply recuperado de JSON truncado, sem vazar o payload br
   await handler(mockReq({ headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' }, body: JSON.stringify({ message: 'oi' }) }), res);
   assert.equal(res.statusCode, 200);
   const data = JSON.parse(res.body);
-  assert.equal(data.reply, 'Ora, vê com os próprios olhos! *sorri*');
+  assert.equal(data.reply, 'Ora, vê com os próprios olhos!');
   assert.deepEqual(data.actions, []);
 });
 
