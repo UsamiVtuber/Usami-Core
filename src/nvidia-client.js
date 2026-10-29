@@ -3,15 +3,15 @@
 // todas as funções (classificação, geração de texto, animação).
 //
 // Lê NVIDIA_API_KEY de process.env.NVIDIA_API_KEY ou do arquivo .env
-// indicado por NVIDIA_ENV_FILE (padrão: A:\.env).
+// indicado por NVIDIA_ENV_FILE (padrão: o .env do projeto, ver keysFilePath).
 //
 // A API é compatível com OpenAI (POST /v1/chat/completions), então o
 // corpo da requisição segue o mesmo esquema do OpenRouter.
 
 import { readFileSync } from 'node:fs';
+import { keysFilePath } from './api-security.js';
 
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
-const DEFAULT_ENV_FILE = 'A:/.env';
 const DEFAULT_RATE_LIMIT = 40;    // requisições por minuto
 const DEFAULT_RATE_WINDOW_MS = 60 * 1000;
 
@@ -26,7 +26,7 @@ function resolveApiKeySync() {
     return apiKeyCache;
   }
   // 2) arquivo .env
-  const envFile = process.env.NVIDIA_ENV_FILE || DEFAULT_ENV_FILE;
+  const envFile = process.env.NVIDIA_ENV_FILE || keysFilePath();
   if (envFile === envFileCache && apiKeyCache) return apiKeyCache;
   try {
     const text = readFileSync(envFile, 'utf8');
@@ -95,7 +95,7 @@ export class NvidiaClient {
 
   async chatCompletions({ model, messages, temperature = 0.7, max_tokens = 320, response_format = null, extra = null }) {
     const key = await resolveApiKey();
-    if (!key) throw new Error('NVIDIA_API_KEY não configurada (defina NVIDIA_API_KEY ou A:\\.env)');
+    if (!key) throw new Error('NVIDIA_API_KEY não configurada (defina NVIDIA_API_KEY ou o .env do projeto)');
 
     const requestedAt = Date.now();
     await this.rateLimiter.waitForSlot();

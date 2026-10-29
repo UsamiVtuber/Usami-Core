@@ -3,13 +3,16 @@ import assert from 'node:assert/strict';
 
 // A rota n8n só aceita o vocabulário conhecido — o mesmo contrato do director.
 process.env.USE_NVIDIA = 'false';
-const { createN8nCommandHandler } = await import('../server.mjs');
+const { createN8nCommandHandler: createHandler } = await import('../server.mjs');
 
-function mockReq({ method = 'POST', url = '/api/n8n/command', body = '' } = {}) {
+const TEST_TOKEN = 'token-de-teste';
+const createN8nCommandHandler = () => createHandler({ apiToken: TEST_TOKEN });
+
+function mockReq({ method = 'POST', url = '/api/n8n/command', body = '', headers = { 'x-usami-token': TEST_TOKEN } } = {}) {
   return {
     method,
     url,
-    headers: { origin: 'http://127.0.0.1:5173', host: '127.0.0.1:8787', 'content-type': 'application/json' },
+    headers: { origin: 'http://127.0.0.1:5173', host: '127.0.0.1:8787', 'content-type': 'application/json', ...headers },
     async *[Symbol.asyncIterator]() { if (body) yield Buffer.from(body); },
   };
 }
@@ -36,6 +39,15 @@ test('play_sequence entra na fila quando a shape é conhecida', async () => {
   // fila é drenada: a segunda leitura não duplica o comando
   const again = await call(handler, mockReq({ method: 'GET', url: '/api/n8n/commands' }));
   assert.deepEqual(again.json().commands, []);
+});
+
+test('sem token (ou com token errado) a fila do n8n responde 401', async () => {
+  const handler = createN8nCommandHandler();
+  const body = JSON.stringify({ type: 'gesture', name: 'clap' });
+  assert.equal((await call(handler, mockReq({ body, headers: {} }))).statusCode, 401);
+  assert.equal((await call(handler, mockReq({ body, headers: { 'x-usami-token': 'errado' } }))).statusCode, 401);
+  assert.equal((await call(handler, mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }))).statusCode, 401);
+  assert.equal((await call(createHandler({}), mockReq({ body }))).statusCode, 503);
 });
 
 test('shape inválida ou ausente em play_sequence é 400', async () => {

@@ -12,12 +12,14 @@ process.env.USAMI_DATA_DIR = scratchDir;
 
 const { createMemoryHandler } = await import('../server.mjs');
 
+const TEST_TOKEN = 'token-de-teste';
+
 function mockReq({ method = 'GET', url = '/api/memory', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
   return {
     method,
     url,
-    headers,
+    headers: { host: '127.0.0.1:8787', 'x-usami-token': TEST_TOKEN, ...headers },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk;
     },
@@ -56,8 +58,30 @@ function seeded() {
   store.upsertSummary('2026-10-23', 'conversamos sobre gatos');
   store.appendHistory('user', 'oi', '2026-10-24T12:00:00.000Z');
   store.setAffinity(42, '2026-10-24');
-  return { dir, store, handler: createMemoryHandler({ memoryStore: store }) };
+  return { dir, store, handler: createMemoryHandler({ memoryStore: store, apiToken: TEST_TOKEN }) };
 }
+
+test('rotas de memória exigem token: sem ele 401, errado 401, sem token no servidor 503', async () => {
+  const { dir, handler } = seeded();
+  try {
+    assert.equal((await call(handler, mockReq({ headers: { 'x-usami-token': '' } }))).status, 401);
+    assert.equal((await call(handler, mockReq({ headers: { 'x-usami-token': 'outro' } }))).status, 401);
+    const open = createMemoryHandler({ memoryStore: seeded().store });
+    assert.equal((await call(open, mockReq())).status, 503);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Host fora da allowlist (DNS rebinding) é 403 mesmo com Origin igual ao Host', async () => {
+  const { dir, handler } = seeded();
+  try {
+    const res = await call(handler, mockReq({ headers: { host: 'evil.com', origin: 'http://evil.com' } }));
+    assert.equal(res.status, 403);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('GET /api/memory devolve seções, recentes, resumos e dias — sem o texto das mensagens', async () => {
   const { dir, handler } = seeded();

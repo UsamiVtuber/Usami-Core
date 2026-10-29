@@ -45,11 +45,15 @@ function jsonResponse(content, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => ({ choices: [{ message: { content } }] }) };
 }
 
-test('isAllowedOrigin: localhost e same-origin', () => {
+test('isAllowedOrigin: allowlist fechada de Host e Origin (sem same-origin por Host)', () => {
   assert.equal(isAllowedOrigin('http://127.0.0.1:5173', '127.0.0.1:8787', ['http://127.0.0.1:5173']), true);
-  assert.equal(isAllowedOrigin(undefined, 'example.com'), true);
-  assert.equal(isAllowedOrigin('https://example.com', 'example.com'), true);
-  assert.equal(isAllowedOrigin('https://evil.com', 'example.com'), false);
+  assert.equal(isAllowedOrigin(undefined, '127.0.0.1:8787'), true);
+  assert.equal(isAllowedOrigin(undefined, 'localhost:5173'), true);
+  // DNS rebinding: Host e Origin são do atacante e coincidem entre si
+  assert.equal(isAllowedOrigin('https://evil.com', 'evil.com'), false);
+  assert.equal(isAllowedOrigin(undefined, 'evil.com'), false);
+  assert.equal(isAllowedOrigin(undefined, undefined), false);
+  assert.equal(isAllowedOrigin('https://evil.com', '127.0.0.1:8787'), false);
 });
 
 test('parseChatBody: valida mensagem', () => {
@@ -500,7 +504,7 @@ test('refino em background: o diretor preenche a fila de comandos depois da resp
   });
   await refineAnimationInBackground('oi!', capabilities, { planner });
   const res = mockRes();
-  await createN8nCommandHandler()(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }), res);
+  await createN8nCommandHandler({ apiToken: 't' })(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: { host: '127.0.0.1:8787', 'x-usami-token': 't' } }), res);
   const { commands } = JSON.parse(res.body);
   // play_clip não é comando da fila e facepalm não está no catálogo do modelo:
   // só o que o avatar realmente consegue fazer chega ao cliente.
@@ -513,6 +517,6 @@ test('refino em background: o diretor preenche a fila de comandos depois da resp
 test('refino em background: falha do diretor é silenciosa, nunca do turno', async () => {
   await refineAnimationInBackground('oi!', null, { planner: async () => { throw new Error('rate limit'); } });
   const res = mockRes();
-  await createN8nCommandHandler()(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }), res);
+  await createN8nCommandHandler({ apiToken: 't' })(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: { host: '127.0.0.1:8787', 'x-usami-token': 't' } }), res);
   assert.deepEqual(JSON.parse(res.body).commands, []);
 });

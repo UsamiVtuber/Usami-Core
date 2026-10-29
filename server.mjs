@@ -1,6 +1,5 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
@@ -20,6 +19,7 @@ import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique } from './src/llm-router.js';
 import { readRagContext } from './src/rag.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
+import { checkApiToken, isAllowedRequest, keysFilePath, readApiToken, readEnvValue, signWebhook, withExtraOrigins } from './src/api-security.js';
 import { createTechniqueIndex } from './src/technique-index.js';
 import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
@@ -35,32 +35,21 @@ export function useNvidia() {
 }
 const USE_NVIDIA = useNvidia();
 
-// Verifica se a chave NVIDIA está configurada (env ou A:\.env), sem fazer chamada de API.
+// Verifica se a chave NVIDIA está configurada (env ou .env do projeto), sem fazer chamada de API.
 function nvidiaKeyConfigured() {
-  if (process.env.NVIDIA_API_KEY) return true;
-  try {
-    const text = readFileSync('A:\\Usami Project\\.env', 'utf8');
-    return /^NVIDIA_API_KEY\s*=/m.test(text);
-  } catch {
-    return false;
-  }
+  return Boolean(readEnvValue('NVIDIA_API_KEY'));
 }
 
 // Exporta a chave NVIDIA para o ambiente do processo, para que o
 // nvidia-client.js (que lê process.env.NVIDIA_API_KEY) a encontre.
 if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
-  try {
-    const text = readFileSync('A:\\Usami Project\\.env', 'utf8');
-    const match = text.match(/^NVIDIA_API_KEY\s*=\s*(.+)$/m);
-    if (match) process.env.NVIDIA_API_KEY = match[1].trim();
-  } catch {
-    // falha silenciosa — o nvidia-client já avisa no console
-  }
+  const nvidiaKey = readEnvValue('NVIDIA_API_KEY');
+  if (nvidiaKey) process.env.NVIDIA_API_KEY = nvidiaKey;
 }
 
 const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false},{"type":"play_sequence","shape":"um de: ${SHAPE_NAMES.join(', ')}","amplitude":0.02 a 0.5,"cycles":1 a 8,"durationMs":600 a 8000,"side":"left" ou "right"}]}. Actions é opcional e pode ser vazio; no máximo 5 ações. play_sequence compõe movimento novo a partir de uma shape; use apenas se capabilities.sequences for true.`.trim();
 
-const DEFAULT_ALLOWED_ORIGINS = ['http://127.0.0.1:5173', 'http://localhost:5173'];
+const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
 
 export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
 
@@ -151,8 +140,7 @@ const gestureLayer = createVrmGestureLayer({ now: () => Date.now() });
 const services = buildServices({
   fetchImpl: globalThis.fetch,
   getKey: async () => {
-    const envPath = process.env.USAMI_KEYS_FILE || 'A:/Usami Project/.env';
-    const parsed = parseEnv(await readFile(envPath, 'utf8'));
+    const parsed = parseEnv(await readFile(keysFilePath(), 'utf8'));
     return parsed.OPENROUTER_API_KEY || null;
   },
   model: DEFAULT_MODEL,
@@ -174,29 +162,35 @@ const flowExecutor = createFlowExecutor({ services, config: {} });
 // vai para lugar nenhum (a stack do Windows está desligada; o n8n real é o do
 // Nyarch, e o `WEBHOOK_URL` do compose dele é http://10.42.0.1:5678).
 function resolveN8nWebhookUrl() {
-  if (process.env.N8N_WEBHOOK_URL) return process.env.N8N_WEBHOOK_URL;
-  try {
-    const text = readFileSync(process.env.USAMI_KEYS_FILE || 'A:/Usami Project/.env', 'utf8');
-    const match = text.match(/^N8N_WEBHOOK_URL\s*=\s*(.+)$/m);
-    if (match) return match[1].trim();
-  } catch {
-    // arquivo ausente ou ilegível → mantém o default local
-  }
-  return 'http://localhost:5678/webhook/usami-events';
+  return readEnvValue('N8N_WEBHOOK_URL') || 'http://localhost:5678/webhook/usami-events';
 }
 
 const N8N_WEBHOOK_URL = resolveN8nWebhookUrl();
 
+// Campos com texto da conversa; N8N_WEBHOOK_OMIT_TEXT=true os tira do webhook.
+const N8N_TEXT_FIELDS = ['userMessage', 'reply'];
+
+// Com N8N_WEBHOOK_SECRET o corpo sai assinado (X-Usami-Timestamp +
+// X-Usami-Signature = HMAC-SHA256 de "<timestamp>.<corpo>"); o n8n deve
+// recusar assinatura inválida e timestamp antigo. Sem segredo, sai sem assinatura.
 export async function sendToN8nWebhook(eventType, payload) {
   try {
+    const data = { ...payload };
+    if (readEnvValue('N8N_WEBHOOK_OMIT_TEXT') === 'true') {
+      for (const field of N8N_TEXT_FIELDS) delete data[field];
+    }
+    const timestamp = new Date().toISOString();
+    const body = JSON.stringify({ event: eventType, timestamp, ...data });
+    const headers = { 'Content-Type': 'application/json' };
+    const secret = readEnvValue('N8N_WEBHOOK_SECRET');
+    if (secret) {
+      headers['X-Usami-Timestamp'] = timestamp;
+      headers['X-Usami-Signature'] = signWebhook(secret, timestamp, body);
+    }
     await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event: eventType,
-        timestamp: new Date().toISOString(),
-        ...payload,
-      }),
+      headers,
+      body,
       // Não aguarda resposta; o n8n pode estar offline sem afetar o chat.
       signal: AbortSignal.timeout(3000),
     });
@@ -205,15 +199,20 @@ export async function sendToN8nWebhook(eventType, payload) {
   }
 }
 
+// Host e Origin precisam estar na allowlist fechada (src/api-security.js). A
+// regra antiga "Origin == Host" aceitava DNS rebinding: o atacante controla os
+// dois. Origens/hosts extras (LAN, terminal.local): USAMI_ALLOWED_ORIGINS e
+// USAMI_ALLOWED_HOSTS.
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
-  if (!origin) return true;
-  if (allowedOrigins.includes(origin)) return true;
-  try {
-    const url = new URL(origin);
-    return Boolean(host) && url.host === host;
-  } catch {
-    return false;
-  }
+  return isAllowedRequest(origin, host, allowedOrigins);
+}
+
+// Rotas sensíveis (memória, vault, fila do n8n) exigem também o token.
+function denyWithoutToken(req, options, send) {
+  const denied = checkApiToken(req, options.apiToken ?? readApiToken());
+  if (!denied) return false;
+  send(denied.status, { error: denied.error });
+  return true;
 }
 
 export function parseChatBody(body) {
@@ -486,22 +485,13 @@ export function parseProviderRaw(raw) {
 export function createChatHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
-    // Tenta múltiplos arquivos .env candidatos para a chave OpenRouter.
-    const candidates = [
-      options.envPath,
-      process.env.USAMI_KEYS_FILE,
-      'A:/Usami Project/.env',
-      'A:/Lira/LiraVtuber/.env',
-    ].filter(Boolean);
-    for (const envPath of candidates) {
-      try {
-        const parsed = parseEnv(await readFile(envPath, 'utf8'));
-        if (parsed.OPENROUTER_API_KEY) return parsed.OPENROUTER_API_KEY;
-      } catch {
-        // arquivo ausente ou ilegível → tenta o próximo
-      }
+    // options.envPath (testes) substitui o .env do projeto.
+    try {
+      const parsed = parseEnv(await readFile(options.envPath || keysFilePath(), 'utf8'));
+      return parsed.OPENROUTER_API_KEY || null;
+    } catch {
+      return null;
     }
-    return null;
   });
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const model = options.model || process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
@@ -881,6 +871,7 @@ export function createN8nCommandHandler(options = {}) {
     if (!isAllowedOrigin(origin, host, allowedOrigins)) {
       return send(403, { error: 'Origem não autorizada.' });
     }
+    if (denyWithoutToken(req, options, send)) return;
 
     // GET — cliente consome e limpa a fila de comandos pendentes
     if (req.method === 'GET' && req.url === '/api/n8n/commands') {
@@ -952,6 +943,7 @@ export function createRagContextHandler(options = {}) {
     if (!isAllowedOrigin(origin, host, allowedOrigins)) {
       return send(403, { error: 'Origem não autorizada.' });
     }
+    if (denyWithoutToken(req, options, send)) return;
 
     if (req.method !== 'GET' || req.url !== '/api/rag/context') {
       return send(404, { error: 'Não encontrado.' });
@@ -1022,6 +1014,7 @@ export function createMemoryHandler(options = {}) {
     if (!isAllowedOrigin(origin, host, allowedOrigins)) {
       return send(403, { error: 'Origem não autorizada.' });
     }
+    if (denyWithoutToken(req, options, send)) return;
 
     if (req.method === 'GET' && req.url === '/api/memory') {
       return send(200, { ok: true, memory: memorySnapshot(store) });
@@ -1300,12 +1293,9 @@ export async function streamGeminiPcm({
 export function createTtsHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getConfig = options.getConfig || (async () => {
-    // options.envPath (testes) substitui a cadeia inteira; sem ele, tenta o .env
-    // do projeto e depois o fallback — o primeiro arquivo com um provedor
-    // completo vence; no mesmo arquivo, gemini tem prioridade.
-    const candidates = options.envPath
-      ? [options.envPath]
-      : [process.env.USAMI_KEYS_FILE || 'A:/Usami Project/.env', 'A:/Lira/LiraVtuber/.env'];
+    // options.envPath (testes) substitui o .env do projeto; no arquivo, gemini
+    // tem prioridade sobre elevenlabs.
+    const candidates = [options.envPath || keysFilePath()];
     for (const candidate of candidates) {
       let parsed;
       try {
