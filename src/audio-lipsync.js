@@ -1,10 +1,16 @@
-// Etapa 5 — lip-sync dirigido pelo áudio real.
+// Etapa 5 — lip-sync dirigido pelo áudio real (versão por vogal).
 //
 // A mímica textual de `visemes.js` era um plano cego: o `/api/tts` não traz
 // duração, o `audio.duration` chega depois do início da fala e o timing
-// derivava. Este module lê o sinal que realmente sai nos alto-falantes:
+// derivava. A versão anterior reduzia o espectro a UM RMS e aplicava o mesmo
+// valor aos 5 visemas (`a/I/u/e/o`), então "a" e "u" abriam a boca igual.
+// Esta versão deriva pesos por vogal do espectro do AnalyserNode e passa por
+// um driver winner+runner com piso de silêncio de 160 ms e suavização
+// ataque/release — adaptação da AIRI
+// (airi/packages/model-driver-lipsync/src/shared/wlipsync/vowel-driver.ts).
 //
-//   HTMLAudioElement → MediaElementSource → AnalyserNode → destination
+// Cadeia:
+//   HTMLAudioElement → MediaElementSource → AnalyserNode (fftSize 1024, smoothing 0.3) → destination
 //   AudioBufferSourceNode (PCM em streaming) ↗
 //
 // As duas entradas compartilham o mesmo AnalyserNode: `getTap()` entrega
@@ -13,12 +19,10 @@
 // que a fala do momento não passa pelo elemento (senão a boca fecharia porque
 // o elemento está pausado/sem src).
 //
-// O `AnalyserNode` (fftSize 256, smoothing 0.3) entrega o espectro em bytes;
-// os bins são reduzidos a um RMS contínuo normalizado (0–1) que vira a
-// "abertura da boca" aplicada igualmente aos 5 visemas do VRM (`a/I/u/e/o`).
-// A suavização é a mesma rampa exponencial independente de frame rate do
-// `expression-driver`: ataque rápido (30 ms) para a boca abrir junto da voz e
-// release natural (80 ms) para ela fechar.
+// O espectro em bytes vira um frame { volume, weights[A/E/I/O/U] } via
+// `spectrumToVowelFrame`; o driver `createVowelDriver` seleciona vencedor+runner,
+// aplica piso de silêncio (160 ms) e suavização (ataque 50/s, release 30/s),
+// e devolve pesos por vogal que são escritos nos visemas correspondentes.
 //
 // Canal de escrita: em VRMs a boca NÃO pode ser escrita direto em
 // `morphTargetInfluences` — `VRMExpressionManager.update()` (dentro do
@@ -34,14 +38,22 @@
 // elemento continua tocando normalmente e a boca apenas fica fechada — o rAF
 // nunca recebe exceção.
 
-export const ATTACK_TAU_MS = 30;
-export const RELEASE_TAU_MS = 80;
+import { createVowelDriver, spectrumToVowelFrame, VOWELS } from './vowel-driver.js';
 
 // Pausa longa entre frames (aba oculta) não pode virar salto brusco de valor.
 const MAX_DT_MS = 250;
 
 // Visemas do VRM (o modelo usa o "I" maiúsculo; a comparação é em minúsculas).
 const VISEME_NAMES = ['a', 'i', 'u', 'e', 'o'];
+
+// Mapeamento vogal→candidatos de nome de expressão/morph (case-insensitive).
+const VOWEL_CANDIDATES = {
+  A: ['aa', 'a'],
+  E: ['ee', 'e'],
+  I: ['ih', 'i'],
+  O: ['oh', 'o'],
+  U: ['ou', 'u'],
+};
 
 export function createAudioLipSync({
   audioElement = null,
@@ -59,10 +71,29 @@ export function createAudioLipSync({
   const channel = typeof setWeight === 'function' && Array.isArray(visemeNames) && visemeNames.length > 0
     ? visemeNames.map(name => String(name)).filter(Boolean)
     : null;
-  const targets = channel ? [] : (Array.isArray(morphTargets) ? morphTargets : []).filter(
-    m => m && m.object && Number.isInteger(m.index) && VISEME_NAMES.includes(String(m.name || '').toLowerCase()),
-  );
-  const hasTargets = channel ? channel.length > 0 : targets.length > 0;
+
+  // Mapeia cada vogal ao seu slot de escrita (canal ou morph).
+  const vowelSlots = [];
+  if (channel) {
+    // Canal: para cada vogal, ache o 1º nome em visemeNames que case (case-insensitive)
+    // com um candidato da vogal.
+    for (const vowel of VOWELS) {
+      const candidates = VOWEL_CANDIDATES[vowel];
+      const match = channel.find(name => candidates.includes(name.toLowerCase()));
+      if (match) vowelSlots.push({ vowel, channelName: match });
+    }
+  } else {
+    // Morph: itens já filtrados a visemas; mapeie nome (case-insensitive; trate i/I) para vogal.
+    const targets = (Array.isArray(morphTargets) ? morphTargets : []).filter(
+      m => m && m.object && Number.isInteger(m.index) && VISEME_NAMES.includes(String(m.name || '').toLowerCase()),
+    );
+    for (const t of targets) {
+      const lname = String(t.name || '').toLowerCase();
+      const vowel = VOWELS.find(v => VOWEL_CANDIDATES[v].includes(lname));
+      if (vowel) vowelSlots.push({ vowel, morphItem: t });
+    }
+  }
+  const hasTargets = vowelSlots.length > 0;
 
   let failed = false;
   let audioCtx = null;
@@ -71,8 +102,8 @@ export function createAudioLipSync({
   let dataArray = null;
   let boundElement = null; // elemento já roteado ao source atual
   let externalActive = false; // player de PCM usando o analyser diretamente
-  let current = 0;
-  let lastTime = null;
+
+  const driver = createVowelDriver(now);
 
   const resolveContextCtor = () => {
     if (AudioContextCtor) return AudioContextCtor;
@@ -82,24 +113,27 @@ export function createAudioLipSync({
 
   // Escrita da boca no canal dono do peso: expressão (VRM) quando injetada,
   // morphTargetInfluences (GLB/FBX) como fallback histórico.
-  const writeMouth = value => {
-    if (channel) {
-      for (const name of channel) { try { setWeight(name, value); } catch {} }
-      return;
-    }
-    for (const m of targets) {
-      const influences = m.object ? m.object.morphTargetInfluences : null;
-      if (!influences) continue;
-      influences[m.index] = value;
+  const writeMouth = weights => {
+    for (const slot of vowelSlots) {
+      const value = weights[slot.vowel] ?? 0;
+      if (slot.channelName) {
+        try { setWeight(slot.channelName, value); } catch {}
+      } else if (slot.morphItem) {
+        const influences = slot.morphItem.object ? slot.morphItem.object.morphTargetInfluences : null;
+        if (influences) influences[slot.morphItem.index] = value;
+      }
     }
   };
 
-  // Zera a boca e limpa o estado da rampa; só escreve se algo mudou, para não
-  // brigar com as outras camadas (expression driver, painel de morphs).
+  // Zera a boca e limpa o estado do driver; escreve 0 em todos os slots.
   const stopMouth = () => {
-    if (current !== 0) writeMouth(0);
-    current = 0;
-    lastTime = null;
+    for (const v of VOWELS) {
+      if (vowelSlots.some(s => s.vowel === v)) {
+        // só escreve se o slot existe, mas driver.reset() já limpa tudo
+      }
+    }
+    writeMouth({ A: 0, E: 0, I: 0, O: 0, U: 0 });
+    driver.reset();
   };
 
   // Desmonta o grafo Web Audio (teardown do Avatar). Depois disso o elemento
@@ -129,11 +163,11 @@ export function createAudioLipSync({
     try {
       audioCtx = new Ctor();
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
+      analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.3;
       // O analyser devolve o som ao destino, senão a fala sairia muda.
       if (typeof analyser.connect === 'function') analyser.connect(audioCtx.destination);
-      dataArray = new Uint8Array(analyser.frequencyBinCount || 128);
+      dataArray = new Uint8Array(analyser.frequencyBinCount || 512);
     } catch {
       audioCtx = null;
       analyser = null;
@@ -183,21 +217,19 @@ export function createAudioLipSync({
     // — inclusive o criado sob demanda pelo tap do player de PCM.
     if (audioCtx.state === 'suspended' && typeof audioCtx.resume === 'function') { try { audioCtx.resume(); } catch {} }
     analyser.getByteFrequencyData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i += 1) sum += dataArray[i] * dataArray[i];
-    const count = dataArray.length || 1;
-    const rms = Math.sqrt(sum / count) / 255; // byte máximo = 255
-    const target = Math.min(1, rms * gain);
+
+    // Deriva frame por vogal do espectro e passa pelo driver winner+runner.
+    const frame = spectrumToVowelFrame(dataArray, { sampleRate: (audioCtx && audioCtx.sampleRate) || 48000 });
     const t = now();
-    let dt = lastTime === null ? 0 : t - lastTime;
-    lastTime = t;
-    if (!(dt > 0)) dt = 0;
-    else if (dt > MAX_DT_MS) dt = MAX_DT_MS;
-    if (dt > 0) {
-      const tau = target > current ? ATTACK_TAU_MS : RELEASE_TAU_MS;
-      current += (target - current) * (1 - Math.exp(-dt / tau));
-    }
-    writeMouth(current);
+    let dt = 0;
+    if (!update.lastTime) update.lastTime = t;
+    dt = t - update.lastTime;
+    update.lastTime = t;
+    if (dt > MAX_DT_MS) dt = MAX_DT_MS;
+    const deltaSeconds = dt / 1000;
+
+    const weights = driver.update(frame, deltaSeconds);
+    writeMouth(weights);
   };
 
   // Liga o layer ao HTMLAudioElement real (speakReply). Trocar de elemento
@@ -208,16 +240,14 @@ export function createAudioLipSync({
     if (source && typeof source.disconnect === 'function') { try { source.disconnect(); } catch {} }
     source = null;
     boundElement = null;
-    current = 0;
-    lastTime = null;
+    // driver mantém estado de silêncio; não resetar aqui — o clear() faz isso quando preciso.
   };
 
   // Boca fechada sob demanda (fallback mudo do TTS, reset do avatar) sem
   // desmontar o grafo — o caminho de áudio continua vivo p/ a próxima fala.
   const clear = () => {
-    current = 0;
-    lastTime = null;
-    writeMouth(0);
+    writeMouth({ A: 0, E: 0, I: 0, O: 0, U: 0 });
+    driver.reset();
   };
 
   // Saída do grafo para um player de PCM: `{ context, input }` é exatamente o
@@ -233,7 +263,7 @@ export function createAudioLipSync({
   const beginExternal = () => {
     if (!hasTargets || failed) return false;
     externalActive = true;
-    lastTime = null;
+    update.lastTime = now();
     return true;
   };
 
@@ -249,6 +279,8 @@ export function createAudioLipSync({
     clear();
     releaseGraph();
     failed = false;
+    // Recria o driver para limpar estado de silêncio/última atividade.
+    Object.assign(driver, createVowelDriver(now));
   };
 
   return {

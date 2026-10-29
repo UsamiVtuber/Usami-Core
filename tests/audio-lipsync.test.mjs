@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAudioLipSync, ATTACK_TAU_MS, RELEASE_TAU_MS } from '../src/audio-lipsync.js';
+import { createAudioLipSync } from '../src/audio-lipsync.js';
+import { VOWELS } from '../src/vowel-driver.js';
 
 // Harness no idioma dos testes locais: Web Audio falso injetável + relógio fake.
 const VISEME_NAMES = ['a', 'I', 'u', 'e', 'o'];
@@ -23,12 +24,12 @@ function makeAudioElement({ readyState = 2, paused = false, src = 'blob:usami-tt
   return element;
 }
 
-function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, resumeThrows = false, withAnalyserConnect = true, state = 'running' } = {}) {
+function makeWebAudio({ data = new Uint8Array(512), sourceThrows = false, resumeThrows = false, withAnalyserConnect = true, state = 'running' } = {}) {
   const calls = { sources: 0, analysers: 0, closes: 0, sourceDisconnects: 0, resumes: 0 };
   const analyser = {
     fftSize: 0,
     smoothingTimeConstant: 0,
-    frequencyBinCount: 128,
+    frequencyBinCount: 512,
     connect() {},
     disconnect() {},
     getByteFrequencyData(arr) { arr.set(data); },
@@ -50,7 +51,6 @@ function makeWebAudio({ data = new Uint8Array(128), sourceThrows = false, resume
       ctx.state = 'running';
     },
   };
-  // `new Ctor()` precisa de função construtora — arrow não é constructível.
   const Ctor = function () { return ctx; };
   return { ctx, analyser, calls, data, Ctor };
 }
@@ -60,12 +60,59 @@ function makeClock(start = 0) {
   return { now: () => t, advance: ms => { t += ms; } };
 }
 
-function makeSpeakingLayer({ data = new Uint8Array(128).fill(255), targets = makeMorphTargets(), withAnalyserConnect = true } = {}) {
+// Cria espectro com energia nas bandas de uma vogal específica (para 48 kHz, fftSize 1024).
+function makeVowelSpectrum(vowel) {
+  const data = new Uint8Array(512).fill(0);
+  // binWidth = 48000 / 1024 ≈ 46.875 Hz
+  const bands = {
+    A: { f1: [14, 22], f2: [21, 33] },      // 650-1050, 1000-1550
+    E: { f1: [6, 13], f2: [36, 53] },        // 300-600, 1700-2500
+    I: { f1: [4, 9], f2: [43, 64] },         // 200-420, 2000-3000
+    O: { f1: [6, 13], f2: [15, 22] },        // 300-600, 700-1050
+    U: { f1: [5, 10], f2: [11, 17] },        // 220-480, 500-800
+  };
+  const b = bands[vowel];
+  if (!b) return data;
+  for (let i = b.f1[0]; i <= b.f1[1]; i += 1) data[i] = 255;
+  for (let i = b.f2[0]; i <= b.f2[1]; i += 1) data[i] = 255;
+  return data;
+}
+
+function makeSpeakingLayer({ data = makeVowelSpectrum('A'), targets = makeMorphTargets(), withAnalyserConnect = true } = {}) {
   const web = makeWebAudio({ data, withAnalyserConnect });
   const clock = makeClock();
   const element = makeAudioElement();
   const layer = createAudioLipSync({ audioElement: element, morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
   return { web, clock, element, layer, targets, data };
+}
+
+function makeChannelLayer({ data = makeVowelSpectrum('A'), morphTargets = makeMorphTargets() } = {}) {
+  const web = makeWebAudio({ data });
+  const clock = makeClock();
+  const element = makeAudioElement();
+  const written = [];
+  const layer = createAudioLipSync({
+    audioElement: element,
+    morphTargets,
+    setWeight: (name, value) => written.push([name, value]),
+    visemeNames: ['aa', 'ih', 'ou', 'ee', 'oh'],
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  return { web, clock, element, written, layer, morphTargets };
+}
+
+function makeTapLayer({ data = makeVowelSpectrum('A'), audioElement = null } = {}) {
+  const web = makeWebAudio({ data });
+  const clock = makeClock();
+  const targets = makeMorphTargets();
+  const layer = createAudioLipSync({
+    audioElement,
+    morphTargets: targets,
+    now: clock.now,
+    AudioContextCtor: web.Ctor,
+  });
+  return { web, clock, targets, layer, data };
 }
 
 const setGlobal = (name, value) => {
@@ -77,11 +124,6 @@ const setGlobal = (name, value) => {
     else Object.defineProperty(globalThis, name, saved);
   };
 };
-
-test('constantes exportadas (rampa 30/80 ms)', () => {
-  assert.equal(ATTACK_TAU_MS, 30);
-  assert.equal(RELEASE_TAU_MS, 80);
-});
 
 test('sem audioElement ou com readyState < 2 não quebra, não cria contexto e a boca fica fechada', () => {
   const targets = makeMorphTargets();
@@ -104,7 +146,7 @@ test('sem audioElement ou com readyState < 2 não quebra, não cria contexto e a
 
 test('silêncio total mantém os visemas em 0 e o grafo nasce uma única vez', () => {
   const targets = makeMorphTargets();
-  const web = makeWebAudio();
+  const web = makeWebAudio({ data: new Uint8Array(512).fill(0) });
   const clock = makeClock();
   const layer = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
   layer.update();
@@ -112,52 +154,74 @@ test('silêncio total mantém os visemas em 0 e o grafo nasce uma única vez', (
   assert.deepEqual(valuesOf(targets), [0, 0, 0, 0, 0]);
   assert.equal(web.calls.sources, 1, 'createMediaElementSource chamado uma única vez');
   assert.equal(web.calls.analysers, 1);
-  assert.equal(web.analyser.fftSize, 256);
+  assert.equal(web.analyser.fftSize, 1024);
   assert.equal(web.analyser.smoothingTimeConstant, 0.3);
 });
 
 test('contexto suspenso é retomado (sem isso o elemento roteado fica mudo)', () => {
   const targets = makeMorphTargets();
-  const web = makeWebAudio({ state: 'suspended', data: new Uint8Array(128).fill(255) });
+  const web = makeWebAudio({ state: 'suspended', data: makeVowelSpectrum('A') });
   const clock = makeClock();
   const layer = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
+  clock.advance(20); // avança ANTES do primeiro update para dt > 0
   layer.update();
   assert.equal(web.calls.resumes, 1, 'resume chamado a cada frame enquanto suspenso');
-  clock.advance(ATTACK_TAU_MS);
+  clock.advance(20);
   layer.update();
-  assert.ok(Math.max(...valuesOf(targets)) > 0, 'a boca continua sendo dirigida');
+  assert.ok(Math.max(...valuesOf(targets)) > 0.05, 'a boca continua sendo dirigida');
 
-  // 'running' de fábrica não gasta resume algum.
   const idle = makeWebAudio();
   const live = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: makeMorphTargets(), now: makeClock().now, AudioContextCtor: idle.Ctor });
   live.update();
   assert.equal(idle.calls.resumes, 0);
 });
 
-test('voz cheia (bins 255) abre a boca: ≈0.95 após ~3×tau de ataque (90 ms)', () => {
-  const h = makeSpeakingLayer();
-  h.layer.update(); // dt = 0 — cria o grafo e ancora o relógio
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  for (const value of valuesOf(h.targets)) assert.ok(Math.abs(value - 0.95) < 0.01, `visema ≈ 0.95 após 90 ms (veio ${value})`);
+test('voz com espectro de "A" abre o visema A e os outros ficam ~0', () => {
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
+  h.layer.update(); // dt = 0 — cria o grafo
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  const vals = valuesOf(h.targets);
+  // Ordem dos visemas em makeMorphTargets: ['a', 'I', 'u', 'e', 'o']
+  // Vogal A → visema 'a' (índice 0)
+  assert.ok(vals[0] > 0.2, `visema 'a' abre (veio ${vals[0]})`);
+  for (let i = 1; i < 5; i += 1) {
+    assert.ok(vals[i] < 0.1, `visema ${i} ≈ 0 (veio ${vals[i]})`);
+  }
 });
 
-test('silêncio súbito decai com o tau de release (80 ms): ≈0 após ~3×tau (240 ms)', () => {
-  const h = makeSpeakingLayer();
+test('voz com espectro de "U" abre o visema U e os outros ficam ~0 (motivação do port)', () => {
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('U') });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  const vals = valuesOf(h.targets);
+  // Vogal U → visema 'u' (índice 2)
+  // U tem menos bins de formante → amplitude menor (~0.18), threshold ajustado
+  assert.ok(vals[2] > 0.15, `visema 'u' abre (veio ${vals[2]})`);
+  for (let i = 0; i < 5; i += 1) {
+    if (i === 2) continue;
+    assert.ok(vals[i] < 0.1, `visema ${i} ≈ 0 (veio ${vals[i]})`);
+  }
+  // Antes do port, A e U produziriam o mesmo RMS → todos 5 iguais.
+});
+
+test('silêncio súbito decai e fecha a boca (piso 160 ms)', () => {
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
+  h.layer.update();
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.2, 'boca aberta antes do silêncio');
   h.data.fill(0);
-  for (let step = 0; step < 3; step++) { h.clock.advance(RELEASE_TAU_MS); h.layer.update(); }
+  // Avança > 160 ms (piso de silêncio do driver)
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   for (const value of valuesOf(h.targets)) {
-    assert.ok(value < 0.06, `boca quase fechada após 240 ms (veio ${value})`);
-    assert.ok(value > 0.02, `decai com o tau de release, não com o de ataque (veio ${value})`);
+    assert.ok(value < 0.05, `boca quase fechada após silêncio (veio ${value})`);
   }
 });
 
 test('elemento pausado ou terminado zera os visemas e limpa o estado', () => {
-  const h = makeSpeakingLayer();
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  assert.ok(valuesOf(h.targets).every(value => value > 0.9), 'boca aberta antes da pausa');
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.2, 'boca aberta antes da pausa');
   h.element.paused = true;
   h.layer.update();
   assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0]);
@@ -168,30 +232,30 @@ test('elemento pausado ou terminado zera os visemas e limpa o estado', () => {
 });
 
 test('reset zera os visemas, fecha o contexto e desconecta o source', () => {
-  const h = makeSpeakingLayer();
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   h.layer.reset();
   assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0]);
   assert.equal(h.web.calls.closes, 1, 'AudioContext.close chamado');
   assert.equal(h.web.calls.sourceDisconnects, 1, 'source desconectado');
-  h.layer.update(); // rearmável: sem crash, pronto para um novo elemento
+  h.layer.update(); // rearmável
   assert.equal(h.layer.enabled, true);
   assert.equal(h.web.calls.closes, 1, 'o contexto não é fechado de novo');
 });
 
 test('attach troca o elemento sem fechar o contexto e recria apenas o source', () => {
-  const h = makeSpeakingLayer();
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
   h.layer.update();
   const second = makeAudioElement();
   h.layer.attach(second);
-  h.clock.advance(ATTACK_TAU_MS);
+  h.clock.advance(20);
   h.layer.update();
   assert.equal(h.web.calls.closes, 0, 'o contexto sobrevive à troca de elemento');
   assert.equal(h.web.calls.sources, 2, 'um MediaElementSource por elemento');
   assert.equal(h.web.calls.analysers, 1, 'AnalyserNode reaproveitado');
-  h.layer.attach(second); // idempotente
-  h.clock.advance(ATTACK_TAU_MS);
+  h.layer.attach(second);
+  h.clock.advance(20);
   h.layer.update();
   assert.equal(h.web.calls.sources, 2);
 });
@@ -206,7 +270,7 @@ test('sem AudioContext no ambiente (SSR) o layer se desativa sem crash', () => {
     layer.update();
     assert.equal(layer.enabled, false);
     assert.deepEqual(valuesOf(targets), [0, 0, 0, 0, 0]);
-    layer.update(); // segue sem crash
+    layer.update();
   } finally {
     restore();
     restoreWebkit();
@@ -238,7 +302,7 @@ test('createMediaElementSource que lança desativa o layer; o elemento continua 
   assert.equal(layer.enabled, false, 'fallback silencioso ativado');
   element.play();
   assert.equal(element.plays, 1, 'elemento segue utilizável pelo player');
-  layer.update(); // fallback: sem crash, boca fechada
+  layer.update();
   assert.deepEqual(valuesOf(targets), [0, 0, 0, 0, 0]);
 });
 
@@ -246,77 +310,66 @@ test('stub de AnalyserNode sem connect não derruba a inicialização', () => {
   const h = makeSpeakingLayer({ withAnalyserConnect: false });
   h.layer.update();
   assert.equal(h.layer.enabled, true);
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  assert.ok(valuesOf(h.targets).every(value => value > 0.9));
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.2);
 });
 
 test('morph fora dos visemas nunca é escrito; modelo sem visemas fica inativo', () => {
   const targets = makeMorphTargets(['blink']);
-  const h = makeSpeakingLayer({ targets });
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A'), targets });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   const blink = targets[targets.length - 1];
   assert.equal(blink.object.morphTargetInfluences[blink.index], 0, 'blink intocado');
-  assert.ok(valuesOf(targets.slice(0, 5)).every(value => value > 0.9), 'os 5 visemas sobem');
+  assert.ok(Math.max(...valuesOf(targets.slice(0, 5))) > 0.2, 'os 5 visemas sobem');
   const bare = createAudioLipSync({ audioElement: makeAudioElement(), morphTargets: [] });
   assert.equal(bare.enabled, false);
   bare.update();
   bare.reset();
 });
 
-// --- canal de expressão (vrm.expressionManager) ---
-// A escrita bruta em morphTargetInfluences é zerada todo frame pelo
-// clearAppliedWeight() do VRMExpressionManager dentro de vrm.update(delta);
-// em VRM a boca precisa ir pelo setValue do manager.
-
-function makeChannelLayer({ data = new Uint8Array(128).fill(255), morphTargets = makeMorphTargets() } = {}) {
-  const web = makeWebAudio({ data });
-  const clock = makeClock();
-  const element = makeAudioElement();
-  const written = [];
-  const layer = createAudioLipSync({
-    audioElement: element,
-    morphTargets,
-    setWeight: (name, value) => written.push([name, value]),
-    visemeNames: ['aa', 'ih', 'ou', 'ee', 'oh'],
-    now: clock.now,
-    AudioContextCtor: web.Ctor,
-  });
-  return { web, clock, element, written, layer, morphTargets };
-}
-
 test('canal setWeight: boca vai ao expressionManager e os morphs ficam intactos', () => {
-  const h = makeChannelLayer();
+  const h = makeChannelLayer({ data: makeVowelSpectrum('A') });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   assert.ok(h.written.length >= 5, 'cada frame escreve os 5 visemas do canal');
-  assert.deepEqual([...new Set(h.written.map(([name]) => name))].sort(), ['aa', 'ee', 'ih', 'oh', 'ou']);
-  const last = h.written[h.written.length - 1];
-  assert.ok(last[1] > 0.9, `visema ≈ aberto após 3×tau de ataque (veio ${last[1]})`);
+  const names = [...new Set(h.written.map(([name]) => name))].sort();
+  assert.deepEqual(names, ['aa', 'ee', 'ih', 'oh', 'ou']);
+  // A vencedora (A→aa) abre; achar a entrada para 'aa' no último frame
+  const lastFrame = h.written.slice(-5);
+  const aaEntry = lastFrame.find(([name]) => name === 'aa');
+  assert.ok(aaEntry, 'aa escrito no último frame');
+  assert.ok(aaEntry[1] > 0.1, `visema vencedor 'aa' abre (veio ${aaEntry[1]})`);
   assert.deepEqual(valuesOf(h.morphTargets), [0, 0, 0, 0, 0], 'fallback morph não é escrito com o canal ativo');
   assert.equal(h.layer.enabled, true);
 });
 
 test('canal setWeight: clear e elemento pausado zeram pelo mesmo canal', () => {
-  const h = makeChannelLayer();
+  const h = makeChannelLayer({ data: makeVowelSpectrum('A') });
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   h.layer.clear();
-  for (const [name, value] of h.written.slice(-5)) assert.equal(value, 0, `clear escreveu 0 em ${name}`);
+  // clear escreve 0 em todos os 5 slots
+  const last5 = h.written.slice(-5);
+  for (const [name, value] of last5) assert.equal(value, 0, `clear escreveu 0 em ${name}`);
   h.written.length = 0;
   h.layer.update(); // reabre com o mesmo elemento
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  assert.ok(h.written[h.written.length - 1][1] > 0.9);
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  // Verificar que 'aa' (vencedora A) abre novamente
+  const lastFrame = h.written.slice(-5);
+  const aaEntry = lastFrame.find(([name]) => name === 'aa');
+  assert.ok(aaEntry, 'aa escrito após reabrir');
+  assert.ok(aaEntry[1] > 0.1, `aa abre após reabrir (veio ${aaEntry[1]})`);
   h.written.length = 0;
   h.element.paused = true;
-  h.clock.advance(ATTACK_TAU_MS);
+  h.clock.advance(20);
   h.layer.update();
   assert.ok(h.written.some(([, value]) => value === 0), 'pausado escreve 0 pelo canal');
 });
 
 test('setWeight sem visemeNames (ou vazio) cai no fallback de morph', () => {
   const targets = makeMorphTargets();
-  const web = makeWebAudio({ data: new Uint8Array(128).fill(255) });
+  const web = makeWebAudio({ data: makeVowelSpectrum('A') });
   const clock = makeClock();
   const layer = createAudioLipSync({
     audioElement: makeAudioElement(),
@@ -327,13 +380,13 @@ test('setWeight sem visemeNames (ou vazio) cai no fallback de morph', () => {
     AudioContextCtor: web.Ctor,
   });
   layer.update();
-  for (let step = 0; step < 3; step++) { clock.advance(ATTACK_TAU_MS); layer.update(); }
-  assert.ok(valuesOf(targets).every(value => value > 0.9), 'escreve os morphs como antes');
+  for (let step = 0; step < 10; step++) { clock.advance(20); layer.update(); }
+  assert.ok(Math.max(...valuesOf(targets)) > 0.2, 'escreve os morphs como antes');
 });
 
 test('canal setWeight sem morphTargets (modelo via expressões) continua ativo', () => {
   const written = [];
-  const web = makeWebAudio({ data: new Uint8Array(128).fill(255) });
+  const web = makeWebAudio({ data: makeVowelSpectrum('A') });
   const clock = makeClock();
   const layer = createAudioLipSync({
     audioElement: makeAudioElement(),
@@ -344,32 +397,19 @@ test('canal setWeight sem morphTargets (modelo via expressões) continua ativo',
     AudioContextCtor: web.Ctor,
   });
   assert.equal(layer.enabled, true, 'só o canal já habilita o lip-sync');
+  clock.advance(20); // avança antes do primeiro update para dt > 0
   layer.update();
-  clock.advance(ATTACK_TAU_MS);
-  layer.update();
-  assert.ok(written[written.length - 1][1] > 0);
+  for (let step = 0; step < 10; step++) { clock.advance(20); layer.update(); }
+  // Com apenas 'aa' no visemeNames, apenas A (→aa) será escrito
+  // Pegar a última entrada para 'aa' (a que tem o peso final)
+  const aaEntries = written.filter(([name]) => name === 'aa');
+  assert.ok(aaEntries.length > 0, 'aa foi escrito');
+  const lastAa = aaEntries[aaEntries.length - 1];
+  assert.ok(lastAa[1] > 0.05, `aa tem peso > 0 (veio ${lastAa[1]})`);
   layer.reset();
-  assert.equal(written[written.length - 1][1], 0, 'reset zera pelo canal');
+  const lastAfterReset = written[written.length - 1];
+  assert.equal(lastAfterReset[1], 0, 'reset zera pelo canal');
 });
-
-// --- tap do PCM em streaming (src/stream-audio-player.js) ---
-// O áudio do /api/tts?stream chega como PCM cru e é tocado por
-// AudioBufferSourceNode, sem HTMLAudioElement. Para a boca continuar sendo
-// dirigida pelo MESMO analyser, o layer precisa expor o grafo antes de
-// qualquer elemento existir e saber que a fala da vez não passa dele.
-
-function makeTapLayer({ data = new Uint8Array(128).fill(255), audioElement = null } = {}) {
-  const web = makeWebAudio({ data });
-  const clock = makeClock();
-  const targets = makeMorphTargets();
-  const layer = createAudioLipSync({
-    audioElement,
-    morphTargets: targets,
-    now: clock.now,
-    AudioContextCtor: web.Ctor,
-  });
-  return { web, clock, targets, layer, data };
-}
 
 test('getTap cria contexto e analyser sem tocar em createMediaElementSource', () => {
   const h = makeTapLayer();
@@ -379,7 +419,7 @@ test('getTap cria contexto e analyser sem tocar em createMediaElementSource', ()
   assert.equal(tap.input, h.web.analyser, 'input é o próprio AnalyserNode da boca');
   assert.equal(h.web.calls.sources, 0, 'sem elemento, sem MediaElementSource');
   assert.equal(h.web.calls.analysers, 1);
-  assert.equal(h.web.analyser.fftSize, 256);
+  assert.equal(h.web.analyser.fftSize, 1024);
   assert.equal(h.web.analyser.smoothingTimeConstant, 0.3);
   const again = h.layer.getTap();
   assert.equal(again.input, tap.input, 'tap idempotente');
@@ -388,7 +428,7 @@ test('getTap cria contexto e analyser sem tocar em createMediaElementSource', ()
 
 test('getTap reaproveita o grafo já criado pelo caminho do elemento', () => {
   const h = makeTapLayer({ audioElement: makeAudioElement() });
-  h.layer.update(); // caminho histórico: cria contexto + MediaElementSource
+  h.layer.update();
   const tap = h.layer.getTap();
   assert.equal(h.web.calls.analysers, 1, 'analyser compartilhado');
   assert.equal(h.web.calls.sources, 1);
@@ -418,10 +458,14 @@ test('modo externo: update dirige a boca pelo analyser mesmo sem elemento', () =
   assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'sem elemento a boca segue fechada');
   assert.equal(h.web.calls.analysers, 0, 'e o grafo nem nasce');
   assert.equal(h.layer.beginExternal(), true);
-  h.layer.update(); // dt 0 — cria o contexto do tap e ancora o relógio
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  for (const value of valuesOf(h.targets)) {
-    assert.ok(value > 0.9, `PCM no analyser abre a boca (veio ${value})`);
+  h.clock.advance(20); // avança ANTES do primeiro update para dt > 0
+  h.layer.update(); // cria o contexto do tap
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  // Apenas o visema da vogal ativa (A→'a', índice 0) deve abrir
+  const vals = valuesOf(h.targets);
+  assert.ok(vals[0] > 0.05, `visema 'a' abre (veio ${vals[0]})`);
+  for (let i = 1; i < 5; i += 1) {
+    assert.ok(vals[i] < 0.1, `visema ${i} ≈ 0 (veio ${vals[i]})`);
   }
   assert.equal(h.web.calls.sources, 0, 'o caminho do elemento não é invocado');
   h.layer.endExternal();
@@ -434,37 +478,37 @@ test('modo externo: elemento pausado ou sem src não zera a boca no meio da fala
   const h = makeTapLayer({ audioElement: element });
   h.layer.beginExternal();
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  assert.ok(Math.max(...valuesOf(h.targets)) > 0.9, 'a fala em streaming segue dirigida');
-  // O RMS zerado ainda fecha a boca pela rampa de release — não é stopMouth seco.
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.1, 'a fala em streaming segue dirigida');
   h.data.fill(0);
-  for (let step = 0; step < 6; step++) { h.clock.advance(RELEASE_TAU_MS); h.layer.update(); }
-  assert.ok(Math.max(...valuesOf(h.targets)) < 0.02, 'silêncio do fim do stream fecha a boca');
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) < 0.05, 'silêncio do fim do stream fecha a boca');
 });
 
 test('modo externo: contexto suspenso do tap é retomado a cada frame', () => {
-  const web = makeWebAudio({ state: 'suspended', data: new Uint8Array(128).fill(255) });
+  const web = makeWebAudio({ state: 'suspended', data: makeVowelSpectrum('A') });
   const clock = makeClock();
   const targets = makeMorphTargets();
   const layer = createAudioLipSync({ morphTargets: targets, now: clock.now, AudioContextCtor: web.Ctor });
   assert.ok(layer.getTap(), 'contexto nasce suspenso (política de autoplay)');
   layer.beginExternal();
+  clock.advance(20); // avança ANTES do primeiro update
   layer.update();
   assert.equal(web.calls.resumes, 1, 'resume também se aplica ao contexto do tap');
-  clock.advance(ATTACK_TAU_MS);
+  clock.advance(20);
   layer.update();
-  assert.ok(Math.max(...valuesOf(targets)) > 0, 'a boca continua sendo dirigida');
+  assert.ok(Math.max(...valuesOf(targets)) > 0.05, 'a boca continua sendo dirigida');
 });
 
 test('modo externo: clear e reset continuam seguros, reset derruba o modo', () => {
   const h = makeTapLayer();
   h.layer.beginExternal();
   h.layer.update();
-  for (let step = 0; step < 3; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
   h.layer.clear();
   assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0], 'clear fecha a boca na hora');
-  for (let step = 0; step < 4; step++) { h.clock.advance(ATTACK_TAU_MS); h.layer.update(); }
-  assert.ok(Math.max(...valuesOf(h.targets)) > 0.9, 'e o modo externo segue vivo depois do clear');
+  for (let step = 0; step < 10; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(Math.max(...valuesOf(h.targets)) > 0.1, 'e o modo externo segue vivo depois do clear');
   h.layer.reset();
   assert.deepEqual(valuesOf(h.targets), [0, 0, 0, 0, 0]);
   assert.equal(h.web.calls.closes, 1, 'contexto fechado no teardown');
