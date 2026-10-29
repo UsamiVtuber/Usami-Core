@@ -41,7 +41,9 @@ Usuário escolheu um HUD minimalista, baseado no mock de referência: sem texto 
 
 - Fatos duráveis moram em seções fixas: `user`, `preferences`, `hobbies`, `relationship`, `dates`, `other` (`src/memory-store.js`, `memory.json` v2). O modelo devolve `remember: {section, fact}`; string antiga ou seção inventada cai em `other`. A migração v1 → v2 nunca perde fato e não reescreve o disco no load.
 - Exclusão é granular e sempre exige confirmação escrita (`APAGAR`) no corpo de `POST /api/memory/forget`; a aba **Memória** do painel só habilita os botões depois que a palavra é digitada. Não trocar por `confirm()` do navegador.
-- Resumos diários em background, consolidação de fatos e busca FTS5 no vault estão decididos para as próximas fases e **ainda não implementados**. O campo `summaries` já existe no schema, mas fica vazio até a Fase 1 — não descrever como pronto.
+- Continuidade entre dias (Fase 1): depois de responder, o chat dispara `summarizePendingDays` (`src/memory-summaries.js`) em fire-and-forget para cada dia anterior com histórico e sem resumo. Com NVIDIA configurada o texto vem de `summarizeDay` (`llm-router.js`); sem chave ou se o provedor falhar, grava um resumo determinístico das falas do usuário. O turno seguinte injeta os 3 resumos mais recentes via `buildPersona({summaries})`. Nunca bloquear o balão esperando esse resumo.
+- Busca no vault (Fase 3): `src/vault-index.js` mantém um índice FTS5 derivado em `data/vault-index.sqlite` (LIKE quando o build não tem FTS5), reconciliado por mtime/tamanho a cada busca; arquivos apagados saem do índice. O `/api/chat` consulta pelo texto da mensagem — termos AND primeiro, OR se não houver match, e arquivos mais recentes quando a mensagem não tem termos úteis (stopwords) ou nada casa, preservando o comportamento antigo. Só a pasta `Inbox/Responses` documentada é lida; o DB é descartável e fica em `data/` (não versionado).
+- Consolidação de fatos (Fase 2) segue pendente: `DURABLE_FACT` ainda decide entre fato núcleo e recente, e fatos antigos migrados continuam em `other` até essa fase.
 
 ## Chamadas NVIDIA (por que a Usami "não reage")
 

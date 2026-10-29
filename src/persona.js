@@ -55,11 +55,12 @@ const FACT_SECTIONS = [
  * @param {Object<string,string[]>} opts.sections  fatos duráveis por seção (user, preferences, hobbies, relationship, dates, other)
  * @param {string[]} opts.recentFacts    fatos recentes (últimos 7 dias, ex.: "gosta de café gelado", "tem gato")
  * @param {Array<{role, content}>} opts.history  últimas ~8 mensagens do dia (user/assistant)
+ * @param {Array<{date, summary}>} opts.summaries  resumos dos dias anteriores (mais antigo primeiro)
  * @param {string} opts.username         como chamar o usuário (ex.: "você", apelido)
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
  */
-export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], username = 'você', date, timeOfDay = 'tarde' }) {
+export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], summaries = [], username = 'você', date, timeOfDay = 'tarde' }) {
   const stage = getAffinityStage(affinity);
 
   const sectionBlocks = FACT_SECTIONS
@@ -79,6 +80,13 @@ export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], hi
   const historyBlock = history.length
     ? `\n\n=== CONVERSA DE HOJE (últimas ${history.length}) ===\n` +
       history.map(m => `${m.role === 'user' ? username : 'Usami'}: ${m.content}`).join('\n')
+    : '';
+
+  // Continuidade entre dias: os resumos são o que a Usami "lembra" de ontem
+  // quando o histórico do dia anterior não cabe mais no prompt.
+  const summariesBlock = summaries.length
+    ? `\n\n=== DIAS ANTERIORES ===\n` +
+      summaries.map(s => `${s.date}: ${s.summary}`).join('\n')
     : '';
 
   const stageGuidance = {
@@ -119,6 +127,7 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 
 ${virtualHumanNote}
 ${factsBlock}
+${summariesBlock}
 ${historyBlock}
 
 === CONTEXTO AGORA ===

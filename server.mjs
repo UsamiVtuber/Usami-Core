@@ -16,10 +16,13 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique } from './src/llm-router.js';
-import { readRagContext } from './src/rag.js';
+import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique, summarizeDay } from './src/llm-router.js';
+import { summarizePendingDays } from './src/memory-summaries.js';
+import { readRagContext, resolveVaultDir } from './src/rag.js';
+import { createVaultIndex } from './src/vault-index.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
 import { checkApiToken, isAllowedRequest, keysFilePath, readApiToken, readEnvValue, signWebhook, withExtraOrigins } from './src/api-security.js';
+import { SemaphoreRejected, createSemaphore } from './src/semaphore.js';
 import { createTechniqueIndex } from './src/technique-index.js';
 import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
@@ -48,6 +51,14 @@ if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
 }
 
 const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false},{"type":"play_sequence","shape":"um de: ${SHAPE_NAMES.join(', ')}","amplitude":0.02 a 0.5,"cycles":1 a 8,"durationMs":600 a 8000,"side":"left" ou "right"}]}. Actions é opcional e pode ser vazio; no máximo 5 ações. play_sequence compõe movimento novo a partir de uma shape; use apenas se capabilities.sequences for true.`.trim();
+
+// Orçamento de tempo do turno do chat. A NVIDIA recebe uma fatia (NVIDIA_BUDGET)
+// e o OpenRouter fica com o que sobrar até o deadline (mínimo FALLBACK_MIN), em
+// vez de somar 45 s + 45 s: o pior caso do turno é TURN_DEADLINE, não ~90 s.
+const envMs = (name, fallback) => Math.max(1000, Number(process.env[name]) || fallback);
+const TURN_DEADLINE_MS = envMs('USAMI_TURN_DEADLINE_MS', 40000);
+const NVIDIA_BUDGET_MS = envMs('USAMI_NVIDIA_BUDGET_MS', 25000);
+const FALLBACK_MIN_MS = 8000;
 
 const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
 
@@ -130,6 +141,20 @@ try {
   installMemoryStore.load();
 } catch {
   console.error('Aviso: memória local indisponível — o chat segue sem contexto persistido.');
+}
+
+// Índice FTS5 do vault (Inbox/Responses). Criado na primeira busca para não
+// abrir SQLite só por importar o módulo; o diretório de dados é o mesmo da
+// memória, então os testes continuam isolados em USAMI_DATA_DIR.
+let sharedVaultIndex = null;
+function getVaultIndex() {
+  if (!sharedVaultIndex) {
+    sharedVaultIndex = createVaultIndex({
+      vaultDir: resolveVaultDir(process.env.USAMI_RAG_VAULT),
+      dataDir: process.env.USAMI_DATA_DIR || 'data',
+    });
+  }
+  return sharedVaultIndex;
 }
 
 // Serviços de domínio + FlowExecutor (grafo de nós estilo n8n)
@@ -500,6 +525,21 @@ export function createChatHandler(options = {}) {
   // Testes injetam um depósito temporário; sem isso o handler do chat escreveria
   // em data/memory.json de verdade a cada npm test.
   const memoryStore = options.memoryStore || installMemoryStore;
+  // Injetável para os testes não varrerem o vault real: o padrão consulta o
+  // índice FTS5 e, se ele falhar ou voltar vazio, mantém o leitor antigo.
+  const searchVault = options.vaultSearch || (async (query) => {
+    try {
+      const context = getVaultIndex().search({ query });
+      if (context) return context;
+    } catch {
+      // índice indisponível → leitura direta abaixo
+    }
+    try {
+      return await readRagContext();
+    } catch {
+      return null;
+    }
+  });
 
   return async function handleChat(req, res) {
     const send = (status, data) => {
@@ -509,6 +549,13 @@ export function createChatHandler(options = {}) {
 
     // Linha do tempo do turno (stageTimes logo abaixo)
     const chatStartedAt = now();
+
+    // Cliente que fecha a conexão antes da resposta cancela as chamadas ao
+    // provedor: sem isso o turno seguia gastando tokens e slots para ninguém.
+    const turn = new AbortController();
+    res.on?.('close', () => {
+      if (!res.writableEnded) turn.abort(new Error('cliente desconectou'));
+    });
 
     if (req.method !== 'POST' || req.url !== '/api/chat') {
       return send(404, { error: 'Não encontrado.' });
@@ -553,27 +600,27 @@ export function createChatHandler(options = {}) {
       sections: memoryStore.getSections(),
       recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
       history: memoryStore.getTodayHistory(today),
+      summaries: memoryStore.getSummaries().slice(-3),
       username: mem.user.nickname || 'você',
       date: today,
       timeOfDay,
     });
 
-    // RAG: injeta contexto recente do vault Obsidian (respostas gravadas
-    // pelo workflow n8n) no system prompt, se a Usami tiver permissão para
-    // ler o vault.
+    // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
+    // ler só os arquivos mais recentes. O índice é derivado e se reconcilia
+    // com o disco a cada busca; se ele falhar, o leitor antigo continua valendo.
     let ragContext = null;
     try {
-      ragContext = await readRagContext();
+      ragContext = await searchVault(parsedBody.message);
     } catch {
       ragContext = null;
     }
     if (ragContext) {
-      system += '\n\n--- Contexto recente do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+      system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
     }
 
     let parsed;
     let classification = null;
-    let classificationPending = null;
 
     // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
     // otimização vira chute. Um log por turno basta para ver quem manda.
@@ -604,16 +651,15 @@ export function createChatHandler(options = {}) {
     if (useNvidia()) {
       // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
       try {
-        // Classificação fora do caminho crítico: ela nunca participou da resposta
-        // (o cliente deriva a emoção do texto localmente), só alimenta o webhook do
-        // n8n. Esperá-la pagava o tempo da chamada mais lenta das duas e um slot
-        // do rate limiter de 40 req/min.
-        classificationPending = classifyUserMessage(parsedBody.message).catch(() => null);
+        // A classificação só alimenta o webhook do n8n (o cliente deriva a emoção
+        // do texto localmente), então roda no classificador determinístico: não
+        // gasta chamada nem um slot do rate limiter de 40 req/min por turno.
+        classification = await classifyUserMessage(parsedBody.message, { local: true });
 
         const rawReply = await timeStage('llm', () => generateReplyWithActions(
           withCapabilities(system, capabilities),
           parsedBody.message,
-          { temperature: 0.7 },
+          { temperature: 0.7, signal: AbortSignal.any([turn.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]) },
         ));
 
         const parsedReply = parseProviderRaw(rawReply);
@@ -642,6 +688,9 @@ export function createChatHandler(options = {}) {
         // Fallback para OpenRouter abaixo
       }
     }
+
+    // Ninguém esperando a resposta: não há o que salvar nem fallback a pagar.
+    if (turn.signal.aborted) return;
 
     if (!parsed || !parsed.ok) {
       // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
@@ -681,9 +730,13 @@ export function createChatHandler(options = {}) {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
-            signal: AbortSignal.timeout(45000),
+            signal: AbortSignal.any([
+              turn.signal,
+              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+            ]),
           }));
         } catch (error) {
+          if (turn.signal.aborted) return;
           console.warn('OpenRouter falhou:', describeFetchError(error));
           return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
         }
@@ -746,12 +799,20 @@ export function createChatHandler(options = {}) {
       // sem memória o chat segue stateless; nada a fazer aqui
     }
 
+    // Continuidade entre dias: fecha os dias anteriores ainda sem resumo, em
+    // background. Fora do caminho crítico — a próxima conversa já lê o
+    // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
+    void summarizePendingDays({
+      store: memoryStore,
+      today,
+      summarize: useNvidia() ? summarizeDay : undefined,
+    }).catch(() => {});
+
     const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
 
     // Dispara evento para o n8n (fire-and-forget): resposta, emoção,
     // ações de animação e afinidade. Não bloqueia o chat se o n8n estiver
-    // offline. A classificação chega depois da resposta quando está em voo —
-    // ela só alimenta este webhook, nunca o balão.
+    // offline. A classificação (local) alimenta só este webhook, nunca o balão.
     const emitResponse = emotion => void sendToN8nWebhook('usami.response', {
       userMessage: parsedBody.message,
       reply: parsed.reply,
@@ -761,8 +822,7 @@ export function createChatHandler(options = {}) {
       affinity: affinityPayload,
       source: parsed.source,
     });
-    if (classificationPending) void classificationPending.then(emitResponse);
-    else emitResponse(classification);
+    emitResponse(classification);
 
     const totalMs = now() - chatStartedAt;
     stageTimes.total = totalMs;
@@ -1322,6 +1382,7 @@ export function createTtsHandler(options = {}) {
   const ttsUrl = (options.ttsUrl || 'https://api.elevenlabs.io').replace(/\/+$/, '');
   const geminiUrl = (options.geminiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const timeoutMs = options.timeoutMs || 30000;
+  const gate = options.gate || createSemaphore({ limit: 1, maxQueue: 4 });
   const cache = options.cache ? (options.cacheStore || createFileTtsCache({ directory: options.cacheDir || process.env.USAMI_TTS_CACHE_DIR || 'data/tts-cache' })) : null;
 
   return async function handleTts(req, res) {
@@ -1413,98 +1474,130 @@ export function createTtsHandler(options = {}) {
       }
     }
 
-    let response;
+    // O provedor de TTS não tolera síntese concorrente: uma por vez, no servidor.
+    // Fila curta; quem não cabe (ou espera demais) recebe 429/503 e o cliente cai
+    // no fallback dele. Cliente que desconecta sai da fila.
+    const closed = new AbortController();
+    res.on?.('close', () => {
+      if (!res.writableEnded) closed.abort();
+    });
+    let release;
     try {
-      // Voz em streaming (medido nesta máquina): o provedor entrega PCM em ~72 ms
-      // por pedaço e a primeira amostra de áudio sai em ~1,0 s, contra ~5,3 s do
-      // WAV completo. Falhou o stream (qualquer motivo antes do primeiro byte de
-      // áudio)? Segue o caminho normal abaixo, que ainda responde.
-      if (parsedBody.stream && provider === 'gemini') {
-        const streamed = await streamGeminiPcm({
-          fetchImpl,
-          geminiUrl,
-          apiKey: config.apiKey,
-          model: geminiModel,
-          voice: geminiVoice,
-          text: geminiInstruction + parsedBody.text,
-          res,
-          timeoutMs,
-        });
-        if (streamed.ok) {
-          if (cache && cacheKey) {
-            try {
-              await cache.put(cacheKey, pcmToWav(streamed.pcm, streamed.sampleRate));
-            } catch {
-              // Cache failures never make a successful synthesis fail.
-            }
+      release = await gate.acquire({ signal: closed.signal, timeoutMs });
+    } catch (error) {
+      if (!(error instanceof SemaphoreRejected) || error.reason === 'aborted') return;
+      return send(error.reason === 'full' ? 429 : 503, { error: 'TTS ocupado, tente novamente.' });
+    }
+    try {
+      // Quem esperou na fila pode ter achado o áudio pronto (mesma frase pedida
+      // duas vezes): confere o cache de novo antes de gastar o provedor.
+      if (cache && cacheKey) {
+        try {
+          const cached = await cache.get(cacheKey);
+          if (cached) {
+            res.writeHead(200, { 'Content-Type': audioFormat, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-TTS-Cache': 'HIT' });
+            return res.end(cached);
           }
-          return;
+        } catch {
+          // Cache failures never make TTS unavailable.
         }
       }
-      if (provider === 'gemini') {
-        // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
-        // instrução não conta no limite de 2000 chars, validado sobre o texto puro
-        response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(geminiModel) + ':generateContent', {
-          method: 'POST',
-          headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: geminiVoice })),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-      } else {
-        response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(config.voiceId) + '?output_format=mp3_44100_128', {
-          method: 'POST',
-          headers: { 'xi-api-key': config.apiKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: parsedBody.text, model_id: model, output_format: 'mp3_44100_128' }),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-      }
-    } catch {
-      // timeout ou falha de rede; a apiKey nunca é exposta em resposta ou log
-      return send(504, { error: 'TTS expirou.' });
-    }
 
-    if (!response || !response.ok) {
-      // não repassa o corpo do provedor; preserva apenas o status 400/422/429
-      const providerStatus = response?.status ?? 0;
-      const status = providerStatus === 400 || providerStatus === 422 || providerStatus === 429 ? providerStatus : 502;
-      return send(status, { error: 'TTS falhou no provedor.' });
-    }
-
-    let audio;
-    try {
-      if (provider === 'gemini') {
-        const data = await response.json();
-        const inlineData = data?.candidates?.[0]?.content?.parts?.find(part => part?.inlineData)?.inlineData;
-        if (!inlineData || typeof inlineData.data !== 'string') {
-          return send(502, { error: 'TTS falhou no provedor.' });
+      let response;
+      try {
+        // Voz em streaming (medido nesta máquina): o provedor entrega PCM em ~72 ms
+        // por pedaço e a primeira amostra de áudio sai em ~1,0 s, contra ~5,3 s do
+        // WAV completo. Falhou o stream (qualquer motivo antes do primeiro byte de
+        // áudio)? Segue o caminho normal abaixo, que ainda responde.
+        if (parsedBody.stream && provider === 'gemini') {
+          const streamed = await streamGeminiPcm({
+            fetchImpl,
+            geminiUrl,
+            apiKey: config.apiKey,
+            model: geminiModel,
+            voice: geminiVoice,
+            text: geminiInstruction + parsedBody.text,
+            res,
+            timeoutMs,
+          });
+          if (streamed.ok) {
+            if (cache && cacheKey) {
+              try {
+                await cache.put(cacheKey, pcmToWav(streamed.pcm, streamed.sampleRate));
+              } catch {
+                // Cache failures never make a successful synthesis fail.
+              }
+            }
+            return;
+          }
         }
-        const pcm = Buffer.from(inlineData.data, 'base64');
-        if (!pcm.length) {
-          return send(502, { error: 'TTS falhou no provedor.' });
+        if (provider === 'gemini') {
+          // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
+          // instrução não conta no limite de 2000 chars, validado sobre o texto puro
+          response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(geminiModel) + ':generateContent', {
+            method: 'POST',
+            headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: geminiVoice })),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+        } else {
+          response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(config.voiceId) + '?output_format=mp3_44100_128', {
+            method: 'POST',
+            headers: { 'xi-api-key': config.apiKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: parsedBody.text, model_id: model, output_format: 'mp3_44100_128' }),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
         }
-        // O provedor já devolve um WAV completo (mimeType "audio/wav"), com chunk
-        // `C2PA` de proveniência depois do `data`. Embrulhar isso num segundo
-        // header declara os metadados como amostras: ~63 ms de ruído em fundo de
-        // escala no fim de cada fala — o "estouro" que o Lucas ouviu. Passa
-        // intacto; o parser de WAV do navegador anda pelos chunks e ignora o resto.
-        const alreadyWav = pcm.length > 44
-          && pcm.slice(0, 4).toString('ascii') === 'RIFF'
-          && pcm.slice(8, 12).toString('ascii') === 'WAVE';
-        audio = alreadyWav ? pcm : pcmToWav(pcm, parseGeminiSampleRate(inlineData.mimeType));
-      } else {
-        audio = Buffer.from(await response.arrayBuffer());
+      } catch {
+        // timeout ou falha de rede; a apiKey nunca é exposta em resposta ou log
+        return send(504, { error: 'TTS expirou.' });
       }
-    } catch {
-      return send(502, { error: 'TTS falhou no provedor.' });
-    }
 
-    res.writeHead(200, { 'Content-Type': audioFormat, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-    if (cache && cacheKey) {
-      try { await cache.put(cacheKey, audio); } catch {
-        // Cache failures never make a successful synthesis fail.
+      if (!response || !response.ok) {
+        // não repassa o corpo do provedor; preserva apenas o status 400/422/429
+        const providerStatus = response?.status ?? 0;
+        const status = providerStatus === 400 || providerStatus === 422 || providerStatus === 429 ? providerStatus : 502;
+        return send(status, { error: 'TTS falhou no provedor.' });
       }
+
+      let audio;
+      try {
+        if (provider === 'gemini') {
+          const data = await response.json();
+          const inlineData = data?.candidates?.[0]?.content?.parts?.find(part => part?.inlineData)?.inlineData;
+          if (!inlineData || typeof inlineData.data !== 'string') {
+            return send(502, { error: 'TTS falhou no provedor.' });
+          }
+          const pcm = Buffer.from(inlineData.data, 'base64');
+          if (!pcm.length) {
+            return send(502, { error: 'TTS falhou no provedor.' });
+          }
+          // O provedor já devolve um WAV completo (mimeType "audio/wav"), com chunk
+          // `C2PA` de proveniência depois do `data`. Embrulhar isso num segundo
+          // header declara os metadados como amostras: ~63 ms de ruído em fundo de
+          // escala no fim de cada fala — o "estouro" que o Lucas ouviu. Passa
+          // intacto; o parser de WAV do navegador anda pelos chunks e ignora o resto.
+          const alreadyWav = pcm.length > 44
+            && pcm.slice(0, 4).toString('ascii') === 'RIFF'
+            && pcm.slice(8, 12).toString('ascii') === 'WAVE';
+          audio = alreadyWav ? pcm : pcmToWav(pcm, parseGeminiSampleRate(inlineData.mimeType));
+        } else {
+          audio = Buffer.from(await response.arrayBuffer());
+        }
+      } catch {
+        return send(502, { error: 'TTS falhou no provedor.' });
+      }
+
+      res.writeHead(200, { 'Content-Type': audioFormat, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      if (cache && cacheKey) {
+        try { await cache.put(cacheKey, audio); } catch {
+          // Cache failures never make a successful synthesis fail.
+        }
+      }
+      res.end(audio);
+    } finally {
+      release();
     }
-    res.end(audio);
   };
 }
 

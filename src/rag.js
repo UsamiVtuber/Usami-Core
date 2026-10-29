@@ -18,7 +18,9 @@ const MAX_FILES = 10;        // quantos arquivos recentes ler
 const MAX_CHARS_PER_FILE = 2000; // quantos caracteres de cada arquivo
 const MAX_TOTAL_CHARS = 6000;    // teto total de contexto
 
-function resolveVaultDir(relative) {
+export { DEFAULT_VAULT_RELATIVE };
+
+export function resolveVaultDir(relative) {
   // server.mjs vive em usami/, então o vault está em ../vault/...
   return join(process.cwd(), relative || DEFAULT_VAULT_RELATIVE);
 }
@@ -42,7 +44,7 @@ async function listRecentFiles(dir, limit = MAX_FILES) {
   return resolved.slice(0, limit).map(entry => entry.path);
 }
 
-function stripFrontmatter(markdown) {
+export function stripFrontmatter(markdown) {
   // Remove bloco --- ... --- do início, se existir.
   const without = markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
   return without.trim();

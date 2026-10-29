@@ -69,9 +69,10 @@ Cada ação pode ter delayMs (ms após o início da fala) para sincronizar com o
 
 // --- Classificação (frase do usuário) -------------------------------------
 
-export async function classifyUserMessage(text, { classifier = classifyEmotion } = {}) {
-  // Se não houver chave NVIDIA configurada, usa o classificador determinístico local.
-  if (!process.env.NVIDIA_API_KEY) {
+export async function classifyUserMessage(text, { classifier = classifyEmotion, local = false } = {}) {
+  // Sem chave NVIDIA, ou com `local`, usa o classificador determinístico (sem
+  // gastar chamada nem slot do rate limiter).
+  if (local || !process.env.NVIDIA_API_KEY) {
     const result = classifier(text) || { label: 'neutral', intensity: 0, confidence: 0 };
     return {
       emotion: result.label,
@@ -129,7 +130,7 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion }
 export async function generateReplyWithActions(
   systemPrompt,
   userMessage,
-  { temperature = 0.7, maxTokens = 1100, client = sharedClient } = {},
+  { temperature = 0.7, maxTokens = 1100, client = sharedClient, signal } = {},
 ) {
   if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 
@@ -143,6 +144,8 @@ export async function generateReplyWithActions(
     temperature,
     max_tokens: maxTokens,
     extra: llmExtra(),
+    // deadline do turno / cliente desconectado cancelam a chamada ao provedor
+    ...(signal ? { signal } : {}),
   });
   // Texto cru, como generateReply: parse e fallback OpenRouter são do chamador.
   return jsonText(answer, 'reply');
@@ -175,6 +178,28 @@ export async function planAnimation(reply, capabilities, { temperature = 0.3 } =
     console.warn('NVIDIA animation falhou:', describeFetchError(error));
     return { actions: [], source: 'nvidia-fallback' };
   }
+}
+
+// --- Resumo diário (memória de longo prazo, roda em background) ------------
+
+const SUMMARY_SYSTEM = `Você resume, para a memória de longo prazo da Usami, um dia de conversa entre ela e o usuário.
+Escreva em português do Brasil, em 2 a 4 frases, em terceira pessoa ("o usuário" / "a Usami"), sem diálogo e sem opinião.
+Priorize fatos duráveis (quem ele é, gostos, planos, datas) e o clima da conversa. Se o dia tiver pouco conteúdo, resuma o pouco que houver. Não invente.`;
+
+export async function summarizeDay({ date, transcript }, { client = sharedClient } = {}) {
+  if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
+  const answer = await client.chatText({
+    model: GENERATION_MODEL,
+    messages: [
+      { role: 'system', content: SUMMARY_SYSTEM },
+      { role: 'user', content: `Data: ${date}\n\n${transcript}` },
+    ],
+    temperature: 0.3,
+    // O raciocínio do nemotron consome orçamento antes do texto; se sobrar
+    // pouco, o content volta vazio e o chamador usa o resumo determinístico.
+    max_tokens: 700,
+  });
+  return String(answer ?? '').trim();
 }
 
 // --- Estruturação de técnica (Fase 3: ficha ingerida → técnica validável) ---

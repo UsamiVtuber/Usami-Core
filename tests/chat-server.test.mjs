@@ -20,7 +20,7 @@ const { createChatHandler, createN8nCommandHandler, filterActionsByCatalog, isAl
 
 const scratchMemoryStore = createMemoryStore({ dataDir: scratchMemoryDir });
 scratchMemoryStore.load();
-const chatHandler = (options = {}) => createChatHandler({ memoryStore: scratchMemoryStore, ...options });
+const chatHandler = (options = {}) => createChatHandler({ memoryStore: scratchMemoryStore, vaultSearch: async () => null, ...options });
 
 function mockReq({ method = 'POST', url = '/api/chat', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -273,6 +273,51 @@ test('handler: 200 com resposta válida', async () => {
   assert.equal(data.gesture, 'tilt');
   assert.deepEqual(data.actions, []);
   assert.equal(calls, 1);
+});
+
+test('handler: resume o dia anterior em background e o turno seguinte já lê o resumo', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-chat-summary-'));
+  const store = createMemoryStore({ dataDir: dir });
+  store.load();
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  store.save({
+    ...store.getAll(),
+    dailyHistory: {
+      [yesterday]: [{ role: 'user', content: 'meu gato chama Tofu', timestamp: `${yesterday}T12:00:00.000Z` }],
+    },
+  });
+
+  const prompts = [];
+  const fetchImpl = async (_url, init) => {
+    prompts.push(JSON.parse(init.body).messages[0].content);
+    return jsonResponse('{"reply":"entendi","gesture":"neutral"}');
+  };
+  const handler = createChatHandler({
+    memoryStore: store,
+    vaultSearch: async () => null,
+    getKey: async () => 'k',
+    fetchImpl,
+  });
+  const request = () => mockReq({
+    headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' },
+    body: JSON.stringify({ message: 'oi' }),
+  });
+
+  const first = mockRes();
+  await handler(request(), first);
+  assert.equal(first.statusCode, 200);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const summaries = store.getSummaries();
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].date, yesterday);
+  assert.match(summaries[0].summary, /Tofu/);
+
+  const second = mockRes();
+  await handler(request(), second);
+  assert.equal(second.statusCode, 200);
+  assert.match(prompts[1], /=== DIAS ANTERIORES ===/);
+  assert.match(prompts[1], /Tofu/);
 });
 
 test('handler: timing povoa as etapas do turno (llmMs mede a chamada ao provedor)', async () => {

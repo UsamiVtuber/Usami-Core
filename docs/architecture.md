@@ -30,6 +30,7 @@ Node API (127.0.0.1:8787)
  └─ GET /api/learning + POST /api/learning/verdict → memória de aprendizagem
         │
         ├─ data/memory.json            memória e afinidade (v2: fatos por seção, recentes, resumos)
+        ├─ data/vault-index.sqlite     índice FTS5 do vault Inbox/Responses (derivado, descartável)
         ├─ data/techniques/*.json      técnicas validadas (fonte da verdade)
         ├─ data/techniques-index.sqlite  índice derivado, descartável
         ├─ data/learning.json            histórico de tentativas por técnica
@@ -128,3 +129,10 @@ Nenhum deles é publicado nem ativado sem autorização explícita.
 - `/api/memory*`, `/api/rag/context` e `/api/n8n/command(s)` exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto). Sem o token no servidor a resposta é 503 (fail-closed). O proxy do Vite injeta o header, então o token não chega ao navegador; o n8n precisa enviá-lo.
 - O `.env` é `USAMI_KEYS_FILE` ou `../.env` relativo ao projeto; não há mais caminhos fixos de `A:\` nem fallback para outro projeto.
 - Webhook para o n8n: com `N8N_WEBHOOK_SECRET` sai com `X-Usami-Timestamp` e `X-Usami-Signature` (`sha256=` + HMAC-SHA256 de `<timestamp>.<corpo>`); `N8N_WEBHOOK_OMIT_TEXT=true` remove `userMessage` e `reply`.
+
+## Resiliência das chamadas ao LLM e ao TTS
+
+- `src/nvidia-client.js`: rate limiter com fila FIFO (`maxQueue` 100, espera máxima 30 s; estourou → `UpstreamUnavailable` 503), retry de 429/408/5xx/timeout com backoff + jitter respeitando `Retry-After` (1 retry), circuit breaker (5 falhas seguidas abrem por 30 s; depois uma chamada de prova) e `signal` do chamador, que cancela sem repetir e sem contar como falha do provedor.
+- Turno do chat: deadline total `USAMI_TURN_DEADLINE_MS` (40 s) e fatia da NVIDIA `USAMI_NVIDIA_BUDGET_MS` (25 s); o OpenRouter fica com o restante (mínimo 8 s), em vez de 45 s + 45 s. Cliente que fecha a conexão cancela a chamada ao provedor e o turno não é respondido nem gravado.
+- A classificação que alimenta o webhook do n8n agora é local (determinística): não gasta chamada nem slot do limite de 40 req/min.
+- `POST /api/tts`: semáforo no servidor (`src/semaphore.js`, uma síntese por vez, fila de 4, espera até `timeoutMs`; cheia → 429, esgotada → 503). Quem esperou confere o cache de novo, então a mesma frase pedida em paralelo sintetiza uma vez só (com cache ligado).
