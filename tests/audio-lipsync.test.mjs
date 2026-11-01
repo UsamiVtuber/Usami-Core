@@ -532,3 +532,34 @@ test('tap depois de uma falha do Web Audio devolve null e o modo externo desiste
   layer.update();
   assert.deepEqual(valuesOf(targets), [0, 0, 0, 0, 0]);
 });
+test('getLevel acompanha o volume da fala e volta a 0 no silêncio e no clear', () => {
+  const h = makeSpeakingLayer({ data: makeVowelSpectrum('A') });
+  assert.equal(h.layer.getLevel(), 0);
+  h.layer.update();
+  for (let step = 0; step < 5; step++) { h.clock.advance(20); h.layer.update(); }
+  assert.ok(h.layer.getLevel() > 0, 'há nível enquanto fala');
+  h.element.paused = true;
+  h.layer.update();
+  assert.equal(h.layer.getLevel(), 0);
+  h.element.paused = false;
+  h.layer.update();
+  h.layer.clear();
+  assert.equal(h.layer.getLevel(), 0);
+});
+
+test('prime cria o contexto sem elemento e getContext o expõe para o audio-revive', () => {
+  const h = makeTapLayer();
+  assert.equal(h.layer.getContext(), null);
+  assert.equal(h.layer.prime(), true);
+  assert.equal(h.layer.getContext(), h.web.ctx);
+  assert.equal(h.web.calls.analysers, 1);
+  h.layer.prime();
+  assert.equal(h.web.calls.analysers, 1, 'o grafo nasce uma única vez');
+});
+
+test('prime não cria contexto quando não há visemas a dirigir', () => {
+  const web = makeWebAudio();
+  const layer = createAudioLipSync({ morphTargets: [], AudioContextCtor: web.Ctor });
+  assert.equal(layer.prime(), false);
+  assert.equal(layer.getContext(), null);
+});

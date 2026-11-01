@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Mic, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2 } from 'lucide-react';
+import { Keyboard, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2 } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
@@ -25,6 +25,10 @@ import { stripSpeechTags } from './speech-tags';
 import { loadConversation, saveConversation, clearStoredConversation, latestTurnId, MAX_STORED_TURNS } from './conversation-storage';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
+import { createAudioRevive } from './audio-revive';
+import { deriveVoicePhase } from './voice-phase';
+import { MicBadge, VoiceBeacon } from './voice-ui';
+import { PersonalityPanel } from './PersonalityPanel';
 import { classifyFacs } from './facs-classifier.js';
 import { applyFacsToDriver } from './facs-apply.js';
 import './usami.css';
@@ -653,6 +657,10 @@ export function Usami() {
   const [busy, setBusy] = useState(false);
   const [call, setCall] = useState(false);
   const [callSeconds, setCallSeconds] = useState(0);
+  const [micListening, setMicListening] = useState(false);
+  const [micHearing, setMicHearing] = useState(false);
+  const [micError, setMicError] = useState(false);
+  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
   const [intimacy, setIntimacy] = useState(loadIntimacy);
   const [bondOpen, setBondOpen] = useState(false);
   const [panel, setPanel] = useState(false);
@@ -677,6 +685,7 @@ export function Usami() {
   if (!speechScheduler.current) speechScheduler.current = createSpeechScheduler();
   const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
+  const hearingTimer = useRef(0);
   const callActiveRef = useRef(false);
   const callStartRef = useRef(0);
   const ptVoiceRef = useRef(null);
@@ -687,6 +696,19 @@ export function Usami() {
   const recognitionSupported = typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
   const synthesisSupported = typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function';
   const poke = () => auto.current?.notifyActivity();
+  const voicePhase = deriveVoicePhase({ call, micError, listening: micListening, hearing: micHearing, busy, speaking: voiceSpeaking });
+  const getVoiceLevel = useCallback(() => audioLipSync.current?.getLevel?.() ?? 0, []);
+  // Audio revive: prepara e retoma o AudioContext no primeiro gesto, ao voltar
+  // para a aba e quando o navegador o suspende no meio da sessão.
+  useEffect(() => {
+    const revive = createAudioRevive({
+      getContext: () => audioLipSync.current?.getContext?.() ?? null,
+      prime: () => audioLipSync.current?.prime?.(),
+    });
+    revive.attach();
+    return () => revive.detach();
+  }, []);
+  useEffect(() => () => clearTimeout(hearingTimer.current), []);
   const addTurn = (role, content, mode = 'text') => {
     const value = String(content || '').trim();
     if (!value) return;
@@ -802,7 +824,14 @@ export function Usami() {
   // (HTMLAudioElement reutilizado, blob: URL revogado depois de tocar) fica
   // para o HIT de cache e para o modo quieto, que desacelera a voz pelo
   // playbackRate — recurso que o PCM cru não tem.
-  const speakReply = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
+  const speakReply = async (...args) => {
+    // O orbe e o badge só precisam saber se há fala em curso; o token impede
+    // que uma fila abandonada apague o "falando" da fila que a substituiu.
+    const mine = ttsQueue.current + 1;
+    setVoiceSpeaking(true);
+    try { await speakReplyQueue(...args); } finally { if (ttsQueue.current <= mine) setVoiceSpeaking(false); }
+  };
+  const speakReplyQueue = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
     const parts = (Array.isArray(reply) ? reply : splitReplyParts(String(reply ?? '')))
       .map(part => String(part || '').trim())
       .filter(Boolean);
@@ -975,6 +1004,7 @@ export function Usami() {
     utterance.pitch = quiet ? .95 : 1;
     utterance.onstart = () => {
       speakingRef.current = true;
+      setVoiceSpeaking(true);
       // Frente 2: ações com timing no modo chamada — start executa agora,
       // delayMs via setTimeout, end via onend da utterance (middle não tem
       // duração conhecida no speechSynthesis).
@@ -986,7 +1016,7 @@ export function Usami() {
         }
       }
     };
-    const releaseMic = () => { speakingRef.current = false; };
+    const releaseMic = () => { speakingRef.current = false; setVoiceSpeaking(false); };
     utterance.onend = () => {
       releaseMic();
       for (const action of timedActions ?? []) {
@@ -1004,6 +1034,11 @@ export function Usami() {
     try { recognition?.abort(); } catch {}
     if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     speakingRef.current = false;
+    clearTimeout(hearingTimer.current);
+    setMicListening(false);
+    setMicHearing(false);
+    setMicError(false);
+    setVoiceSpeaking(false);
     const minutes = Math.max(0, Math.floor((Date.now() - callStartRef.current) / 60000));
     if (minutes > 0) awardXP({ companhia: minutes });
     setCall(false);
@@ -1018,19 +1053,26 @@ export function Usami() {
     recognition.lang = 'pt-BR';
     recognition.continuous = true;
     recognition.interimResults = true;
+    recognition.onstart = () => { setMicListening(true); setMicError(false); };
     recognition.onresult = event => {
       if (speakingRef.current) return;
+      // Qualquer resultado (inclusive parcial) acende o "te ouvindo"; apaga
+      // sozinho se a fala parar, sem depender do evento final.
+      setMicHearing(true);
+      clearTimeout(hearingTimer.current);
+      hearingTimer.current = setTimeout(() => setMicHearing(false), 1200);
       let final = '';
       for (let index = event.resultIndex; index < event.results.length; index++) if (event.results[index].isFinal) final += event.results[index][0].transcript;
       const heard = final.trim();
       if (heard) submitRef.current?.(heard, { spoken: true });
     };
     recognition.onerror = event => {
+      if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(event.error)) setMicError(true);
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') endCall('Não foi possível acessar o microfone. Verifique a permissão do navegador.');
       else if (event.error === 'audio-capture') endCall('Nenhum microfone encontrado.');
       else if (event.error === 'network') endCall('Falha de rede no reconhecimento de voz.');
     };
-    recognition.onend = () => { if (callActiveRef.current) { try { recognition.start(); } catch { endCall(); } } };
+    recognition.onend = () => { setMicListening(false); if (callActiveRef.current) { try { recognition.start(); } catch { endCall(); } } };
     recognitionRef.current = recognition;
     try { recognition.start(); } catch { setMessage('Não foi possível iniciar o microfone.'); return; }
     callActiveRef.current = true;
@@ -1194,6 +1236,7 @@ export function Usami() {
         {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
       </div>
     </section>}
+    {call && <VoiceBeacon phase={voicePhase} getLevel={getVoiceLevel} />}
     <div className="controls">
       {call && message && <p className="voice-caption" role="status">{message}</p>}
       <div className="privacy-note">Mensagens usam os provedores configurados para responder.</div>
@@ -1205,7 +1248,7 @@ export function Usami() {
         <button className="composer-send" aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button>
       </form>
       {call && <div className="dock" aria-label="Controles da chamada">
-        <button className="round live" disabled={!recognitionSupported} title="Microfone ativo" aria-label="Microfone ativo"><Mic size={19}/></button>
+        <button className={'round live ' + voicePhase.id} disabled={!recognitionSupported} title={'Microfone: ' + voicePhase.label} aria-label={'Microfone: ' + voicePhase.label}><MicBadge phase={voicePhase}/></button>
         <button className={'round '+(chat?'selected':'')} onClick={() => setChat(!chat)} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
         <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
         <button className={'round '+(voiceOff?'selected':'')} onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={19}/>:<Volume2 size={19}/>}</button>
@@ -1220,7 +1263,7 @@ export function Usami() {
           <button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button>
         </div>
         <div className="panel-tabs" role="tablist">
-          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['memory', 'Memória'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
+          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['memory', 'Memória'], ['personality', 'Jeito'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
         </div>
         <div className="panel-content" role="tabpanel">
           {settingsTab === 'chat' && <div>
@@ -1292,6 +1335,7 @@ export function Usami() {
             </>}
           </div>}
           {settingsTab === 'memory' && <MemoryPanel />}
+          {settingsTab === 'personality' && <PersonalityPanel />}
           {settingsTab === 'about' && <div>
             <h3>Usami Companion</h3>
             <p>Versão 0.1.0 — companion com avatar 3D/Live2D e voz própria.</p>

@@ -102,6 +102,7 @@ export function createAudioLipSync({
   let dataArray = null;
   let boundElement = null; // elemento já roteado ao source atual
   let externalActive = false; // player de PCM usando o analyser diretamente
+  let level = 0; // volume 0..1 do último frame de fala, lido pelo beacon
 
   const driver = createVowelDriver(now);
 
@@ -134,6 +135,7 @@ export function createAudioLipSync({
     }
     writeMouth({ A: 0, E: 0, I: 0, O: 0, U: 0 });
     driver.reset();
+    level = 0;
   };
 
   // Desmonta o grafo Web Audio (teardown do Avatar). Depois disso o elemento
@@ -201,7 +203,7 @@ export function createAudioLipSync({
 
   // Chamado 1×/frame pelo rAF do Avatar.
   const update = () => {
-    if (!hasTargets || failed) { stopMouth(); return; }
+    if (!hasTargets || failed) { level = 0; stopMouth(); return; }
     const el = audioElement;
     if (externalActive) {
       // PCM em streaming: não existe elemento tocando — o analyser é alimentado
@@ -228,6 +230,7 @@ export function createAudioLipSync({
     if (dt > MAX_DT_MS) dt = MAX_DT_MS;
     const deltaSeconds = dt / 1000;
 
+    level = frame.volume;
     const weights = driver.update(frame, deltaSeconds);
     writeMouth(weights);
   };
@@ -248,6 +251,7 @@ export function createAudioLipSync({
   const clear = () => {
     writeMouth({ A: 0, E: 0, I: 0, O: 0, U: 0 });
     driver.reset();
+    level = 0;
   };
 
   // Saída do grafo para um player de PCM: `{ context, input }` é exatamente o
@@ -258,6 +262,16 @@ export function createAudioLipSync({
     if (!hasTargets || !ensureContext()) return null;
     return { context: audioCtx, input: analyser };
   };
+
+  // Contexto atual (ou null): o audio-revive observa `statechange` nele.
+  const getContext = () => audioCtx;
+
+  // Cria o contexto dentro de um gesto do usuário, antes da primeira fala; o
+  // contexto nascido fora de gesto começa suspenso e o PCM tocaria mudo.
+  const prime = () => (hasTargets ? ensureContext() : false);
+
+  // Volume 0..1 do último frame; 0 quando não há fala medida.
+  const getLevel = () => level;
 
   // Enquanto o PCM toca, `update()` lê o analyser em vez de checar o elemento.
   const beginExternal = () => {
@@ -289,6 +303,9 @@ export function createAudioLipSync({
     clear,
     reset,
     getTap,
+    getContext,
+    getLevel,
+    prime,
     beginExternal,
     endExternal,
     get enabled() { return hasTargets && !failed; },

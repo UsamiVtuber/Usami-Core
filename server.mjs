@@ -6,6 +6,7 @@ import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
 import { GESTURE_NAMES, DIRECTOR_VERBS, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
+import { createPersonalityStore, normalizePersonality, TRAITS, CUSTOM_PROMPT_MAX } from './src/personality-store.js';
 import { extractJsonCandidate } from './src/json-salvage.js';
 import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
@@ -142,6 +143,11 @@ try {
 } catch {
   console.error('Aviso: memória local indisponível — o chat segue sem contexto persistido.');
 }
+
+// Ajustes de personalidade (data/personality.json). Mesmo diretório da memória,
+// então os testes seguem isolados em USAMI_DATA_DIR.
+const installPersonalityStore = createPersonalityStore({ dataDir: process.env.USAMI_DATA_DIR || 'data' });
+installPersonalityStore.load();
 
 // Índice FTS5 do vault (Inbox/Responses). Criado na primeira busca para não
 // abrir SQLite só por importar o módulo; o diretório de dados é o mesmo da
@@ -525,6 +531,7 @@ export function createChatHandler(options = {}) {
   // Testes injetam um depósito temporário; sem isso o handler do chat escreveria
   // em data/memory.json de verdade a cada npm test.
   const memoryStore = options.memoryStore || installMemoryStore;
+  const personalityStore = options.personalityStore || installPersonalityStore;
   // Injetável para os testes não varrerem o vault real: o padrão consulta o
   // índice FTS5 e, se ele falhar ou voltar vazio, mantém o leitor antigo.
   const searchVault = options.vaultSearch || (async (query) => {
@@ -604,6 +611,7 @@ export function createChatHandler(options = {}) {
       username: mem.user.nickname || 'você',
       date: today,
       timeOfDay,
+      personality: personalityStore.get(),
     });
 
     // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
@@ -1058,6 +1066,58 @@ function memorySnapshot(store, nowIso = new Date().toISOString()) {
 const FORGET_CONFIRMATION = 'APAGAR';
 const FORGET_KINDS = new Set(['fact', 'recent', 'section', 'summary', 'history', 'all']);
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// GET devolve os ajustes e o catálogo de traços; POST grava (traços 0–100 e
+// instruções extras) ou, com `reset: true`, volta ao padrão. Mesma borda da
+// memória: origem allowlisted + X-Usami-Token (fail-closed sem token no servidor).
+export function createPersonalityHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.personalityStore || installPersonalityStore;
+  const traits = Object.entries(TRAITS).map(([key, value]) => ({ key, label: value.label }));
+
+  return async function handlePersonality(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    if (req.url !== '/api/personality') return send(404, { error: 'Não encontrado.' });
+    if (req.method === 'GET') {
+      return send(200, { ok: true, personality: store.get(), traits, customPromptMax: CUSTOM_PROMPT_MAX });
+    }
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 4096) return send(413, { error: 'Pedido muito longo.' });
+    }
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    try {
+      const saved = payload.reset === true ? store.reset() : store.save(normalizePersonality(payload));
+      return send(200, { ok: true, personality: saved });
+    } catch {
+      return send(500, { error: 'Não foi possível salvar a personalidade.' });
+    }
+  };
+}
 
 export function createMemoryHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
@@ -2105,6 +2165,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
+  const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const server = createServer((req, res) => {
@@ -2116,6 +2177,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
     if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
+    if (req.url === '/api/personality') return handlePersonality(req, res);
     if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'

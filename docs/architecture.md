@@ -27,6 +27,7 @@ Node API (127.0.0.1:8787)
  ├─ GET/POST /api/technique[s] + /api/technique/note → base de técnicas
  ├─ POST /api/plan → planner de animação (determinístico, sem LLM)
  ├─ GET/POST /api/memory + POST /api/memory/forget → memória v2 (seções, exclusão com confirmação)
+ ├─ GET/POST /api/personality → traços (0–100) e instruções extras; `data/personality.json`
  └─ GET /api/learning + POST /api/learning/verdict → memória de aprendizagem
         │
         ├─ data/memory.json            memória e afinidade (v2: fatos por seção, recentes, resumos)
@@ -126,7 +127,7 @@ Nenhum deles é publicado nem ativado sem autorização explícita.
 ## Segurança de borda da API local
 
 - `Host` e `Origin` passam por allowlist fechada (`src/api-security.js`): `127.0.0.1:8787`, `localhost:8787`, os hosts das origens do front e `USAMI_ALLOWED_HOSTS`. A regra antiga "Origin == Host" foi removida (DNS rebinding). Origens extras (LAN, `terminal.local`): `USAMI_ALLOWED_ORIGINS` e `USAMI_ALLOWED_HOSTS`, separadas por vírgula.
-- `/api/memory*`, `/api/rag/context` e `/api/n8n/command(s)` exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto). Sem o token no servidor a resposta é 503 (fail-closed). O proxy do Vite injeta o header, então o token não chega ao navegador; o n8n precisa enviá-lo.
+- `/api/memory*`, `/api/personality`, `/api/rag/context` e `/api/n8n/command(s)` exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto). Sem o token no servidor a resposta é 503 (fail-closed). O proxy do Vite injeta o header, então o token não chega ao navegador; o n8n precisa enviá-lo.
 - O `.env` é `USAMI_KEYS_FILE` ou `../.env` relativo ao projeto; não há mais caminhos fixos de `A:\` nem fallback para outro projeto.
 - Webhook para o n8n: com `N8N_WEBHOOK_SECRET` sai com `X-Usami-Timestamp` e `X-Usami-Signature` (`sha256=` + HMAC-SHA256 de `<timestamp>.<corpo>`); `N8N_WEBHOOK_OMIT_TEXT=true` remove `userMessage` e `reply`.
 

@@ -58,3 +58,22 @@ aside ul{padding-left:18px;margin:10px 0;color:#c5b8c7;font-size:13px;line-heigh
 .rig-actions .memory-danger:disabled{opacity:.4;cursor:not-allowed}
 .memory-notice{margin-top:10px;font-size:11px;color:#9be3c2}
 .memory-error{margin-top:10px;font-size:11px;color:#ffb3b8;line-height:1.5}
+
+/* Fase 4 — mic badge e beacon de voz */
+.mic-badge{position:relative;display:grid;place-items:center;width:100%;height:100%;border-radius:50%}
+.mic-badge .mic-pulse{position:absolute;inset:0;border-radius:50%;pointer-events:none;opacity:0}
+.mic-badge.listening{color:#7fe3b8}.mic-badge.hearing{color:#8fd0ff}.mic-badge.thinking{color:#ffd37a}.mic-badge.speaking{color:#ff9ed2}.mic-badge.error{color:#ff7a7f}.mic-badge.idle{color:#b8aec2}
+.mic-badge.listening .mic-pulse,.mic-badge.hearing .mic-pulse{border:2px solid currentColor;opacity:.6;animation:mic-pulse 1.6s ease-out infinite}
+.mic-badge.hearing .mic-pulse{animation-duration:.8s}
+@keyframes mic-pulse{0%{transform:scale(.8);opacity:.7}100%{transform:scale(1.5);opacity:0}}
+.voice-beacon{--level:0;position:absolute;top:58px;left:50%;width:44px;height:44px;margin-left:-22px;display:grid;place-items:center;pointer-events:none;z-index:2}
+.voice-beacon i{display:block;width:100%;height:100%;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff9,var(--beacon,#9bd)) ;box-shadow:0 0 calc(10px + 26px*var(--level)) calc(2px + 8px*var(--level)) var(--beacon,#9bd);opacity:calc(.55 + .45*var(--level));transform:scale(calc(.6 + .55*var(--level)));transition:background .3s}
+.voice-beacon.listen{--beacon:#7fe3b8}.voice-beacon.think{--beacon:#ffd37a}.voice-beacon.speak{--beacon:#ff9ed2}.voice-beacon.error{--beacon:#ff7a7f}.voice-beacon.neutral{--beacon:#b8aec2}
+@media(prefers-reduced-motion:reduce){.mic-badge .mic-pulse{animation:none!important}.voice-beacon i{transition:none}}
+
+/* Fase 5 — aba Jeito (personalidade) */
+.personality-panel{display:grid;gap:14px}
+.trait-row{display:grid;gap:6px;font-size:13px;color:#e6ddec}
+.trait-row span{display:flex;justify-content:space-between}.trait-row b{font-weight:600;color:#d9b3ff}
+.trait-row input[type=range]{width:100%;accent-color:#d9b3ff}
+.trait-row textarea{width:100%;resize:vertical;font:inherit;color:#f8f3fa;background:#19171ed1;border:1px solid #ffffff20;border-radius:10px;padding:10px}

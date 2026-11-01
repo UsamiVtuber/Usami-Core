@@ -25,6 +25,8 @@
  * ou ser extra gentil pra subir). O sistema expõe o score; a PERSONA decide o que fazer.
  */
 
+import { buildTraitGuidance } from './personality-store.js';
+
 export const AFFINITY_STAGES = [
   { min: 0,   max: 19,  label: 'curiosidade_distante',   tone: 'educada, observa, questiona por que você está aqui' },
   { min: 20,  max: 39,  label: 'interesse_genuíno',      tone: 'pergunta muito, tsundere leve, nega o próprio interesse' },
@@ -60,8 +62,15 @@ const FACT_SECTIONS = [
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
  */
-export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], summaries = [], username = 'você', date, timeOfDay = 'tarde' }) {
+export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], summaries = [], username = 'você', date, timeOfDay = 'tarde', personality = null }) {
   const stage = getAffinityStage(affinity);
+
+  // Ajustes do usuário (sliders + instruções): refinam o tom, mas as regras de
+  // ouro, o formato JSON e a honestidade sobre ser virtual continuam valendo.
+  const guidance = personality ? buildTraitGuidance(personality) : '';
+  const personalityBlock = guidance
+    ? `\n\n=== AJUSTES DE PERSONALIDADE (escolhidos por ${username}) ===\nAplique no tom, sem mudar o formato JSON, as REGRAS DE OURO nem o estágio de afinidade:\n${guidance}`
+    : '';
 
   const sectionBlocks = FACT_SECTIONS
     .map(([section, label]) => {
@@ -125,7 +134,7 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 - expressões válidas: nomes do catálogo VRM (ex.: 01-prefab_happy01, 02-prefab_happy02, 03-prefab_happy03, 04-prefab_happy04, 07-prefab_angry01, 08-prefab_angry02, 12-prefab_sad01, 13-prefab_sad02, 15-prefab_awkward01, 16-prefab_awkward02, 19-prefab_doubt, 20-prefab_startled). Use exatamente os nomes que chegam em "Capabilidades disponíveis": fora dessa lista a ação é descartada.
 - remember: extraia UM fato relevante e duradouro e escolha a seção: user (nome, idade, cidade, trabalho, família, animais), preferences (gostos e desgostos), hobbies (o que ele faz por diversão), relationship (como vocês se tratam, apelidos, momentos de vocês), dates (aniversário e datas importantes), other (o resto). Ex.: {"section":"preferences","fact":"gosta de café gelado"}. Se nada relevante, "null". NÃO invente.
 
-${virtualHumanNote}
+${virtualHumanNote}${personalityBlock}
 ${factsBlock}
 ${summariesBlock}
 ${historyBlock}
