@@ -1227,6 +1227,26 @@ export function Usami() {
           try {
             if (cmd.type === 'say') {
               submitRef.current?.(cmd.message);
+            } else if (cmd.type === 'proactive_say') {
+              const effectiveReply = String(cmd.message || '').trim();
+              if (effectiveReply && !busyRef.current) {
+                if (cmd.gesture && ctrl?.gesture) ctrl.gesture(cmd.gesture);
+                let immediateActions = [];
+                let timedActions = [];
+                if (Array.isArray(cmd.actions) && cmd.actions.length > 0) {
+                  [immediateActions, timedActions] = partitionByTiming(cmd.actions);
+                  director.current?.execute(immediateActions);
+                }
+                const parsedBalloons = parseReplyBalloons(effectiveReply);
+                const balloons = parsedBalloons.length
+                  ? parsedBalloons
+                  : [{ display: effectiveReply, ttsText: effectiveReply, emotionKey: null, speechTags: [] }];
+                const fullCleanText = balloons.map(b => b.display).join(' ');
+                const defaultStyle = cmd.emotion || (balloons[0]?.emotionKey ? getVrmEmotionConfig(balloons[0].emotionKey)?.styleId : 'casual');
+                holdFace(effectiveReply);
+                speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
+                setMessage(fullCleanText);
+              }
             } else if (cmd.type === 'gesture') {
               ctrl.gesture(cmd.name);
             } else if (cmd.type === 'set_expression') {

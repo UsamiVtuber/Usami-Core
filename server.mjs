@@ -29,6 +29,7 @@ import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
 import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
+import { createProactiveEngine } from './src/proactive-engine.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
@@ -78,6 +79,7 @@ const n8nCommandQueue = [];
 // Comando válido para controle direto do avatar (executado pelo cliente).
 const VALID_COMMAND_TYPES = new Set([
   'say',           // diz algo (usa /api/chat internamente)
+  'proactive_say', // fala proativa da Usami (balão + áudio direto no cliente)
   'gesture',       // gesture: tilt | wave | idle
   'set_expression',// expressão VRM com peso
   'set_morph',     // morph target com valor
@@ -88,7 +90,7 @@ const VALID_COMMAND_TYPES = new Set([
 function isValidN8nCommand(cmd) {
   if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) return false;
   if (!VALID_COMMAND_TYPES.has(cmd.type)) return false;
-  if (cmd.type === 'say' && typeof cmd.message !== 'string') return false;
+  if ((cmd.type === 'say' || cmd.type === 'proactive_say') && typeof cmd.message !== 'string') return false;
   if (['gesture', 'set_expression', 'set_morph', 'set_mesh_visible'].includes(cmd.type) && typeof cmd.name !== 'string') return false;
   if (cmd.type === 'gesture' && !GESTURE_NAMES.includes(cmd.name)) return false;
   if (cmd.type === 'play_sequence' && !SHAPE_NAMES.includes(cmd.shape)) return false;
@@ -97,7 +99,7 @@ function isValidN8nCommand(cmd) {
 
 // Único ponto de entrada da fila: valida, carimba id/timestamp e empurra.
 // Usado pelo n8n (POST) e pelo refino de animação do próprio turno.
-function queueAvatarCommand(cmd) {
+export function queueAvatarCommand(cmd) {
   if (!isValidN8nCommand(cmd)) return null;
   const entry = {
     id: Math.random().toString(36).slice(2, 10),
@@ -149,6 +151,20 @@ try {
 // então os testes seguem isolados em USAMI_DATA_DIR.
 const installPersonalityStore = createPersonalityStore({ dataDir: process.env.USAMI_DATA_DIR || 'data' });
 installPersonalityStore.load();
+
+// Motor de proatividade da Usami (<开口> / idle triggers).
+export const proactiveEngine = createProactiveEngine({
+  affinityProvider: () => (installMemoryStore.getAll()?.affinity?.score ?? 0),
+  usernameProvider: () => (installMemoryStore.getAll()?.user?.nickname || 'você'),
+  onProactiveSay: (cmd) => {
+    queueAvatarCommand({
+      type: 'proactive_say',
+      message: cmd.message,
+      emotion: cmd.emotion,
+      gesture: cmd.gesture,
+    });
+  },
+});
 
 // Índice FTS5 do vault (Inbox/Responses). Criado na primeira busca para não
 // abrir SQLite só por importar o módulo; o diretório de dados é o mesmo da
@@ -533,6 +549,7 @@ export function createChatHandler(options = {}) {
   // em data/memory.json de verdade a cada npm test.
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
+  const proactive = options.proactiveEngine || proactiveEngine;
   // Injetável para os testes não varrerem o vault real: o padrão consulta o
   // índice FTS5 e, se ele falhar ou voltar vazio, mantém o leitor antigo.
   const searchVault = options.vaultSearch || (async (query) => {
@@ -598,7 +615,10 @@ export function createChatHandler(options = {}) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
 
-    const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
+    proactive?.markUserActivity();
+    proactive?.setBusy(true);
+    try {
+      const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
     const mem = memoryStore.getAll();
     const today = new Date().toISOString().slice(0, 10);
     const hour = new Date().getHours();
@@ -865,12 +885,16 @@ export function createChatHandler(options = {}) {
       timing: { surfaceMs, llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
       ...(affinityPayload || {}),
     });
+    } finally {
+      proactive?.setBusy(false);
+    }
   };
 }
 
 // --- Flow-based chat handler (n8n-style node graph) ---
 export function createFlowChatHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const proactive = options.proactiveEngine || proactiveEngine;
 
   return async function handleFlowChat(req, res) {
     const send = (status, data) => {
@@ -911,7 +935,10 @@ export function createFlowChatHandler(options = {}) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
 
-    const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
+    proactive?.markUserActivity();
+    proactive?.setBusy(true);
+    try {
+      const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
 
     try {
       const result = await flowExecutor.executeChat({
@@ -935,6 +962,9 @@ export function createFlowChatHandler(options = {}) {
       });
     } catch (error) {
       return send(500, { error: 'Erro interno no flow: ' + error.message });
+    }
+    } finally {
+      proactive?.setBusy(false);
     }
   };
 }
@@ -1000,7 +1030,7 @@ export function createN8nCommandHandler(options = {}) {
 
       const entry = queueAvatarCommand(cmd);
       if (!entry) {
-        return send(400, { error: 'Comando inválido. Tipos válidos: say, gesture, set_expression, set_morph, set_mesh_visible, play_sequence.' });
+        return send(400, { error: 'Comando inválido. Tipos válidos: say, proactive_say, gesture, set_expression, set_morph, set_mesh_visible, play_sequence.' });
       }
 
       return send(200, { ok: true, id: entry.id, queued: n8nCommandQueue.length });
@@ -2198,6 +2228,21 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
       || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
+    if (req.method === 'POST' && req.url === '/api/proactive/trigger') {
+      proactiveEngine.checkAndTrigger().then(result => {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(result));
+      }).catch(err => {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/api/proactive/state') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(proactiveEngine.getState()));
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });

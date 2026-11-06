@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 // A rota n8n só aceita o vocabulário conhecido — o mesmo contrato do director.
 process.env.USE_NVIDIA = 'false';
+process.env.USAMI_KEYS_FILE = process.env.USAMI_KEYS_FILE || 'no-keys.env';
 const { createN8nCommandHandler: createHandler } = await import('../server.mjs');
 
 const TEST_TOKEN = 'token-de-teste';

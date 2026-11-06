@@ -9,6 +9,7 @@ import { createMemoryStore } from '../src/memory-store.js';
 // trocado ANTES do import para nenhum teste encostar em data/.
 const scratchDir = mkdtempSync(join(tmpdir(), 'usami-memory-api-'));
 process.env.USAMI_DATA_DIR = scratchDir;
+process.env.USAMI_KEYS_FILE = process.env.USAMI_KEYS_FILE || join(scratchDir, 'no-keys.env');
 
 const { createMemoryHandler } = await import('../server.mjs');
 

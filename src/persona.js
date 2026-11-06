@@ -26,6 +26,7 @@
  */
 
 import { buildTraitGuidance } from './personality-store.js';
+import { getDailyScene } from './scenes.js';
 
 export const AFFINITY_STAGES = [
   { min: 0,   max: 19,  label: 'curiosidade_distante',   tone: 'educada, observa, questiona por que você está aqui' },
@@ -62,8 +63,38 @@ const FACT_SECTIONS = [
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
  */
-export function buildPersona({ affinity = 0, sections = {}, recentFacts = [], history = [], summaries = [], username = 'você', date, timeOfDay = 'tarde', personality = null }) {
+export function buildPersona({
+  affinity = 0,
+  sections = {},
+  recentFacts = [],
+  history = [],
+  summaries = [],
+  username = 'você',
+  date,
+  timeOfDay = 'tarde',
+  personality = null,
+  dailyContext = null,
+  currentScene = null,
+}) {
   const stage = getAffinityStage(affinity);
+
+  let effectiveDailyContext = dailyContext;
+  let effectiveCurrentScene = currentScene;
+  if (!effectiveDailyContext && !effectiveCurrentScene) {
+    try {
+      const sceneInfo = getDailyScene({ date: date ? new Date(date) : new Date(), username });
+      effectiveDailyContext = sceneInfo.dailyContext;
+      effectiveCurrentScene = sceneInfo.currentScene;
+    } catch {
+      // fallback gracioso se date for inválido
+    }
+  }
+
+  const dailySceneBlock = (effectiveDailyContext || effectiveCurrentScene)
+    ? `\n\n=== CONTEXTO DO SEU DIA ===\n` +
+      (effectiveDailyContext ? `${effectiveDailyContext}\n` : '') +
+      (effectiveCurrentScene ? `Cena atual: ${effectiveCurrentScene}\n` : '')
+    : '';
 
   // Ajustes do usuário (sliders + instruções): refinam o tom, mas as regras de
   // ouro, o formato JSON e a honestidade sobre ser virtual continuam valendo.
@@ -141,5 +172,7 @@ ${summariesBlock}
 ${historyBlock}
 
 === CONTEXTO AGORA ===
-Data: ${date} (${timeOfDay}). ${username} acabou de falar com você.`;
+Data: ${date} (${timeOfDay}).${dailySceneBlock}
+
+${username} acabou de falar com você.`;
 }
