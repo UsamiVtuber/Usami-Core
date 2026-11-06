@@ -16,6 +16,8 @@ import { createEmotionEngine } from './emotion-engine';
 import { resolveReplyEmotion } from './reply-emotion';
 import { loadMeshPrefs, saveMeshPrefs, clearMeshPrefs } from './mesh-preferences';
 import { createVrmIdleSway } from './vrm-idle-sway';
+import { createNaturalIdle } from './natural-idle';
+import { createEyeSaccades } from './eye-saccades';
 import { createVrmGestureLayer } from './vrm-gesture-layer';
 import { calibrateArmAxes } from './vrm-bone-calibration';
 import { createAudioLipSync } from './audio-lipsync';
@@ -161,9 +163,14 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     // desired position; the loop eases toward it so the gaze is never robotic.
     const lookDesired = new THREE.Vector3(0, 1.45, 2.5);
     let lookTarget = null;
+    let hasPointerActivity = false;
+    let pointerIdleTimer = null;
     const onPointerMove = event => {
       const rect = canvas.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
+      hasPointerActivity = true;
+      if (pointerIdleTimer) clearTimeout(pointerIdleTimer);
+      pointerIdleTimer = setTimeout(() => { hasPointerActivity = false; }, 3000);
       const nx = ((event.clientX - rect.left) / rect.width) * 2 - 1; // -1 left .. +1 right
       const ny = 1 - ((event.clientY - rect.top) / rect.height) * 2; // -1 bottom .. +1 top
       // Coefficients below are visual fine-tuning, in meters in front of the
@@ -176,6 +183,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     light.position.set(2, 4, 4);
     scene.add(light);
     let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null, idlePose = null;
+    const eyeSaccades = createEyeSaccades();
+    const naturalIdle = createNaturalIdle();
+    let naturalBones = null;
     const localTextures = [];
     // O loop de renderização também usa esta lista para blink e lip sync.
     // Ela precisa viver no escopo do effect, não apenas dentro do callback do loader.
@@ -226,6 +236,16 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         };
         setArm('leftUpperArm', 1);
         setArm('rightUpperArm', -1);
+        // Postura natural de repouso: leve flexão e rotação de cotovelos (elimina o aspecto de tábua)
+        const setForearm = (name, sign) => {
+          const node = vrm.humanoid.getNormalizedBoneNode?.(name);
+          if (node) {
+            node.rotation.z += sign * THREE.MathUtils.degToRad(-14);
+            node.rotation.x += THREE.MathUtils.degToRad(8);
+          }
+        };
+        setForearm('leftLowerArm', 1);
+        setForearm('rightLowerArm', -1);
         vrm.humanoid.update?.();
         // Pose de repouso em pé (braços para baixo). É o alvo do retorno ao idle
         // quando um clipe termina; o sway é somado por cima todo frame.
@@ -243,6 +263,18 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           const node = vrm.humanoid.getNormalizedBoneNode?.(part);
           return node ? { part, node, x: node.rotation.x, z: node.rotation.z } : null;
         }).filter(Boolean);
+
+        // Nós capturados para respiração corporal completa, troca de peso e head-bobbing
+        const getNode = name => vrm.humanoid.getNormalizedBoneNode?.(name) || null;
+        naturalBones = {
+          chest: getNode('chest') ? { node: getNode('chest'), base: { x: getNode('chest').rotation.x, z: getNode('chest').rotation.z } } : null,
+          spine: getNode('spine') ? { node: getNode('spine'), base: { x: getNode('spine').rotation.x, z: getNode('spine').rotation.z } } : null,
+          neck: getNode('neck') ? { node: getNode('neck'), base: { x: getNode('neck').rotation.x, z: getNode('neck').rotation.z } } : null,
+          head: getNode('head') ? { node: getNode('head'), base: { x: getNode('head').rotation.x, y: getNode('head').rotation.y, z: getNode('head').rotation.z } } : null,
+          leftShoulder: getNode('leftShoulder') ? { node: getNode('leftShoulder'), base: { z: getNode('leftShoulder').rotation.z } } : null,
+          rightShoulder: getNode('rightShoulder') ? { node: getNode('rightShoulder'), base: { z: getNode('rightShoulder').rotation.z } } : null,
+          hips: getNode('hips') ? { node: getNode('hips'), base: { rotZ: getNode('hips').rotation.z, posX: getNode('hips').position.x } } : null,
+        };
       }
       if (vrm?.humanoid) {
         // Etapa 4: gestos procedurais (wave/tilt) + pose de corpo por emoção em
@@ -408,7 +440,27 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         if (state.idleActive) controller.current?.idle?.();
         else controller.current?.stop?.();
       }
-      if (sway && swayBase?.length) {
+      // Respiração corporal completa, ombros e weight shift (estilo Neuro-sama)
+      if (naturalIdle && naturalBones) {
+        const speechLevel = audioLipSync.current?.getLevel() || 0;
+        const pose = naturalIdle.update(timestamp, {
+          speechLevel,
+          deltaSeconds: delta,
+          isThinking: busyRef.current,
+        });
+        if (naturalBones.chest) naturalBones.chest.node.rotation.x = naturalBones.chest.base.x + pose.chest.rotX;
+        if (naturalBones.leftShoulder) naturalBones.leftShoulder.node.rotation.z = naturalBones.leftShoulder.base.z + pose.shoulders.leftRotZ;
+        if (naturalBones.rightShoulder) naturalBones.rightShoulder.node.rotation.z = naturalBones.rightShoulder.base.z + pose.shoulders.rightRotZ;
+        if (naturalBones.hips) {
+          naturalBones.hips.node.rotation.z = naturalBones.hips.base.rotZ + pose.hips.rotZ;
+          naturalBones.hips.node.position.x = naturalBones.hips.base.posX + pose.hips.posX;
+        }
+        if (naturalBones.spine) naturalBones.spine.node.rotation.z = naturalBones.spine.base.z + pose.spine.rotZ;
+        if (naturalBones.neck) {
+          naturalBones.neck.node.rotation.x = naturalBones.neck.base.x + pose.neck.rotX;
+          naturalBones.neck.node.rotation.z = naturalBones.neck.base.z + pose.neck.rotZ;
+        }
+      } else if (sway && swayBase?.length) {
         const pose = sway.update();
         for (const base of swayBase) {
           if (base.part === 'chest') base.node.rotation.x = base.x + (pose.breath - .5) * .05;
@@ -418,8 +470,32 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       }
       // Etapa 4: gestos + pose emocional do humanoid, junto do sway e antes do vrm.update.
       vrmGestures.current?.update();
-      // Ease the gaze toward the pointer target (frame-rate independent smoothing).
-      if (lookTarget) lookTarget.position.lerp(lookDesired, 1 - Math.exp(-delta * 8));
+
+      // Speech-reactive head bobbing e micro-inclinação (aditivo na cabeça)
+      if (naturalIdle && naturalBones?.head) {
+        const speechLevel = audioLipSync.current?.getLevel() || 0;
+        if (speechLevel > 0.04 || busyRef.current) {
+          const pose = naturalIdle.update(timestamp, { speechLevel, deltaSeconds: delta, isThinking: busyRef.current });
+          naturalBones.head.node.rotation.x += pose.head.rotX;
+          naturalBones.head.node.rotation.y += pose.head.rotY;
+          naturalBones.head.node.rotation.z += pose.head.rotZ;
+        }
+      }
+
+      // Micro-sacadas e olhar vivo autônomo (estilo Neuro-sama)
+      if (lookTarget) {
+        const saccade = eyeSaccades ? eyeSaccades.update(delta, {
+          isThinking: busyRef.current,
+          hasPointer: hasPointerActivity,
+        }) : { x: 0, y: 0 };
+        const currentLook = hasPointerActivity ? lookDesired : new THREE.Vector3(0, 1.45, 2.5);
+        const targetPos = new THREE.Vector3(
+          currentLook.x + saccade.x,
+          currentLook.y + saccade.y,
+          currentLook.z
+        );
+        lookTarget.position.lerp(targetPos, 1 - Math.exp(-delta * 10));
+      }
       // Etapa 5: a boca segue o áudio real — RMS contínuo do AnalyserNode com a
       // rampa 30/80 ms, sem timeline textual. Fallback gracioso embutido no layer.
       audioLipSync.current?.update();
@@ -1138,7 +1214,11 @@ export function Usami() {
     const facs = classifyFacs(value);
     if (facs.aus.length > 0 && expressionDriverRef.current) {
       applyFacsToDriver(facs.aus, facs.intensity, expressionDriverRef.current, { ttlMs: 4000 });
+    } else {
+      expressionDriverRef.current?.set('19-prefab_doubt', 0.40, { ttlMs: 3500 });
     }
+    // Reação de escuta ativa / reflexão imediata (Neuro-sama style)
+    vrmGestures.current?.gesture('tilt');
     awardXP(gainsFor(value, spoken));
     setMessage('Usami está pensando…');
     try {
