@@ -1165,10 +1165,19 @@ export function Usami() {
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
       // Respostas longas viram vários balões (~60 chars, máx 5, sem perder
       // texto) com tags de emoção e SFX fatiados pelo parser do OpenAmika V2.
-      const parsedBalloons = parseReplyBalloons(data.reply);
+      let effectiveReply = data.reply;
+      if (data.surface?.mode === 'say+think' && data.surface?.reply) {
+        const blurt = String(data.surface.reply).trim();
+        if (blurt && !effectiveReply.toLowerCase().includes(blurt.toLowerCase())) {
+          const toneTag = data.surface.tone ? `[${data.surface.tone}]` : '';
+          effectiveReply = `${toneTag} ${blurt}. ${effectiveReply}`.trim();
+        }
+      }
+
+      const parsedBalloons = parseReplyBalloons(effectiveReply);
       const balloons = parsedBalloons.length
         ? parsedBalloons
-        : [{ display: String(data.reply).trim(), ttsText: String(data.reply).trim(), emotionKey: null, speechTags: [] }];
+        : [{ display: String(effectiveReply).trim(), ttsText: String(effectiveReply).trim(), emotionKey: null, speechTags: [] }];
       // Se houver speechTags vindas no payload do servidor (legado), anexa ao último balão
       const speechTags = Array.isArray(data.speechTags) ? data.speechTags : [];
       if (speechTags.length > 0) {

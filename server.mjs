@@ -28,6 +28,7 @@ import { createTechniqueIndex } from './src/technique-index.js';
 import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
 import { createLearningMemory } from './src/learning-memory.js';
+import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
@@ -630,6 +631,11 @@ export function createChatHandler(options = {}) {
     let parsed;
     let classification = null;
 
+    // Surface Reflex: reação preliminar em < 50ms para presença instantânea
+    const surfaceStartedAt = now();
+    const surface = generateLocalSurfaceReflex(parsedBody.message, { username: mem.user.nickname || 'você' });
+    const surfaceMs = now() - surfaceStartedAt;
+
     // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
     // otimização vira chute. Um log por turno basta para ver quem manda.
     // As etapas SOMAM (+=): com o fallback NVIDIA→OpenRouter a tentativa do
@@ -667,7 +673,11 @@ export function createChatHandler(options = {}) {
         const rawReply = await timeStage('llm', () => generateReplyWithActions(
           withCapabilities(system, capabilities),
           parsedBody.message,
-          { temperature: 0.7, signal: AbortSignal.any([turn.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]) },
+          {
+            temperature: 0.7,
+            signal: AbortSignal.any([turn.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+            blurtReply: surface.mode === 'say+think' ? surface.reply : null,
+          },
         ));
 
         const parsedReply = parseProviderRaw(rawReply);
@@ -732,12 +742,17 @@ export function createChatHandler(options = {}) {
           source: 'offline',
         };
       } else {
+        let openRouterSystem = system;
+        if (surface.mode === 'say+think' && surface.reply) {
+          openRouterSystem += `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${surface.reply.trim()}"\nO usuário JÁ OUVIU essa frase.\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
+        }
+
         let response;
         try {
           response = await timeStage('llm', () => fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: system }, { role: 'user', content: parsedBody.message }] }),
+            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: openRouterSystem }, { role: 'user', content: parsedBody.message }] }),
             signal: AbortSignal.any([
               turn.signal,
               AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
@@ -841,12 +856,13 @@ export function createChatHandler(options = {}) {
 
     return send(200, {
       reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
+      surface,
       ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
       // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
       // renomear. contextMs é adição. animationMs é o que a animação custou
       // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
       // fire-and-forget e aparece só no log [animacao], fora do totalMs.
-      timing: { llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
+      timing: { surfaceMs, llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
       ...(affinityPayload || {}),
     });
   };

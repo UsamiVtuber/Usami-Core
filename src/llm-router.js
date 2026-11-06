@@ -130,12 +130,17 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion, 
 export async function generateReplyWithActions(
   systemPrompt,
   userMessage,
-  { temperature = 0.7, maxTokens = 1100, client = sharedClient, signal } = {},
+  { temperature = 0.7, maxTokens = 1100, client = sharedClient, signal, blurtReply } = {},
 ) {
   if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 
+  let finalSystem = systemPrompt;
+  if (blurtReply && typeof blurtReply === 'string' && blurtReply.trim()) {
+    finalSystem += `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${blurtReply.trim()}"\nO usuário JÁ OUVIU essa frase.\nREGRAS CRÍTICAS:\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
+  }
+
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: finalSystem },
     { role: 'user', content: userMessage },
   ];
   const answer = await client.chatJson({
