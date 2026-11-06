@@ -21,6 +21,8 @@ import { calibrateArmAxes } from './vrm-bone-calibration';
 import { createAudioLipSync } from './audio-lipsync';
 import { playPcmStream } from './stream-audio-player';
 import { splitReplyParts } from './reply-parts';
+import { parseReplyBalloons } from './streaming-parser';
+import { applyVrmEmotion, getVrmEmotionConfig } from './vrm-emotion-map';
 import { stripSpeechTags } from './speech-tags';
 import { loadConversation, saveConversation, clearStoredConversation, latestTurnId, MAX_STORED_TURNS } from './conversation-storage';
 import { curateExpressions, labelExpression } from './expressions-catalog';
@@ -832,9 +834,19 @@ export function Usami() {
     try { await speakReplyQueue(...args); } finally { if (ttsQueue.current <= mine) setVoiceSpeaking(false); }
   };
   const speakReplyQueue = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
-    const parts = (Array.isArray(reply) ? reply : splitReplyParts(String(reply ?? '')))
-      .map(part => String(part || '').trim())
-      .filter(Boolean);
+    const rawParts = Array.isArray(reply) ? reply : parseReplyBalloons(String(reply ?? ''));
+    const parts = rawParts
+      .map(part => {
+        if (typeof part === 'object' && part !== null) {
+          const display = String(part.display ?? part.text ?? '').trim();
+          const ttsText = String(part.ttsText ?? part.display ?? part.text ?? '').trim();
+          const emotionKey = part.emotionKey || null;
+          return { display, ttsText, emotionKey };
+        }
+        const text = String(part ?? '').trim();
+        return { display: text, ttsText: text, emotionKey: null };
+      })
+      .filter(p => p.display || p.ttsText);
     if (!parts.length) return;
     const queueId = ++ttsQueue.current;
     const alive = () => !voiceOffRef.current && ttsQueue.current === queueId;
@@ -862,7 +874,16 @@ export function Usami() {
     };
     // Mute: nunca pede /api/tts — os balões entram todos de uma vez e a boca
     // fica fechada (fallback mudo), como quando a síntese falha.
-    if (voiceOffRef.current) { parts.forEach(part => onPart(part)); flushTimedActions(); return; }
+    if (voiceOffRef.current) {
+      parts.forEach(part => {
+        onPart(part.display);
+        if (part.emotionKey && expressionDriverRef.current) {
+          applyVrmEmotion(part.emotionKey, expressionDriverRef.current);
+        }
+      });
+      flushTimedActions();
+      return;
+    }
     if (!ttsAudio.current) ttsAudio.current = new Audio();
     const audio = ttsAudio.current;
     // Streaming exige o grafo Web Audio da camada de boca: é por ele que o PCM
@@ -871,7 +892,7 @@ export function Usami() {
     const canStream = !quiet && Boolean(audioLipSync.current?.getTap?.());
     // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
     // requisição no ar — sem unhandled rejection.
-    const askTts = (text, stream) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId, stream }) })
+    const askTts = (text, stream, partStyle = styleId) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
       .then(async response => {
         if (!response || !response.ok) return null;
         // PCM cru atrás do header de stream; qualquer outra resposta de áudio é
@@ -911,7 +932,8 @@ export function Usami() {
       URL.revokeObjectURL(url);
       played = true;
     };
-    let pending = askTts(parts[0], canStream);
+    const firstStyle = parts[0]?.emotionKey ? getVrmEmotionConfig(parts[0].emotionKey).coarse : styleId;
+    let pending = askTts(parts[0].ttsText, canStream, firstStyle);
     for (let index = 0; index < parts.length; index += 1) {
       const job = await pending;
       pending = null;
@@ -935,12 +957,18 @@ export function Usami() {
               onFirstAudio: () => {
                 if (!alive()) return;
                 shown = true;
-                onPart(parts[index]);
+                onPart(parts[index].display);
                 runActionsAtSpeechStart();
-                holdFace(parts[index]);
+                if (parts[index].emotionKey && expressionDriverRef.current) {
+                  applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
+                }
+                holdFace(parts[index].display);
               },
               onStreamEnd: () => {
-                if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
+                if (!pending && index + 1 < parts.length) {
+                  const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
+                  pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
+                }
               },
             });
           } finally {
@@ -949,7 +977,7 @@ export function Usami() {
         }
         if (outcome.streamed) {
           played = true;
-          learnPace(parts[index], performance.now() - partStartedAt);
+          learnPace(parts[index].display, performance.now() - partStartedAt);
           runActionsAtSpeechEnd();
           if (!alive()) break;
           continue;
@@ -958,12 +986,18 @@ export function Usami() {
         // rede caiu antes da primeira amostra): sem segunda síntese — pedir de
         // novo custaria outro provedor inteiro. O texto ainda aparece abaixo.
       }
-      if (!shown) onPart(parts[index]);
+      if (!shown) onPart(parts[index].display);
       if (!job?.url) continue;
-      if (!pending && index + 1 < parts.length) pending = askTts(parts[index + 1], canStream);
-      holdFace(parts[index]);
+      if (!pending && index + 1 < parts.length) {
+        const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
+        pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
+      }
+      if (parts[index].emotionKey && expressionDriverRef.current) {
+        applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
+      }
+      holdFace(parts[index].display);
       await playWithElement(job.url);
-      learnPace(parts[index], performance.now() - partStartedAt);
+      learnPace(parts[index].display, performance.now() - partStartedAt);
       if (!alive()) break;
     }
     // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
@@ -1130,28 +1164,32 @@ export function Usami() {
       const gestureRequested = results.some(result => result.type === 'gesture');
       const gestureApplied = results.some(result => result.type === 'gesture' && result.applied);
       // Respostas longas viram vários balões (~60 chars, máx 5, sem perder
-      // texto); o caption da chamada segue mostrando a resposta completa.
-      const replyParts = splitReplyParts(data.reply);
-      const bubbles = replyParts.length ? replyParts : [String(data.reply).trim()];
-      // Tags não-verbais (<laugh>, <short pause>...) vão só para o TTS, no fim
-      // do último balão; o balão exibido continua sendo a fala limpa.
+      // texto) com tags de emoção e SFX fatiados pelo parser do OpenAmika V2.
+      const parsedBalloons = parseReplyBalloons(data.reply);
+      const balloons = parsedBalloons.length
+        ? parsedBalloons
+        : [{ display: String(data.reply).trim(), ttsText: String(data.reply).trim(), emotionKey: null, speechTags: [] }];
+      // Se houver speechTags vindas no payload do servidor (legado), anexa ao último balão
       const speechTags = Array.isArray(data.speechTags) ? data.speechTags : [];
-      const ttsBubbles = speechTags.length
-        ? bubbles.map((part, index) => (index === bubbles.length - 1 ? `${part} ${speechTags.join(' ')}` : part))
-        : bubbles;
+      if (speechTags.length > 0) {
+        const last = balloons[balloons.length - 1];
+        last.ttsText = `${last.ttsText} ${speechTags.map(t => `<${t}>`).join(' ')}`;
+      }
+      const fullCleanText = balloons.map(b => b.display).join(' ');
       if (spoken) {
         // Call mode: speechSynthesis não passa pelo Web Audio (não existe
         // HTMLAudioElement) nem pela fila de partes — timing via
         // utterance.onend / setTimeout e balões exibidos de uma vez. Tags de
         // som não se aplicam aqui; a fala sintetizada é só o texto exibido.
-        speakSpoken(data.reply, timedActions);
-        bubbles.forEach(part => addTurn('assistant', part, 'voice'));
+        speakSpoken(fullCleanText, timedActions);
+        balloons.forEach(part => addTurn('assistant', part.display, 'voice'));
       } else {
         // Cada balão é exibido por speakReply no instante em que a fala dele
         // toca: mensagem → áudio → mensagem → áudio, um atrás do outro.
-        speakReply(ttsBubbles, resolved.emotion?.label || styleIdForActions(resolved.actions), timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
+        const defaultStyle = resolved.emotion?.label || styleIdForActions(resolved.actions);
+        speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
       }
-      setMessage(data.reply + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
+      setMessage(fullCleanText + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
     } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
     finally {
       busyRef.current = false;
