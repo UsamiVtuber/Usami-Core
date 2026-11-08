@@ -156,10 +156,10 @@ test('filterActionsByCatalog traduz sinônimos de verbo para o diretor entender'
 
 test('sanitizeCapabilities: gestos da biblioteca passam e sequences é flag', () => {
   const sanitized = sanitizeCapabilities({
-    gestures: ['clap', 'bow', 'point', 'voar'],
+    gestures: ['clap', 'bow', 'point', 'voar', 'sleepy', 'clapping', 'goodbye', 'happy'],
     sequences: true,
   });
-  assert.deepEqual(sanitized.gestures, ['clap', 'bow', 'point']);
+  assert.deepEqual(sanitized.gestures, ['clap', 'bow', 'point', 'sleepy', 'clapping', 'goodbye']);
   assert.equal(sanitized.sequences, true);
   assert.equal(sanitizeCapabilities({ sequences: 'sim' }).sequences, false);
   assert.equal(sanitizeCapabilities({}).sequences, false);

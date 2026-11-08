@@ -18,6 +18,9 @@ export const GESTURE_NAMES = [
   'clap', 'hand-on-hip', 'wave2', 'point', 'shrug', 'head-scratch',
   'arms-crossed', 'facepalm', 'cheer', 'blow-kiss', 'hands-on-cheeks', 'bow',
   'nod', 'thinking', 'scratchHead', 'blush', 'angry', 'surprised', 'sad', 'jump', 'lookAround', 'talking',
+  // Clipes VRMA reais nos dois clientes (web e desktop); sem eles o catálogo
+  // filtrava a ação em silêncio no /api/chat.
+  'sleepy', 'clapping', 'goodbye',
 ];
 export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression', 'play_sequence', 'play_vrma'];
 export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, play_sequence: 4000, set_mesh_visible: 800, set_expression: 3000 };
