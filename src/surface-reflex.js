@@ -142,14 +142,14 @@ export function generateLocalSurfaceReflex(message, { username = 'você' } = {})
     };
   }
 
-  // Dúvidas / perguntas -> say+think com gancho
+  // Dúvidas / perguntas -> say+think
   if (msg.includes('?') || /^(como|onde|quando|por que|porque|qual|quem|o que)\b/i.test(msg)) {
     return {
       status: 'ok',
       tone: 'casual_playful',
       mode: 'say+think',
       gesture: 'tilt',
-      reply: 'Hmm, deixa eu ver...',
+      reply: '',
     };
   }
 
@@ -159,6 +159,6 @@ export function generateLocalSurfaceReflex(message, { username = 'você' } = {})
     tone: 'casual_smile',
     mode: 'say+think',
     gesture: 'nod',
-    reply: 'Uhum, entendi...',
+    reply: '',
   };
 }

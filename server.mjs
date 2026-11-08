@@ -31,6 +31,7 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
+import { analyzeMedia } from './src/media-analyzer.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 // USE_NVIDIA=false desliga a rota NVIDIA mesmo com chave presente (isolamento de testes);
@@ -339,7 +340,7 @@ export function sanitizeActions(raw) {
 
 // O modelo inventa sinônimos para os verbos do diretor ("expression" em vez de
 // "set_expression"); sem essa ponte a ação passa pelo filtro e morre no director.
-const ACTION_TYPE_ALIASES = { expression: 'set_expression', emote: 'set_expression', morph: 'set_morph' };
+const ACTION_TYPE_ALIASES = { expression: 'set_expression', emote: 'set_expression', morph: 'set_morph', vrma: 'play_vrma' };
 
 export function filterActionsByCatalog(actions, capabilities) {
   const known = (list) => (!Array.isArray(list) ? null : new Set(list));
@@ -348,6 +349,7 @@ export function filterActionsByCatalog(actions, capabilities) {
     play_clip: known(capabilities.clips),
     set_morph: known(capabilities.morphs),
     set_expression: known(capabilities.expressions),
+    play_vrma: known(capabilities.gestures),
   } : {};
   return (Array.isArray(actions) ? actions : [])
     .map(action => {
@@ -423,8 +425,27 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
 // O balão mostra a fala; as tags não-verbais (<laugh>, <sigh>...) vão só para o
 // /api/tts. O campo `speechTags` só existe quando há tag — payloads antigos e
 // testes que comparam o objeto inteiro continuam idênticos.
+export function stripLeakedJson(reply) {
+  return String(reply ?? '')
+    // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
+    // Ex.: `','gesture': 'angry','actions': [{'type':` ou `"gesture":"angry","actions":[...`
+    .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+    // Remove fragmentos truncados de arrays/objetos JSON no fim da frase (ex.: ` [{'type':` ou ` {"type":`)
+    .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+    // Remove aspas/vírgulas de fechamento de propriedade JSON vazadas no final (ex.: `!' ,'` ou `!",`)
+    .replace(/['"]\s*,\s*['"]?\s*$/, '')
+    .trim();
+}
+
+function salvageLeakedGesture(rawText) {
+  const match = /['",\s]\\?["']gesture\\?["']\s*:\s*\\?["']([a-zA-Z0-9_-]+)\\?["']/i.exec(String(rawText ?? ''));
+  if (!match) return null;
+  const candidate = match[1].trim();
+  return GESTURE_NAMES.includes(candidate) ? candidate : null;
+}
+
 function cleanReply(reply) {
-  const { text, tags } = extractSpeechTags(stripStageDirections(reply));
+  const { text, tags } = extractSpeechTags(stripStageDirections(stripLeakedJson(reply)));
   return { display: capReplyLength(text), tags };
 }
 
@@ -504,7 +525,8 @@ export function parseProviderRaw(raw) {
         if (!cleaned.display) {
           return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
         }
-        return { ok: true, reply: cleaned.display, gesture: 'neutral', actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
+        const salvagedGesture = salvageLeakedGesture(trimmed) || 'neutral';
+        return { ok: true, reply: cleaned.display, gesture: salvagedGesture, actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
       }
       // Caso contrário, trata o texto bruto como resposta livre
       result = { reply: trimmed, gesture: 'neutral' };
@@ -516,14 +538,16 @@ export function parseProviderRaw(raw) {
   if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
+  const salvagedFromReply = salvageLeakedGesture(result.reply);
   const cleaned = cleanReply(result.reply);
   if (!cleaned.display) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
+  const rawGesture = (result.gesture && result.gesture !== 'neutral') ? result.gesture : salvagedFromReply;
   return {
     ok: true,
     reply: cleaned.display,
-    gesture: result.gesture === 'tilt' ? 'tilt' : 'neutral',
+    gesture: GESTURE_NAMES.includes(rawGesture) ? rawGesture : 'neutral',
     actions: sanitizeActions(result.actions),
     remember: normalizeRemember(result.remember),
     ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}),
@@ -568,6 +592,7 @@ export function createChatHandler(options = {}) {
 
   return async function handleChat(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -646,6 +671,12 @@ export function createChatHandler(options = {}) {
     }
     if (ragContext) {
       system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+    }
+
+    if (parsedBody.input?.wakeUpJolt) {
+      system += '\n\n=== REAÇÃO: ACORDANDO NO SUSTO ===\nVocê estava dormindo profundamente e o usuário te acordou de repente! Reaja com um sobressalto e susto tsundere bem vivo e engraçado no início da sua resposta (ex.: "Wah?! Ai, que susto! Você tava aí?! Eu já tava quase sonhando, baka!"). Use o gesto "surprised" ou "tilt" e emoção [casual_surprised].\n';
+    } else if (parsedBody.input?.sleepCompanionActive) {
+      system += '\n\n=== MODO COMPANION PARA DORMIR (INTERRUPÇÃO) ===\nVocê está no Modo Companion de 30 minutos para ajudar o usuário a dormir e ele ACABOU DE INTERROMPER tentando conversar em vez de descansar! Fique brava de forma protetora (tsundere clássica) e dê uma bronca afetuosa nele: mande ele parar de olhar pra tela, fechar os olhos e ir dormir imediatamente (ex.: "Ei! O que eu falei sobre fechar os olhos?! Vai dormir, baka! Não é pra ficar conversando, é pra descansar! Eu tô aqui do seu lado, então fecha esses olhos agora!"). Use gesto "angry" ou "tilt" e tom [casual_frustrated] ou [whisper_caring].\n';
     }
 
     let parsed;
@@ -823,8 +854,13 @@ export function createChatHandler(options = {}) {
         else memoryStore.addRecentFact(remember.fact, 7, remember.section);
       }
       const turnTimestamp = new Date().toISOString();
+      const historyReply = stripLeakedJson(parsed.reply)
+        .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+        .replace(/【[^】]{1,30}】/g, ' ')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim() || parsed.reply;
       memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
-      memoryStore.appendHistory('assistant', parsed.reply, turnTimestamp);
+      memoryStore.appendHistory('assistant', historyReply, turnTimestamp);
       const current = memoryStore.getAll();
       const gain = calculateGain({
         userMessage: parsedBody.message,
@@ -898,6 +934,7 @@ export function createFlowChatHandler(options = {}) {
 
   return async function handleFlowChat(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -976,6 +1013,7 @@ export function createN8nCommandHandler(options = {}) {
 
   return async function handleN8nCommand(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1048,6 +1086,7 @@ export function createRagContextHandler(options = {}) {
 
   return async function handleRagContext(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1123,6 +1162,7 @@ export function createPersonalityHandler(options = {}) {
 
   return async function handlePersonality(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1171,6 +1211,7 @@ export function createMemoryHandler(options = {}) {
 
   return async function handleMemory(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1286,6 +1327,7 @@ const STYLE_INSTRUCTIONS = {
   angry: 'protesto manhoso e dramatizado, aguda, emburrada, birra fofa sem agressividade',
   surprised: 'espantada e aguda, salto de pitch, animada',
   relaxed: 'calma e serena, mais baixa e lenta, sorriso suave',
+  whisper: 'sussurrada bem baixinho e suave, extremamente calma, ritmo lento e reconfortante para ninar',
   soft: 'doce e apegada, sorriso na voz, tom manhoso e carinhoso',
   shy: 'baixinha, hesitante e doce, quase sussurrada, com vergonha',
   doubtful: 'desconfiada e aguda, entonação de hã?, brincalhona',
@@ -1493,6 +1535,7 @@ export function createTtsHandler(options = {}) {
 
   return async function handleTts(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1636,6 +1679,7 @@ export function createTtsHandler(options = {}) {
             }
             return;
           }
+          if (res.headersSent || res.writableEnded) return;
         }
         if (provider === 'gemini') {
           // a key vai apenas no header x-goog-api-key (nunca na URL); o prefixo de
@@ -1691,16 +1735,19 @@ export function createTtsHandler(options = {}) {
           audio = Buffer.from(await response.arrayBuffer());
         }
       } catch {
-        return send(502, { error: 'TTS falhou no provedor.' });
+        if (!res.headersSent) send(502, { error: 'TTS falhou no provedor.' });
+        return;
       }
 
-      res.writeHead(200, { 'Content-Type': audioFormat, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      if (cache && cacheKey) {
-        try { await cache.put(cacheKey, audio); } catch {
-          // Cache failures never make a successful synthesis fail.
+      if (!res.headersSent) {
+        res.writeHead(200, { 'Content-Type': audioFormat, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        if (cache && cacheKey) {
+          try { await cache.put(cacheKey, audio); } catch {
+            // Cache failures never make a successful synthesis fail.
+          }
         }
+        res.end(audio);
       }
-      res.end(audio);
     } finally {
       release();
     }
@@ -1788,6 +1835,7 @@ export function createSttHandler(options = {}) {
 
   return async function handleStt(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -1945,6 +1993,7 @@ export function createTechniqueHandler(options = {}) {
 
   return async function handleTechnique(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -2118,6 +2167,7 @@ export function createPlannerHandler(options = {}) {
 
   return async function handlePlan(req, res) {
     const send = (status, data) => {
+      if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify(data));
     };
@@ -2201,6 +2251,113 @@ export function parseLearningVerdict(raw) {
   };
 }
 
+export function createMediaAnalyzeHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const getKey = options.getKey || (async () => readEnvValue('GEMINI_API_KEY'));
+  const memoryStore = options.memoryStore || installMemoryStore;
+  const personalityStore = options.personalityStore || installPersonalityStore;
+
+  return async function handleMediaAnalyze(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'POST' || req.url !== '/api/media/analyze') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+
+    let body = '';
+    let tooLarge = false;
+    const MAX_MEDIA_PAYLOAD = 60 * 1024 * 1024;
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > MAX_MEDIA_PAYLOAD) {
+        tooLarge = true;
+        break;
+      }
+    }
+    if (tooLarge) {
+      return send(413, { error: 'Mídia muito grande (máximo 45MB).' });
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição deve ser JSON válido.' });
+    }
+
+    const { mimeType, data, filename, prompt } = parsed;
+    if (!data || typeof data !== 'string') {
+      return send(400, { error: 'Campo "data" (base64) é obrigatório.' });
+    }
+
+    const apiKey = await getKey();
+
+    let personaPrompt = '';
+    try {
+      const mem = memoryStore.getAll?.() || {};
+      const today = new Date().toISOString().slice(0, 10);
+      const hour = new Date().getHours();
+      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      personaPrompt = buildPersona({
+        affinity: mem.affinity?.score || 0,
+        sections: memoryStore.getSections?.() || {},
+        recentFacts: memoryStore.getRecentFacts?.(new Date().toISOString()) || [],
+        history: memoryStore.getTodayHistory?.(today) || [],
+        summaries: memoryStore.getSummaries?.().slice(-3) || [],
+        username: mem.user?.nickname || 'você',
+        date: today,
+        timeOfDay,
+        personality: personalityStore?.get?.(),
+      });
+    } catch {
+      // continua sem persona detalhada se falhar
+    }
+
+    const result = await analyzeMedia({
+      mimeType,
+      dataBase64: data,
+      filename,
+      userPrompt: prompt,
+      personaSystemPrompt: personaPrompt,
+      apiKey,
+      fetchImpl: options.fetchImpl || globalThis.fetch,
+      timeoutMs: 90000,
+    });
+
+    if (result.ok) {
+      try {
+        const turnTimestamp = new Date().toISOString();
+        const mediaTypeLabel = mimeType?.startsWith('video/') ? 'Vídeo' : 'Imagem';
+        const visualSummary = result.crossReference || result.summary || (result.ocr?.length ? `Texto lido: ${result.ocr.join(', ')}` : 'mídia compartilhada');
+        const audioSummary = result.transcript ? ` [Áudio: ${result.transcript}]` : '';
+
+        const userTurnContent = `[${mediaTypeLabel}: ${filename || 'arquivo'}] ${prompt ? `"${prompt}" ` : ''}(Conteúdo visto/ouvido: ${visualSummary}${audioSummary})`.trim();
+        const assistantTurnContent = result.reply;
+
+        memoryStore.appendHistory?.('user', userTurnContent, turnTimestamp);
+        memoryStore.appendHistory?.('assistant', assistantTurnContent, turnTimestamp);
+
+        const factText = `Compartilhou ${mediaTypeLabel.toLowerCase()} "${filename || 'mídia'}": ${visualSummary.slice(0, 180)}`;
+        memoryStore.addRecentFact?.(factText, 7, 'other');
+      } catch (err) {
+        console.warn('[media-analyzer] Falha ao persistir na memória:', err.message);
+      }
+    }
+
+    return send(result.ok ? 200 : 500, result);
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
@@ -2208,6 +2365,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleChat = createChatHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
+  const handleMediaAnalyze = createMediaAnalyzeHandler();
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
@@ -2216,6 +2374,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handlePlan = createPlannerHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
+    if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
     if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
     if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);

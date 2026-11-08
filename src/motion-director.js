@@ -17,8 +17,9 @@ export const GESTURE_NAMES = [
   'tilt', 'wave', 'idle',
   'clap', 'hand-on-hip', 'wave2', 'point', 'shrug', 'head-scratch',
   'arms-crossed', 'facepalm', 'cheer', 'blow-kiss', 'hands-on-cheeks', 'bow',
+  'nod', 'thinking', 'scratchHead', 'blush', 'angry', 'surprised', 'sad', 'jump', 'lookAround', 'talking',
 ];
-export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression', 'play_sequence'];
+export const DIRECTOR_VERBS = ['play_clip', 'gesture', 'set_morph', 'set_mesh_visible', 'set_expression', 'play_sequence', 'play_vrma'];
 export const DEFAULT_COOLDOWNS = { play_clip: 1500, gesture: 2500, play_sequence: 4000, set_mesh_visible: 800, set_expression: 3000 };
 const MESH_COOLDOWN_PER_TARGET = 4000;
 
@@ -126,6 +127,14 @@ export function createMotionDirector({ controller, capabilities, maxActions = DE
         controller.setMeshVisible?.(name, nextVisible);
         lastMesh.set(name, at);
         applied = true;
+      }
+    } else if (verb === 'play_vrma') {
+      const name = typeof action?.name === 'string' ? action.name : '';
+      if (!name) reason = 'bad name';
+      else if (!controller || typeof controller.playVrma !== 'function') reason = 'vrma unavailable';
+      else {
+        applied = controller.playVrma(name, { loop: Boolean(action?.loop), crossfade: action?.crossfade || 0.35 }) !== false;
+        if (!applied) reason = 'vrma refused';
       }
     }
     if (applied && cooldownVerbs.has(verb)) lastGlobal[verb] = at;

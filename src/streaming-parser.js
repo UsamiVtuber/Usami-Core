@@ -102,7 +102,13 @@ export class UsamiStreamingParser {
         if (SFX_TO_GEMINI[lower]) {
           this.activeSfx.push(SFX_TO_GEMINI[lower]);
         } else if (!PLACEHOLDER_TAGS.has(lower)) {
-          this.currentEmotion = resolveEmotion(raw, this.currentEmotion);
+          const nextEmotion = resolveEmotion(raw, this.currentEmotion);
+          const pendingText = this.activeText.trim();
+          if (pendingText && nextEmotion !== this.currentEmotion && this.balloons.length < this.maxBalloons - 1) {
+            this._emitBalloon(pendingText, false);
+            this.activeText = '';
+          }
+          this.currentEmotion = nextEmotion;
         }
         this.buffer = this.buffer.slice(emoMatch[0].length);
         continue;
@@ -120,18 +126,7 @@ export class UsamiStreamingParser {
         continue;
       }
 
-      // 3. Se houver um início de tag não terminada no final do buffer, aguarda mais dados
-      if (!isFinal) {
-        const pendingTagIdx = this.buffer.search(/[\[【][^\]】]*$/);
-        if (pendingTagIdx !== -1) {
-          const safePrefix = this.buffer.slice(0, pendingTagIdx);
-          this.buffer = this.buffer.slice(pendingTagIdx);
-          if (safePrefix) this._consumeText(safePrefix);
-          break;
-        }
-      }
-
-      // 4. Procura o próximo caractere especial (início de tag ou pontuação)
+      // 3. Procura o próximo caractere especial (início de tag ou pontuação)
       const specialIdx = this.buffer.search(/[\[【.!?…\n]/);
       if (specialIdx === -1) {
         if (isFinal) {
@@ -143,9 +138,19 @@ export class UsamiStreamingParser {
 
       const matchChar = this.buffer[specialIdx];
       if (matchChar === '[' || matchChar === '【') {
-        const textBefore = this.buffer.slice(0, specialIdx);
-        this.buffer = this.buffer.slice(specialIdx);
-        if (textBefore) this._consumeText(textBefore);
+        if (specialIdx === 0) {
+          // Se estiver em streaming (!isFinal) e a tag ainda não fechou, aguarda o próximo chunk
+          if (!isFinal && !/[\]】]/.test(this.buffer)) {
+            break;
+          }
+          // Caso contrário, o caractere não é tag válida (passos 1 e 2 falharam). Consome como texto comum e avança.
+          this._consumeText(matchChar);
+          this.buffer = this.buffer.slice(1);
+        } else {
+          const textBefore = this.buffer.slice(0, specialIdx);
+          this.buffer = this.buffer.slice(specialIdx);
+          if (textBefore) this._consumeText(textBefore);
+        }
       } else {
         // Pontuação: inclui repetidos ("...", "?!") na mesma fatia
         let endIdx = specialIdx;
@@ -188,6 +193,12 @@ export class UsamiStreamingParser {
 
   _emitBalloon(rawText, isFinal) {
     let display = rawText
+      // Remove vazamento de campos JSON truncados do LLM
+      .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+      .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+      .replace(/['"]\s*,\s*['"]?\s*$/, '')
+      // Remove tags de emoção residuais que porventura tenham escapado no meio do texto
+      .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
       .replace(/["“”「」『』]/g, '')
       .replace(/\*+[^*]*\*+/g, '') // remove direções de palco (*ação*)
       .replace(/[ \t]{2,}/g, ' ')
@@ -223,7 +234,11 @@ export class UsamiStreamingParser {
  * Utilitário puro: divide um texto completo de resposta nos balões estruturados da Usami.
  */
 export function parseReplyBalloons(reply, options = {}) {
+  const cleaned = String(reply ?? '')
+    .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+    .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+    .replace(/['"]\s*,\s*['"]?\s*$/, '');
   const parser = new UsamiStreamingParser(options);
-  parser.feed(reply);
+  parser.feed(cleaned);
   return parser.flush();
 }

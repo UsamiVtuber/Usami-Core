@@ -71,4 +71,37 @@ test('createNaturalIdle aplica pose reflexiva ao pensar (isThinking: true)', () 
   const thinking = idle.update(1000, { isThinking: true });
   assert.ok(thinking.head.rotZ > 0.03, 'Inclinação de cabeça ao pensar');
   assert.ok(thinking.neck.rotZ > 0.01, 'Pescoço acompanha inclinação');
+  assert.ok(thinking.head.rotY > 0.02, 'Desvio lateral de cabeça ao pensar');
+});
+
+test('createNaturalIdle aplica pose atenta ao ouvir (isListening: true)', () => {
+  const idle = createNaturalIdle();
+  const base = idle.update(1000, { isListening: false });
+  const listening = idle.update(1000, { isListening: true });
+  assert.ok(listening.head.rotZ < -0.02, 'Inclinação atenta de orelha ao ouvir');
+  assert.ok(listening.head.rotX < base.head.rotX, 'Inclinação sutil para frente em direção ao usuário');
+  assert.ok(listening.chest.rotX < base.chest.rotX, 'Tronco projeta sutilmente para frente ao escutar');
+});
+
+test('createNaturalIdle oscila braços de forma orgânica em repouso (arms sway)', () => {
+  let t = 0;
+  const idle = createNaturalIdle({ now: () => t, breathHz: 0.25, weightShiftHz: 0.1 });
+
+  const f0 = idle.update(0);
+  assert.ok('arms' in f0, 'Retorna objeto arms');
+  assert.ok(typeof f0.arms.leftRotZ === 'number');
+  assert.ok(typeof f0.arms.rightRotZ === 'number');
+
+  // No pico de inspiração (1000ms), braços afastam sutilmente do corpo
+  const f1 = idle.update(1000);
+  assert.ok(Math.abs(f1.arms.leftRotZ) > 0.001 || Math.abs(f1.arms.rightRotZ) > 0.001);
+});
+
+test('createNaturalIdle aplica pose relaxada de sono profundo (isSleeping: true)', () => {
+  const idle = createNaturalIdle();
+  const sleep = idle.update(1000, { isSleeping: true });
+  assert.equal(sleep.isSleeping, true);
+  assert.ok(sleep.head.rotX > 0.1, 'Cabeça descansa inclinada para frente');
+  assert.ok(sleep.head.rotZ > 0.05, 'Cabeça descansa inclinada para o lado');
+  assert.ok(sleep.neck.rotX > 0.05, 'Pescoço acompanha relaxamento');
 });

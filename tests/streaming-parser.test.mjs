@@ -69,3 +69,34 @@ test('streaming-parser: respeita o limite de balões e não descarta texto', () 
   assert.ok(balloons.length <= 3);
   assert.ok(balloons[balloons.length - 1].display.includes('Frase seis'));
 });
+
+test('streaming-parser: não entra em loop infinito com colchete solitário ou truncado (RESULT_CODE_HUNG protection)', () => {
+  const lone = parseReplyBalloons('[');
+  assert.equal(lone.length, 1);
+  assert.equal(lone[0].display, '[');
+
+  const unclosed = parseReplyBalloons('Olá [mundo');
+  assert.equal(unclosed.length, 1);
+  assert.equal(unclosed[0].display, 'Olá [mundo');
+
+  const invalidTag = parseReplyBalloons('[1] teste [❤️]');
+  assert.equal(invalidTag.length, 1);
+  assert.match(invalidTag[0].display, /\[1\] teste/);
+});
+
+test('streaming-parser: nunca vaza [intimate_shy] nem cauda JSON truncada com colchete aberto no fim', () => {
+  const leaked = "[casual_frustrated] H-hmph... me usando de cobaia de novo, baka? [intimate_shy]...M-mas se era teste de dormir, devia ter dito antes... fiquei preocupada à toa! ','gesture': 'angry','actions': [{'type':";
+  const balloons = parseReplyBalloons(leaked);
+
+  assert.ok(balloons.length >= 2, `esperava >=2 balões, veio ${balloons.length}`);
+  const fullDisplay = balloons.map(b => b.display).join(' ');
+  const fullTts = balloons.map(b => b.ttsText).join(' ');
+
+  assert.ok(!fullDisplay.includes('[intimate_shy]'), `display vazou [intimate_shy]: ${fullDisplay}`);
+  assert.ok(!fullDisplay.includes('gesture'), `display vazou gesture: ${fullDisplay}`);
+  assert.ok(!fullDisplay.includes('actions'), `display vazou actions: ${fullDisplay}`);
+  assert.ok(!fullTts.includes('[intimate_shy]'), `ttsText vazou [intimate_shy]: ${fullTts}`);
+  assert.ok(!fullTts.includes('gesture'), `ttsText vazou gesture: ${fullTts}`);
+  assert.equal(balloons[0].emotionKey, 'casual_frustrated');
+  assert.equal(balloons[balloons.length - 1].emotionKey, 'intimate_shy');
+});

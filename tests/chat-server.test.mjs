@@ -422,6 +422,24 @@ test('parseProviderRaw: aspa de abertura da chave ausente ainda recupera o reply
   assert.deepEqual(result.actions, []);
 });
 
+test('parseProviderRaw: remove vazamento de gesture/actions com aspas simples ou escapadas dentro do reply', () => {
+  const rawSingleQuotes = `{"reply":"[casual_frustrated] H-hmph... me usando de cobaia de novo, baka? [intimate_shy]...M-mas se era teste de dormir, devia ter dito antes... fiquei preocupada à toa! ','gesture': 'angry','actions': [{'type':`;
+  const res1 = parseProviderRaw(rawSingleQuotes);
+  assert.equal(res1.ok, true);
+  assert.ok(!res1.reply.includes('gesture'), `reply vazou gesture: ${res1.reply}`);
+  assert.ok(!res1.reply.includes('actions'), `reply vazou actions: ${res1.reply}`);
+  assert.equal(res1.gesture, 'angry');
+
+  const rawEscaped = JSON.stringify({
+    reply: '[casual_frustrated] N-não confunda as coisas! "gesture":"tilt","actions":[{"type":"set_expression","name":',
+    gesture: 'neutral',
+  });
+  const res2 = parseProviderRaw(rawEscaped);
+  assert.equal(res2.ok, true);
+  assert.ok(!res2.reply.includes('gesture'), `reply vazou gesture: ${res2.reply}`);
+  assert.equal(res2.gesture, 'tilt');
+});
+
 test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {
   // O balão e o /api/tts falam o texto cru: "*bufa*" virava voz.
   assert.equal(parseProviderRaw('{"reply":"Hmph... *bufa, braços cruzados* Não diga que é fofo."}').reply, 'Hmph... Não diga que é fofo.');

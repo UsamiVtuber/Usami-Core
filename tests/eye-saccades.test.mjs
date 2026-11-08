@@ -72,6 +72,19 @@ test('isThinking direciona o olhar para cima e para o lado (olhar cognitivo)', (
   assert.ok(Math.abs(relaxedState.x) < Math.abs(thinkingState.x));
 });
 
+test('isListening mantém o olhar firme no centro para o usuário', () => {
+  let t = 1000;
+  const saccades = createEyeSaccades({
+    now: () => t,
+    rng: () => 0.1,
+  });
+
+  const listeningState = saccades.update(0.016, { isListening: true });
+  assert.equal(listeningState.isListeningGaze, true);
+  assert.ok(Math.abs(listeningState.x) < 0.01);
+  assert.ok(Math.abs(listeningState.y) < 0.01);
+});
+
 test('reset devolve os offsets para o centro', () => {
   let t = 1000;
   const saccades = createEyeSaccades({ now: () => t, rng: () => 0.5 });

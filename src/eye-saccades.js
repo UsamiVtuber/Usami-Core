@@ -37,10 +37,11 @@ export function createEyeSaccades({
      * @param {number} deltaSeconds tempo decorrido desde o último frame (em segundos)
      * @param {Object} [state]
      * @param {boolean} [state.isThinking] avatar está processando / pensando
+     * @param {boolean} [state.isListening] avatar está ouvindo atentamente o usuário
      * @param {boolean} [state.hasPointer] usuário está ativamente movendo o ponteiro
-     * @returns {{ x: number, y: number, isThinkingGaze: boolean }}
+     * @returns {{ x: number, y: number, isThinkingGaze: boolean, isListeningGaze: boolean }}
      */
-    update(deltaSeconds = 0.016, { isThinking = false, hasPointer = false } = {}) {
+    update(deltaSeconds = 0.016, { isThinking = false, isListening = false, hasPointer = false } = {}) {
       const t = now();
       const dt = Math.min(Math.max(deltaSeconds, 0.001), 0.1);
 
@@ -53,6 +54,11 @@ export function createEyeSaccades({
         }
         targetX = thinkSide * (0.16 + rng() * 0.08);
         targetY = 0.14 + rng() * 0.06; // olhar para cima
+      } else if (isListening) {
+        // Ao ouvir o usuário falar: fixa o contato visual atentamente na câmera/usuário
+        targetX = 0;
+        targetY = 0;
+        holdUntil = t + 600;
       } else {
         if (lastThinking) {
           // Terminou de pensar: volta suavemente ao centro
@@ -98,6 +104,7 @@ export function createEyeSaccades({
         x: currentX,
         y: currentY,
         isThinkingGaze: isThinking,
+        isListeningGaze: Boolean(isListening),
       };
     },
 
