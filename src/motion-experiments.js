@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from '
 import { join } from 'node:path';
 import { SHAPE_NAMES, SHAPE_PARAMS, buildSequenceRequest } from './sequence-shapes.js';
 import { evaluateSequence } from './motion-evaluation.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 
 export const ENGINE_VERSION = 'motion-experiments-v1';
 
@@ -192,7 +193,7 @@ export function aggregateByShape(records) {
 }
 
 export function createExperimentStore({
-  dataDir = join(process.cwd(), 'data'),
+  dataDir = defaultDataDir(),
   fileName = 'experiments.json',
   now = () => Date.now(),
   maxRecords = 400,

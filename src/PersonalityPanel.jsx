@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from './api-client';
 
 // Aba "Personalidade": sliders de traços + instruções extras. Salva em
 // /api/personality (o proxy do Vite injeta o token); o chat lê o registro a
@@ -12,7 +13,7 @@ export function PersonalityPanel() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch('/api/personality');
+      const response = await apiFetch('/api/personality');
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || 'Falha ao ler a personalidade.');
       setData(body);
@@ -30,7 +31,7 @@ export function PersonalityPanel() {
     setSaving(true);
     setNotice('');
     try {
-      const response = await fetch('/api/personality', {
+      const response = await apiFetch('/api/personality', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -50,7 +51,7 @@ export function PersonalityPanel() {
 
   if (!draft) {
     return error
-      ? <p className="memory-error">{error}</p>
+      ? <p className="memory-error" role="alert">{error}</p>
       : <p className="settings-hint">Lendo a personalidade da Usami…</p>;
   }
 
@@ -75,8 +76,8 @@ export function PersonalityPanel() {
         aria-label="Instruções extras de personalidade"
       />
     </label>
-    {error && <p className="memory-error">{error}</p>}
-    {notice && <p className="settings-hint" role="status">{notice}</p>}
+    {error && <p className="memory-error" role="alert">{error}</p>}
+    {notice && <p className="memory-notice" role="status" aria-live="polite">{notice}</p>}
     <div className="rig-actions">
       <button disabled={!dirty || saving} onClick={() => send(draft, 'Personalidade salva.')}>Salvar</button>
       <button disabled={saving} onClick={() => send({ reset: true }, 'Personalidade restaurada.')}>Restaurar padrão</button>

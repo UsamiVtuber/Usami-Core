@@ -8,9 +8,11 @@
 //     abrir chave nova nem saltar de linha;
 //   - nome de arquivo = `id` (regex validado) + slug sanitizado: nenhum texto
 //     do material dita caminho de arquivo (`/`, `\`, `..`, controles, tamanho);
-//   - só escreve dentro da subárvore de automação `.../vault/.../Techniques`
-//     (configurável via USAMI_TECHNIQUE_VAULT_DIR); alvo fora disso é ERRO, não
-//     silêncio;
+//   - só escreve dentro da subárvore de automação `.../vault/.../Inbox/Automations`
+//     (base configurável via USAMI_TECHNIQUE_VAULT_ROOT e alvo via
+//     USAMI_TECHNIQUE_VAULT_DIR): a validação compara o CAMINHO RESOLVIDO com a
+//     base resolvida (path.relative), não o padrão de segmentos. Alvo fora disso
+//     é ERRO, não silêncio;
 //   - sobrescreve apenas nota cujo frontmatter declara exatamente o id desta
 //     técnica; nota alheia com o mesmo nome de arquivo é intocável;
 //   - o texto do material entra como dado citado (blockquote rotulado), nunca
@@ -24,7 +26,9 @@ import { TECHNIQUE_STATUSES, techniqueShapeRequests, validateTechnique } from '.
 // O vault documenta `Inbox/Automations/` como a ÚNICA pasta onde automação escreve
 // (vault/Usami Obsidian/Usami/Inbox/Automations/README.md), então a subpasta
 // Techniques fica dentro dela em vez de abrir uma área nova no vault.
-const DEFAULT_VAULT_RELATIVE = '../vault/Usami Obsidian/Usami/Inbox/Automations/Techniques';
+const DEFAULT_VAULT_ROOT = '../vault/Usami Obsidian/Usami';
+const DEFAULT_AUTOMATION_RELATIVE = path.join(DEFAULT_VAULT_ROOT, 'Inbox', 'Automations');
+const DEFAULT_VAULT_RELATIVE = path.join(DEFAULT_AUTOMATION_RELATIVE, 'Techniques');
 const MAX_SLUG_CHARS = 60;
 const MAX_CITED_CHARS = 4000;
 const NOTE_ID_KEY = 'usami.technique';
@@ -71,14 +75,43 @@ export function slugifyTechniqueName(name) {
   return slug || 'tecnica';
 }
 
-function resolveAutomationDir({ vaultDir } = {}) {
+function resolveFrom(base) {
+  return path.resolve(process.cwd(), String(base));
+}
+
+// Raiz do vault configurada (USAMI_VAULT_DIR) ou derivada do USAMI_RAG_VAULT
+// (que aponta para .../Inbox/Responses, dois níveis dentro do vault).
+export function configuredVaultRoot() {
+  if (process.env.USAMI_VAULT_DIR) return resolveFrom(process.env.USAMI_VAULT_DIR);
+  if (process.env.USAMI_RAG_VAULT) {
+    const resolved = resolveFrom(process.env.USAMI_RAG_VAULT);
+    return path.basename(resolved).toLowerCase() === 'responses'
+      ? path.dirname(path.dirname(resolved))
+      : resolved;
+  }
+  return resolveFrom(DEFAULT_VAULT_ROOT);
+}
+
+// Base da subárvore de automação: explícita (USAMI_TECHNIQUE_VAULT_ROOT ou
+// opção `vaultRoot`) ou vault configurado + Inbox/Automations.
+export function resolveAutomationRoot({ vaultRoot } = {}) {
+  const explicit = vaultRoot ?? process.env.USAMI_TECHNIQUE_VAULT_ROOT;
+  if (explicit) return resolveFrom(explicit);
+  return path.join(configuredVaultRoot(), 'Inbox', 'Automations');
+}
+
+function resolveAutomationDir({ vaultDir, vaultRoot } = {}) {
   const raw = vaultDir ?? process.env.USAMI_TECHNIQUE_VAULT_DIR ?? DEFAULT_VAULT_RELATIVE;
-  const dir = path.resolve(process.cwd(), String(raw));
-  const segments = dir.toLowerCase().split(path.sep).filter(Boolean);
-  const vaultIndex = segments.lastIndexOf('vault');
-  if (vaultIndex < 0 || segments.at(-1) !== 'techniques') {
+  const dir = resolveFrom(raw);
+  // Contenção por caminho RESOLVIDO: o alvo precisa ser descendente estrito da
+  // base. O padrão antigo ("vault" em qualquer posição + terminar em Techniques)
+  // aceitava qualquer árvore com esses nomes.
+  const base = resolveAutomationRoot({ vaultRoot });
+  const relative = path.relative(base, dir);
+  const inside = relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  if (!inside) {
     return {
-      error: `alvo fora da subárvore de automação do vault: a nota só pode ser escrita dentro de .../vault/.../Techniques (recebido: ${dir})`,
+      error: `alvo fora da subárvore de automação do vault: a nota só pode ser escrita abaixo de ${base} (recebido: ${dir})`,
     };
   }
   return { dir };
@@ -201,12 +234,12 @@ export function renderTechniqueNote(technique, { source } = {}) {
   return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`;
 }
 
-export async function writeTechniqueNote(technique, { vaultDir, source } = {}) {
+export async function writeTechniqueNote(technique, { vaultDir, vaultRoot, source } = {}) {
   const check = validateTechnique(technique);
   if (!check.ok) return { ok: false, error: `técnica inválida: ${check.errors.join('; ')}` };
   const clean = check.technique;
 
-  const target = resolveAutomationDir({ vaultDir });
+  const target = resolveAutomationDir({ vaultDir, vaultRoot });
   if (target.error) return { ok: false, error: target.error };
   const dir = target.dir;
   const filePath = path.join(dir, `${clean.id} - ${slugifyTechniqueName(clean.name)}.md`);

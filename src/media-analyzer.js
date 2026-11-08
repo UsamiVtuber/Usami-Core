@@ -4,13 +4,27 @@ import fs from 'node:fs/promises';
 import { createReadStream, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { extractJsonCandidate } from './json-salvage.js';
+import { parseJsonLoosely, sanitizeActions } from './provider-parse.js';
 
 const execFileAsync = promisify(execFile);
 
 export const DEFAULT_GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-3.8-flash';
 export const MAX_VIDEO_FRAMES = 6;
 export const MAX_FRAME_WIDTH = 800;
+
+// Extensões de vídeo aceitas no arquivo temporário. A extensão é o ÚNICO pedaço
+// do nome vindo do cliente que sobrevive, e só depois da allowlist.
+export const VIDEO_EXTENSIONS = Object.freeze(['mp4', 'webm', 'mkv', 'mov', 'avi']);
+
+// Nome interno fixo dentro do mkdtemp: `filename` é dado do cliente e nunca vira
+// caminho (`../../escape.mp4` já escapou de um mkdtemp e escreveu fora dele).
+export function videoTempPath(tempDir, filename) {
+  const match = /\.([A-Za-z0-9]{1,8})\s*$/.exec(String(filename ?? ''));
+  const extension = match && VIDEO_EXTENSIONS.includes(match[1].toLowerCase())
+    ? match[1].toLowerCase()
+    : 'mp4';
+  return path.join(tempDir, `input.${extension}`);
+}
 
 /**
  * Executa o ffprobe em um arquivo de mídia e extrai metadados essenciais.
@@ -156,6 +170,7 @@ export async function analyzeMedia({
   geminiUrl = 'https://generativelanguage.googleapis.com',
   model = DEFAULT_GEMINI_VISION_MODEL,
   fetchImpl = globalThis.fetch,
+  extractMedia = extractVideoFramesAndAudio,
   timeoutMs = 90000,
 } = {}) {
   if (!apiKey) {
@@ -176,11 +191,13 @@ export async function analyzeMedia({
     if (isVideo) {
       // Processamento de vídeo: picota frames e extrai áudio
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'usami-media-'));
-      const videoPath = path.join(tempDir, filename || 'input_video.mp4');
+      // Nome interno fixo (só a extensão allowlistada do cliente sobrevive):
+      // um `filename` com `../` nunca escolhe o caminho do arquivo.
+      const videoPath = videoTempPath(tempDir, filename);
       const videoBuffer = Buffer.from(dataBase64, 'base64');
       await fs.writeFile(videoPath, videoBuffer);
 
-      const extracted = await extractVideoFramesAndAudio({
+      const extracted = await extractMedia({
         videoPath,
         outputDir: tempDir,
         maxFrames: MAX_VIDEO_FRAMES,
@@ -268,35 +285,48 @@ FORMATO OBRIGATÓRIO (JSON PURO):
       parts.push({ text: promptInstruction });
     }
 
-    const apiUrl = `${geminiUrl.replace(/\/+$/, '')}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
+    // A chave vai APENAS no header `x-goog-api-key` (mesmo padrão do TTS):
+    // query string entra em log de proxy, histórico e mensagem de erro.
+    const apiUrl = `${geminiUrl.replace(/\/+$/, '')}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetchImpl(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 8192,
-          responseMimeType: 'application/json',
+    let res;
+    try {
+      res = await fetchImpl(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
         },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 8192,
+            responseMimeType: 'application/json',
+          },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      // Sem o clearTimeout no caminho de erro, o timer de 90 s segurava o
+      // event loop do processo depois de uma falha de rede.
+      clearTimeout(timeout);
+    }
 
     if (!res.ok) {
-      const errText = await res.text();
+      // O corpo do provedor não volta ao cliente (pode ecoar detalhes internos).
+      // O log é truncado e qualquer `key=`/`api_key=` é mascarado por segurança.
+      const errText = String(await res.text()).slice(0, 300);
+      console.warn('[media-analyzer] Gemini HTTP ' + res.status + ': '
+        + errText.replace(/(api[_-]?key|key)=[^&\s"']+/gi, '$1=***'));
       return {
         ok: false,
         reply: 'Hmph! Ocorreu um erro ao tentar processar essa mídia... me mostra de novo depois?',
         gesture: 'scratchHead',
         actions: [{ type: 'gesture', name: 'scratchHead' }],
-        error: `Gemini HTTP ${res.status}: ${errText.slice(0, 300)}`,
+        error: 'Falha ao consultar o provedor de visão (HTTP ' + res.status + ').',
       };
     }
 
@@ -310,20 +340,12 @@ FORMATO OBRIGATÓRIO (JSON PURO):
 
     let parsedObj = {};
     if (candidateText) {
-      const fenced = candidateText.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-      try {
-        parsedObj = JSON.parse(fenced);
-      } catch {
-        const candidate = extractJsonCandidate(fenced);
-        if (candidate) {
-          try {
-            parsedObj = JSON.parse(candidate);
-          } catch {}
-        }
-      }
+      // Mesma limpeza dos outros parsers (cerca de código + primeiro objeto
+      // balanceado). Sem duplicar regex de fence aqui (B14).
+      const loose = parseJsonLoosely(candidateText);
+      parsedObj = loose.ok && loose.value && typeof loose.value === 'object' ? loose.value : {};
 
-      if (!parsedObj || typeof parsedObj !== 'object' || !parsedObj.reply) {
-        parsedObj = parsedObj && typeof parsedObj === 'object' ? parsedObj : {};
+      if (!parsedObj.reply) {
         const replyMatch = candidateText.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
         if (replyMatch) {
           parsedObj.reply = replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/"\s*,\s*$/, '').trim();
@@ -342,18 +364,24 @@ FORMATO OBRIGATÓRIO (JSON PURO):
       ok: true,
       reply: parsedObj.reply || 'Vi o que você mandou!',
       gesture: parsedObj.gesture || 'nod',
-      actions: Array.isArray(parsedObj.actions) ? parsedObj.actions : [],
+      // Mesmo contrato do /api/chat: a saída do modelo passa pela allowlist de
+      // verbos/campos antes de virar ação no cliente (B15).
+      actions: sanitizeActions(parsedObj.actions),
       ocr: Array.isArray(parsedObj.ocr) ? parsedObj.ocr : [],
       transcript: parsedObj.transcript || null,
       crossReference: parsedObj.crossReference || parsedObj.summary || null,
     };
   } catch (err) {
+    // Mensagem crua nunca chega ao cliente: erro de rede pode carregar URL,
+    // corpo do provedor ou a própria chave. O log fica no servidor.
+    console.warn('[media-analyzer] falha ao processar mídia: '
+      + String(err?.message || err).replace(/(api[_-]?key|key)=[^&\s"']+/gi, '$1=***').slice(0, 300));
     return {
       ok: false,
       reply: 'Ai, deu algum problema na leitura da mídia! Pera aí...',
       gesture: 'scratchHead',
       actions: [{ type: 'gesture', name: 'scratchHead' }],
-      error: err.message,
+      error: 'Falha interna ao processar a mídia.',
     };
   } finally {
     if (tempDir) {

@@ -96,12 +96,14 @@ export function sanitizeBondLog(raw) {
     }));
 }
 
-export function loadBondLog(storage = globalThis.localStorage) {
-  try { return sanitizeBondLog(JSON.parse(storage?.getItem(BOND_LOG_KEY) || 'null')); } catch { return []; }
+import { safeGetItem, safeSetItem } from './storage-safe.js';
+
+export function loadBondLog(storage) {
+  try { return sanitizeBondLog(JSON.parse(safeGetItem(BOND_LOG_KEY, storage) || 'null')); } catch { return []; }
 }
 
-export function saveBondLog(log, storage = globalThis.localStorage) {
-  try { storage?.setItem(BOND_LOG_KEY, JSON.stringify(sanitizeBondLog(log))); } catch {}
+export function saveBondLog(log, storage) {
+  safeSetItem(BOND_LOG_KEY, JSON.stringify(sanitizeBondLog(log)), storage);
 }
 
 export function relativeDay(at, now = Date.now()) {

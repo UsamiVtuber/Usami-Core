@@ -20,6 +20,7 @@ import { mkdirSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs'
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_VAULT_RELATIVE, resolveVaultDir, stripFrontmatter } from './rag.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 
 const INDEX_FILENAME = 'vault-index.sqlite';
 const DEFAULT_MAX_FILES = 10;
@@ -65,7 +66,7 @@ function clampLimit(value, fallback = DEFAULT_MAX_FILES) {
   return Math.min(number, 50);
 }
 
-export function createVaultIndex({ vaultDir, dataDir = 'data', allowFts = true } = {}) {
+export function createVaultIndex({ vaultDir, dataDir = defaultDataDir(), allowFts = true, throttleMs = 5000 } = {}) {
   const dir = vaultDir || resolveVaultDir(DEFAULT_VAULT_RELATIVE);
   const dbPath = path.join(dataDir, INDEX_FILENAME);
   mkdirSync(dataDir, { recursive: true });
@@ -73,6 +74,8 @@ export function createVaultIndex({ vaultDir, dataDir = 'data', allowFts = true }
   let db = null;
   let ftsEnabled = false;
   let closed = false;
+  let lastDirMtime = null;
+  let lastRefreshAt = 0;
 
   function open() {
     db = new DatabaseSync(dbPath);
@@ -137,13 +140,29 @@ export function createVaultIndex({ vaultDir, dataDir = 'data', allowFts = true }
   }
 
   /** Reconcilia o índice com o disco. Incremental: só mexe no que mudou. */
-  function refresh() {
+  function refresh({ force = false } = {}) {
     assertOpen();
+    // Throttle por mtime do DIRETÓRIO: criar/remover/renomear nota mexe no
+    // mtime; busca logo depois do último refresh não precisa de outro
+    // readdir+stat por arquivo a cada turno. `force` (e throttleMs: 0) ignora.
+    let dirStats = null;
+    try {
+      dirStats = statSync(dir);
+    } catch {
+      // Pasta ausente/ilegível agora não é motivo para apagar memória boa.
+      lastDirMtime = null;
+      return { indexed: 0, updated: 0, removed: 0, available: false };
+    }
+    const time = Date.now();
+    if (!force && throttleMs > 0 && dirStats.mtimeMs === lastDirMtime && time - lastRefreshAt < throttleMs) {
+      return { indexed: 0, updated: 0, removed: 0, available: true, skipped: true };
+    }
+    lastDirMtime = dirStats.mtimeMs;
+    lastRefreshAt = time;
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
-      // Pasta ausente/ilegível agora não é motivo para apagar memória boa.
       return { indexed: 0, updated: 0, removed: 0, available: false };
     }
 

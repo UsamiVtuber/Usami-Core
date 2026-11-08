@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { TECHNIQUE_STATUSES, summarizeTechnique, validateTechnique } from './technique-schema.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 
 const TECH_ID_RE = /^tc-[0-9a-f]{12}$/;
 const INDEX_FILENAME = 'techniques-index.sqlite';
@@ -82,7 +83,7 @@ function clampLimit(value) {
   return Math.min(number, MAX_LIMIT);
 }
 
-export function createTechniqueIndex({ dataDir = 'data', allowFts = true } = {}) {
+export function createTechniqueIndex({ dataDir = defaultDataDir(), allowFts = true } = {}) {
   const techniquesDir = path.join(dataDir, 'techniques');
   const dbPath = path.join(dataDir, INDEX_FILENAME);
   mkdirSync(dataDir, { recursive: true });

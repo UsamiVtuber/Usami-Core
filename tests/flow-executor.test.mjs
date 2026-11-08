@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createFlowExecutor } from '../src/flow-executor.js';
 import { buildServices } from '../src/flow-services.js';
 import { createMemoryStore } from '../src/memory-store.js';
+import { parseProviderRaw, sanitizeActions } from '../src/provider-parse.js';
 import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from '../src/emotion-classifier.js';
 import { createEmotionEngine } from '../src/emotion-engine.js';
 import { createExpressionDriver } from '../src/expression-driver.js';
@@ -121,4 +124,33 @@ test('FlowExecutor sem capacidades usa defaults', async () => {
 
   const result = await executor.executeChat({ userText: 'oi' });
   assert.equal(result.reply, 'sem caps');
+});
+
+// --- B12/B14: parser puro, importável sem avaliar o servidor -----------------
+
+test('B14: provider-parse é a fonte única do parse/limpeza de saída do LLM', () => {
+  const fenced = parseProviderRaw('```json\n{"reply":"oi!","gesture":"wave","actions":[{"type":"gesture","name":"wave"}]}\n```');
+  assert.equal(fenced.ok, true);
+  assert.equal(fenced.reply, 'oi!');
+  assert.deepEqual(fenced.actions, [{ type: 'gesture', name: 'wave' }]);
+  // Vazamento de JSON sai do balão; ações fora da allowlist caem.
+  assert.equal(parseProviderRaw('{"reply":"oi!","gesture":"wave","actions":[]}').reply, 'oi!');
+  assert.deepEqual(sanitizeActions([{ type: 'dance', name: 'x' }]), []);
+});
+
+test('B12: src/flow-services.js importa sem avaliar server.mjs (nenhum data/ criado)', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'usami-import-'));
+  const moduleUrl = pathToFileURL(join(process.cwd(), 'src', 'flow-services.js')).href;
+  const output = execFileSync(process.execPath, [
+    '--input-type=module',
+    '-e',
+    `await import(${JSON.stringify(moduleUrl)}); console.log('flow-ok');`,
+  ], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, USAMI_DATA_DIR: join(cwd, 'data') },
+  });
+  assert.match(output, /flow-ok/);
+  // Avaliar o servidor no import criaria os depósitos e o diretório de dados.
+  assert.deepEqual(readdirSync(cwd), [], 'importar src/ não deve criar data/ no cwd');
 });

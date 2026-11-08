@@ -28,6 +28,7 @@ import { DEFAULT_MAX_ACTIONS, GESTURE_NAMES } from './motion-director.js';
 import { validateTechnique } from './technique-schema.js';
 import { signatureOf } from './motion-experiments.js';
 import { createTechniqueStore } from './technique-store.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 import { EMOTION_LABELS } from './emotion-map.js';
 
 export const PLAN_INTENTS = Object.freeze(['wave', 'greet', 'idle', 'custom']);
@@ -273,7 +274,7 @@ export async function planAnimationSelection(request, options = {}) {
   const capabilities = options.capabilities ?? null;
   const memory = options.memory ?? null;
   const nowMs = Number((options.now ?? (() => Date.now()))());
-  const provider = options.techniques ?? (() => createTechniqueStore({ dataDir: options.dataDir ?? 'data' }).list());
+  const provider = options.techniques ?? (() => createTechniqueStore({ dataDir: options.dataDir ?? defaultDataDir() }).list());
   const injected = typeof provider === 'function' ? await provider() : provider;
   if (!Array.isArray(injected)) throw new Error('planner: técnicas devem chegar como lista (array ou provider)');
 

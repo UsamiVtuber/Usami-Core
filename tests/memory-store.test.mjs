@@ -110,6 +110,35 @@ test('migra memory.json v1 (coreFacts plano) para a seção other sem perder fat
   }
 });
 
+test('B7: migração v1 preserva TODOS os coreFacts, sem teto de seção', () => {
+  const dir = tempDir();
+  try {
+    const coreFacts = Array.from({ length: 12 }, (_, i) => 'fato antigo ' + (i + 1));
+    writeFileSync(join(dir, 'memory.json'), JSON.stringify({ version: 1, coreFacts }));
+
+    const clock = { iso: '2026-10-24T12:00:00.000Z' };
+    const store = makeStore(dir, clock);
+    const data = store.load();
+    // O teto de "other" é 8; a migração não pode descartar os 4 excedentes.
+    assert.equal(data.sections.other.length, 12);
+    assert.deepEqual(data.sections.other, coreFacts);
+    assert.deepEqual(data.sectionsOverflow, ['other']);
+
+    // O próximo save consolida v2 sem re-capar o que veio da migração.
+    store.save(data);
+    const onDisk = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+    assert.equal(onDisk.version, 2);
+    assert.deepEqual(onDisk.sections.other, coreFacts);
+
+    // Releitura do v2 recém-gravado mantém os 12 (marcador persistiu).
+    const reloaded = makeStore(dir, clock).load();
+    assert.equal(reloaded.sections.other.length, 12);
+    assert.deepEqual(reloaded.sections.other, coreFacts);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('addRecentFact grava TTL de 7 dias e a seção; fato que virou núcleo sai do recente', () => {
   const dir = tempDir();
   try {

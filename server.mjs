@@ -3,11 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
-import { GESTURE_NAMES, DIRECTOR_VERBS, SHAPE_NAMES } from './src/motion-director.js';
+import { GESTURE_NAMES, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
 import { createPersonalityStore, normalizePersonality, TRAITS, CUSTOM_PROMPT_MAX } from './src/personality-store.js';
-import { extractJsonCandidate } from './src/json-salvage.js';
 import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
@@ -32,6 +31,13 @@ import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 import { analyzeMedia } from './src/media-analyzer.js';
+import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
+import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-paths.js';
+import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
+
+// Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
+// e chamadores antigos; a implementação agora é o módulo puro de src/.
+export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 // USE_NVIDIA=false desliga a rota NVIDIA mesmo com chave presente (isolamento de testes);
@@ -76,16 +82,17 @@ const HEDGE_AFTER_MS = (() => {
 
 const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
 
-export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
-
-// Heurística do "remember": sinais de fato duradouro → núcleo; o resto é recente.
+// Heurística do "remember": sinais de fato durável → núcleo; o resto é recente.
 const DURABLE_FACT = /\b(anivers[áa]rio|gosta|tem|nome)\b|\b\d{1,2}\/\d{1,2}\b/i;
 
-// Fila de comandos vindos do n8n (n8n → Usami). O cliente (Usami.jsx) consome
-// via GET /api/n8n/commands e aplica no avatar localmente (gesto, expressão,
-// morph, visibilidade de mesh). O servidor não tem acesso direto ao avatar do
-// navegador, então a fila é o ponto de integração.
-const n8nCommandQueue = [];
+// Fila de comandos vindos do n8n (n8n → Usami) e do refino de animação do
+// próprio turno. O cliente (Usami.jsx) consome via GET /api/n8n/commands com
+// `x-usami-client` e aplica no avatar localmente (gesto, expressão, morph,
+// visibilidade de mesh). A fila é por cliente (B6): duas abas não roubam mais
+// comandos uma da outra; o GET marca entregue e o cliente confirma via
+// POST /api/n8n/commands/ack. Sem redelivery: entregue e não confirmado é
+// podado após 120 s com log.
+const sharedN8nQueue = createN8nCommandQueue();
 
 // Comando válido para controle direto do avatar (executado pelo cliente).
 const VALID_COMMAND_TYPES = new Set([
@@ -109,18 +116,19 @@ function isValidN8nCommand(cmd) {
 }
 
 // Único ponto de entrada da fila: valida, carimba id/timestamp e empurra.
-// Usado pelo n8n (POST) e pelo refino de animação do próprio turno.
-export function queueAvatarCommand(cmd) {
+// Usado pelo n8n (POST), pelo refino de animação do turno e pela proatividade.
+// O spread do corpo vem ANTES dos carimbos (B6): um POST com `id`/`timestamp`
+// forjados não consegue sobrescrever o id/timestamp gerados no servidor.
+// `clientId` ausente = fanout (comando do n8n sem cliente identificado).
+export function queueAvatarCommand(cmd, { clientId = null, queue = sharedN8nQueue } = {}) {
   if (!isValidN8nCommand(cmd)) return null;
   const entry = {
+    ...cmd,
     id: Math.random().toString(36).slice(2, 10),
     timestamp: new Date().toISOString(),
-    ...cmd,
   };
-  n8nCommandQueue.push(entry);
-
-  // Mantém a fila limitada para não crescer indefinidamente.
-  if (n8nCommandQueue.length > 100) n8nCommandQueue.shift();
+  // null = comando sem dono (fanout/pendente); string = fila daquele cliente.
+  queue.enqueue(entry, { clientId: clientId ? normalizeClientId(clientId) : null });
   return entry;
 }
 
@@ -132,12 +140,12 @@ export function queueAvatarCommand(cmd) {
 // Decisão de timing: como o refino nunca está no caminho do balão, ele NÃO
 // contribui para animationMs/totalMs do turno. Medimos a duração própria aqui,
 // no log, para continuar visível sem o chat esperar por ele.
-export async function refineAnimationInBackground(reply, capabilities, { planner = planAnimation } = {}) {
+export async function refineAnimationInBackground(reply, capabilities, { planner = planAnimation, clientId = null, queue = sharedN8nQueue } = {}) {
   const startedAt = Date.now();
   try {
     const { actions } = await planner(reply, capabilities, { temperature: 0.3 });
     const queued = filterActionsByCatalog(actions ?? [], capabilities)
-      .map(action => queueAvatarCommand(action))
+      .map(action => queueAvatarCommand(action, { clientId, queue }))
       .filter(Boolean).length;
     console.log('[animacao] refino em background: ' + queued + ' ação(ões) na fila, queuedMs='
       + (Date.now() - startedAt));
@@ -151,7 +159,7 @@ export async function refineAnimationInBackground(reply, capabilities, { planner
 // Falha aqui nunca derruba o chat: o handler isola as operações de memória.
 // USAMI_DATA_DIR existe para os testes: sem ele, importar este módulo já bastava
 // para criar e depois encher o memory.json real da companion.
-const installMemoryStore = createMemoryStore({ dataDir: process.env.USAMI_DATA_DIR || 'data' });
+const installMemoryStore = createMemoryStore({ dataDir: resolveDataDir() });
 try {
   installMemoryStore.load();
 } catch {
@@ -160,7 +168,7 @@ try {
 
 // Ajustes de personalidade (data/personality.json). Mesmo diretório da memória,
 // então os testes seguem isolados em USAMI_DATA_DIR.
-const installPersonalityStore = createPersonalityStore({ dataDir: process.env.USAMI_DATA_DIR || 'data' });
+const installPersonalityStore = createPersonalityStore({ dataDir: resolveDataDir() });
 installPersonalityStore.load();
 
 // Motor de proatividade da Usami (<开口> / idle triggers).
@@ -185,7 +193,7 @@ function getVaultIndex() {
   if (!sharedVaultIndex) {
     sharedVaultIndex = createVaultIndex({
       vaultDir: resolveVaultDir(process.env.USAMI_RAG_VAULT),
-      dataDir: process.env.USAMI_DATA_DIR || 'data',
+      dataDir: resolveDataDir(),
     });
   }
   return sharedVaultIndex;
@@ -274,6 +282,37 @@ function denyWithoutToken(req, options, send) {
   return true;
 }
 
+// Leitor de body único das rotas /api. Acumula Buffers (`body += chunk`
+// decodifica cada pedaço isolado e um multibyte partido na fronteira vira U+FFFD)
+// e decodifica UMA vez no fim. Ao exceder o limite, drena o restante com
+// req.resume() em vez de `break`: `break` num for-await fecha o IncomingMessage e
+// o 413/queixa morre no socket, então o cliente nunca recebe a resposta.
+export async function readBodyBuffer(req, { limit = 8192 } = {}) {
+  const chunks = [];
+  let total = 0;
+  let tooLarge = false;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (tooLarge) continue;
+    total += buffer.length;
+    if (total > limit) {
+      tooLarge = true;
+      chunks.length = 0; // o excesso já decidiu; não guarda o corpo
+      req.resume?.();
+      continue;
+    }
+    chunks.push(buffer);
+  }
+  if (tooLarge) return { ok: false, status: 413 };
+  return { ok: true, buffer: Buffer.concat(chunks) };
+}
+
+export async function readRequestBody(req, { limit = 8192 } = {}) {
+  const result = await readBodyBuffer(req, { limit });
+  if (!result.ok) return result;
+  return { ok: true, body: result.buffer.toString('utf8') };
+}
+
 export function parseChatBody(body) {
   let input;
   try {
@@ -303,75 +342,6 @@ export function parseTtsBody(body) {
   return { ok: true, text: input.text.trim(), styleId, rate, pitch, stream: input.stream === true };
 }
 
-export function sanitizeCapabilities(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
-  const names = (list, limit, allowed) => (Array.isArray(list) ? list.filter(value => typeof value === 'string' && value.length > 0).map(value => value.slice(0, 60)).filter(value => !allowed || allowed.includes(value)).slice(0, limit) : []);
-  const meshes = Array.isArray(input.meshes) ? input.meshes.filter(mesh => typeof mesh?.name === 'string' && mesh.name.length > 0).map(mesh => ({ name: mesh.name.slice(0, 60), accessory: mesh.accessory === true })).slice(0, 100) : [];
-  return {
-    format: typeof input.format === 'string' ? input.format.slice(0, 40) : '',
-    clips: names(input.clips, 40),
-    morphs: names(input.morphs, 60),
-    meshes,
-    expressions: names(input.expressions, 20),
-    gestures: names(input.gestures, 20, GESTURE_NAMES),
-    sequences: input.sequences === true,
-  };
-}
-
-export function sanitizeActions(raw) {
-  const actions = Array.isArray(raw) ? raw : [];
-  return actions.filter(action => action && typeof action === 'object' && !Array.isArray(action) && DIRECTOR_VERBS.includes(action.type)).slice(0, 5).map(action => {
-    const base = { type: action.type, name: typeof action.name === 'string' ? action.name.slice(0, 60) : action.name };
-    if (action.type === 'set_morph') base.value = action.value;
-    if (action.type === 'set_mesh_visible') base.visible = action.visible;
-    if (action.type === 'set_expression') base.weight = action.weight;
-    // play_sequence: só o vocabulário (shape) e parâmetros numéricos limitados
-    // passam; os keyframes são expandidos localmente pelo buildSequenceRequest.
-    if (action.type === 'play_sequence') {
-      if (!SHAPE_NAMES.includes(action.shape)) return null;
-      base.shape = action.shape;
-      if (action.side === 'left' || action.side === 'right') base.side = action.side;
-      for (const key of ['amplitude', 'cycles', 'durationMs']) {
-        if (Number.isFinite(action[key])) base[key] = action[key];
-      }
-    }
-    // Timing por frase: delayMs (ms após o início da fala) e trigger
-    // ('start' | 'middle' | 'end') são metadados do cliente, preservados
-    // para agendamento sincronizado com o áudio TTS.
-    if (typeof action.delayMs === 'number' && Number.isFinite(action.delayMs) && action.delayMs >= 0) {
-      base.delayMs = Math.round(action.delayMs);
-    }
-    if (SPEECH_TRIGGERS.includes(action.trigger)) {
-      base.trigger = action.trigger;
-    }
-    return base;
-  }).filter(Boolean);
-}
-
-// O modelo inventa sinônimos para os verbos do diretor ("expression" em vez de
-// "set_expression"); sem essa ponte a ação passa pelo filtro e morre no director.
-const ACTION_TYPE_ALIASES = { expression: 'set_expression', emote: 'set_expression', morph: 'set_morph', vrma: 'play_vrma' };
-
-export function filterActionsByCatalog(actions, capabilities) {
-  const known = (list) => (!Array.isArray(list) ? null : new Set(list));
-  const sets = capabilities ? {
-    gesture: known(capabilities.gestures),
-    play_clip: known(capabilities.clips),
-    set_morph: known(capabilities.morphs),
-    set_expression: known(capabilities.expressions),
-    play_vrma: known(capabilities.gestures),
-  } : {};
-  return (Array.isArray(actions) ? actions : [])
-    .map(action => {
-      const alias = ACTION_TYPE_ALIASES[action?.type];
-      return alias ? { ...action, type: alias } : action;
-    })
-    .filter(action => {
-      const set = sets[action?.type];
-      return set ? set.has(action?.name) : true; // sem catálogo conhecido → mantém
-    });
-}
-
 export function systemFor(capabilities) {
   return withCapabilities(DEFAULT_SYSTEM, capabilities);
 }
@@ -383,185 +353,6 @@ export function systemFor(capabilities) {
 export function withCapabilities(system, capabilities) {
   if (!capabilities) return system;
   return system + ' Capabilidades disponíveis neste modelo: ' + JSON.stringify(capabilities) + '.';
-}
-
-// Fato "remember" do schema da persona: string (v1) ou {fact, section}.
-// A string antiga ainda é aceita e cai em "other" — o modelo às vezes ignora
-// o formato novo, e perder o fato seria pior que perdê-lo sem seção.
-function normalizeRemember(value) {
-  const cleanFact = (fact) => {
-    if (typeof fact !== 'string') return null;
-    const trimmed = fact.trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') return null;
-    return trimmed.slice(0, 300);
-  };
-  if (typeof value === 'string') {
-    const fact = cleanFact(value);
-    return fact ? { fact, section: 'other' } : null;
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const fact = cleanFact(value.fact);
-  if (!fact) return null;
-  const section = MEMORY_SECTIONS.includes(value.section) ? value.section : 'other';
-  return { fact, section };
-}
-
-// Teto do reply exibido no chat: falas viram balões curtos (decisão do
-// usuário), então o servidor corta em fronteira de sentença — não só o prompt.
-const REPLY_CHAR_LIMIT = 220;
-
-// Rubrica de roleplay: o modelo descreve a ação DENTRO de reply ("*bufa, braços
-// cruzados*"). O balão e o /api/tts falam o texto cru, então a rubrica é lida em
-// voz alta. A fala é só o que se diz; reação física tem canal próprio (actions/
-// gesture), então o texto descritivo não tem para onde ir além de sair.
-export function stripStageDirections(reply) {
-  return String(reply ?? '')
-    .replace(/\*+[^*\n]*\*+/g, ' ')
-    .replace(/\*/g, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
-}
-
-function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
-  if (reply.length <= limit) return reply;
-  const window = reply.slice(0, limit);
-  for (let i = window.length - 1; i >= 0; i -= 1) {
-    if ('.!?;:'.includes(window[i])) return window.slice(0, i + 1).trimEnd();
-  }
-  const space = window.lastIndexOf(' ');
-  return (space > 0 ? window.slice(0, space) : window).trimEnd();
-}
-
-// O balão mostra a fala; as tags não-verbais (<laugh>, <sigh>...) vão só para o
-// /api/tts. O campo `speechTags` só existe quando há tag — payloads antigos e
-// testes que comparam o objeto inteiro continuam idênticos.
-export function stripLeakedJson(reply) {
-  return String(reply ?? '')
-    // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
-    // Ex.: `','gesture': 'angry','actions': [{'type':` ou `"gesture":"angry","actions":[...`
-    .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
-    // Remove fragmentos truncados de arrays/objetos JSON no fim da frase (ex.: ` [{'type':` ou ` {"type":`)
-    .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
-    // Remove aspas/vírgulas de fechamento de propriedade JSON vazadas no final (ex.: `!' ,'` ou `!",`)
-    .replace(/['"]\s*,\s*['"]?\s*$/, '')
-    .trim();
-}
-
-function salvageLeakedGesture(rawText) {
-  const match = /['",\s]\\?["']gesture\\?["']\s*:\s*\\?["']([a-zA-Z0-9_-]+)\\?["']/i.exec(String(rawText ?? ''));
-  if (!match) return null;
-  const candidate = match[1].trim();
-  return GESTURE_NAMES.includes(candidate) ? candidate : null;
-}
-
-function cleanReply(reply) {
-  const { text, tags } = extractSpeechTags(stripStageDirections(stripLeakedJson(reply)));
-  return { display: capReplyLength(text), tags };
-}
-
-// Extrai o valor da chave "reply" de JSON truncado/inválido: lê até a próxima
-// aspa não escapada OU o fim da string (payload cortado no max_tokens),
-// decodificando os escapes mais comuns. Retorna null sem conteúdo recuperável.
-// A aspa de abertura da chave é opcional: modelos truncados já emitiram
-// `{reply":"...` e o texto livre jamais deve chegar ao balão.
-function extractReplyFromBrokenJson(text) {
-  const keyMatch = /"?reply"?\s*:\s*"/.exec(text);
-  if (!keyMatch) return null;
-  let out = '';
-  for (let i = keyMatch.index + keyMatch[0].length; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === '"') break;
-    if (ch === '\\') {
-      const next = text[i + 1];
-      if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) {
-        out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16));
-        i += 5;
-        continue;
-      }
-      if (next === 'n') { out += '\n'; i += 1; continue; }
-      if (next === 't') { out += '\t'; i += 1; continue; }
-      if (next && '"\\/bfr'.includes(next)) {
-        out += next === 'b' ? '\b' : next === 'f' ? '\f' : next === 'r' ? '\r' : next;
-        i += 1;
-        continue;
-      }
-      // escape desconhecido: mantém o caractere, descarta a barra
-      if (next) { out += next; i += 1; }
-      continue;
-    }
-    out += ch;
-  }
-  return out.trim() || null;
-}
-
-export function parseProviderRaw(raw) {
-  if (typeof raw !== 'string' || raw.length > 10000) {
-    return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
-  }
-  let result;
-  try {
-    result = JSON.parse(raw.trim().replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, ''));
-  } catch {
-    const trimmed = raw.trim();
-    // Preâmbulo de raciocínio antes do JSON: o primeiro objeto balanceado ainda
-    // é a resposta. Sem isto o texto do "pensamento" inteiro viria no balão.
-    const embedded = extractJsonCandidate(trimmed);
-    if (embedded) {
-      try {
-        result = JSON.parse(embedded);
-      } catch {
-        result = null;
-      }
-    }
-    if (!result) {
-      // Se a resposta parece JSON de erro ({"error": ...}), tenta extrair a mensagem
-      if (/^[{[]/.test(trimmed)) {
-        try {
-          const errorJson = JSON.parse(trimmed);
-          if (errorJson?.error?.message) {
-            return { ok: false, status: 502, error: errorJson.error.message };
-          }
-        } catch {}
-      }
-      if (trimmed.startsWith('{')) {
-        // JSON truncado/inválido: recupera apenas o "reply". As actions de um
-        // payload incompleto são descartadas (decisão do usuário) e o texto
-        // bruto jamais vira reply — sem conteúdo recuperável, erro amigável.
-        const salvaged = extractReplyFromBrokenJson(trimmed);
-        if (!salvaged) {
-          return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
-        }
-        const cleaned = cleanReply(salvaged);
-        if (!cleaned.display) {
-          return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
-        }
-        const salvagedGesture = salvageLeakedGesture(trimmed) || 'neutral';
-        return { ok: true, reply: cleaned.display, gesture: salvagedGesture, actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
-      }
-      // Caso contrário, trata o texto bruto como resposta livre
-      result = { reply: trimmed, gesture: 'neutral' };
-    }
-  }
-  // A rubrica sai ANTES das validações: reply que era só descrição de ação não
-  // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente. As tags
-  // não-verbais também saem do texto exibido e voltam em `speechTags`.
-  if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
-    return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
-  }
-  const salvagedFromReply = salvageLeakedGesture(result.reply);
-  const cleaned = cleanReply(result.reply);
-  if (!cleaned.display) {
-    return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
-  }
-  const rawGesture = (result.gesture && result.gesture !== 'neutral') ? result.gesture : salvagedFromReply;
-  return {
-    ok: true,
-    reply: cleaned.display,
-    gesture: GESTURE_NAMES.includes(rawGesture) ? rawGesture : 'neutral',
-    actions: sanitizeActions(result.actions),
-    remember: normalizeRemember(result.remember),
-    ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}),
-  };
 }
 
 // Erro de provedor com status HTTP próprio: o handler devolve a mensagem ao
@@ -654,6 +445,13 @@ export function createChatHandler(options = {}) {
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
   const proactive = options.proactiveEngine || proactiveEngine;
+  // Fila de comandos do refino: o comando do chat vai para a MESMA aba que
+  // pediu o turno (x-usami-client), não para a primeira que pollar.
+  const n8nQueue = options.n8nQueue || sharedN8nQueue;
+  // Contador atômico de turnos em andamento: com um booleano, dois turnos
+  // sobrepostos (duas abas) liberavam o motor proativo quando o primeiro
+  // terminava, mesmo com o segundo ainda rodando.
+  let activeTurns = 0;
   // Injetável para os testes não varrerem o vault real: o padrão consulta o
   // índice FTS5 e, se ele falhar ou voltar vazio, mantém o leitor antigo.
   const searchVault = options.vaultSearch || (async (query) => {
@@ -702,26 +500,19 @@ export function createChatHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 8192) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) {
+    const read = await readRequestBody(req, { limit: 8192 });
+    if (!read.ok) {
       return send(413, { error: 'Mensagem muito longa.' });
     }
 
-    const parsedBody = parseChatBody(body);
+    const parsedBody = parseChatBody(read.body);
     if (!parsedBody.ok) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
 
     proactive?.markUserActivity();
-    proactive?.setBusy(true);
+    activeTurns += 1;
+    if (activeTurns === 1) proactive?.setBusy(true);
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
     const mem = memoryStore.getAll();
@@ -896,7 +687,10 @@ export function createChatHandler(options = {}) {
         // background e o refino chega pela fila de comandos. Nunca bloqueia a
         // resposta — a fala já está na mão do cliente.
         if (parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
-          void refineAnimationInBackground(parsed.reply, capabilities);
+          void refineAnimationInBackground(parsed.reply, capabilities, {
+            clientId: normalizeClientId(req.headers['x-usami-client']),
+            queue: n8nQueue,
+          });
         }
         mark('animation');
       } catch (error) {
@@ -1000,7 +794,11 @@ export function createChatHandler(options = {}) {
       store: memoryStore,
       today,
       summarize: useNvidia() ? summarizeDay : undefined,
-    }).catch(() => {});
+    }).catch(error => {
+      // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
+      // sem relançar para nunca derrubar o turno que já foi respondido.
+      console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
+    });
 
     const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
 
@@ -1038,7 +836,8 @@ export function createChatHandler(options = {}) {
       ...(affinityPayload || {}),
     });
     } finally {
-      proactive?.setBusy(false);
+      activeTurns = Math.max(0, activeTurns - 1);
+      if (activeTurns === 0) proactive?.setBusy(false);
     }
   };
 }
@@ -1070,20 +869,12 @@ export function createFlowChatHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 8192) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) {
+    const read = await readRequestBody(req, { limit: 8192 });
+    if (!read.ok) {
       return send(413, { error: 'Mensagem muito longa.' });
     }
 
-    const parsedBody = parseChatBody(body);
+    const parsedBody = parseChatBody(read.body);
     if (!parsedBody.ok) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
@@ -1126,6 +917,9 @@ export function createFlowChatHandler(options = {}) {
 
 export function createN8nCommandHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  // Injetável para os testes: cada teste ganha uma fila isolada em vez de
+  // disputar a fila compartilhada do processo.
+  const queue = options.queue || sharedN8nQueue;
 
   return async function handleN8nCommand(req, res) {
     const send = (status, data) => {
@@ -1141,53 +935,77 @@ export function createN8nCommandHandler(options = {}) {
     }
     if (denyWithoutToken(req, options, send)) return;
 
-    // GET — cliente consome e limpa a fila de comandos pendentes
-    if (req.method === 'GET' && req.url === '/api/n8n/commands') {
-      const pending = [...n8nCommandQueue];
-      n8nCommandQueue.length = 0;
-      return send(200, { commands: pending, count: pending.length });
+    const url = new URL(req.url || '/', 'http://localhost');
+    // Aba/dispositivo: header (frontend) com fallback de query (compat).
+    const clientId = normalizeClientId(req.headers['x-usami-client'] || url.searchParams.get('client'));
+
+    // GET — cliente consome a própria fila. Marca como entregue (não remove):
+    // uma segunda leitura não duplica; o /ack é quem remove de fato.
+    if (req.method === 'GET' && url.pathname === '/api/n8n/commands') {
+      const { commands, count } = queue.poll(clientId);
+      return send(200, { commands, count });
     }
 
-    // DELETE — limpa a fila (ex.: cliente desistiu de aplicar)
-    if (req.method === 'DELETE' && req.url === '/api/n8n/commands') {
-      const cleared = n8nCommandQueue.length;
-      n8nCommandQueue.length = 0;
-      return send(200, { cleared });
+    // DELETE — cliente desiste de aplicar (limpa a fila dele + pendentes sem dono)
+    if (req.method === 'DELETE' && url.pathname === '/api/n8n/commands') {
+      return send(200, { cleared: queue.clear(clientId) });
     }
 
     // POST — n8n envia um comando para ser aplicado pelo cliente
-    if (req.method === 'POST' && req.url === '/api/n8n/command') {
+    if (req.method === 'POST' && url.pathname === '/api/n8n/command') {
       const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
       if (contentType !== 'application/json') {
         return send(403, { error: 'Content-Type inválido.' });
       }
 
-      let body = '';
-      let tooLarge = false;
-      for await (const chunk of req) {
-        body += chunk;
-        if (body.length > 8192) {
-          tooLarge = true;
-          break;
-        }
-      }
-      if (tooLarge) {
+      const read = await readRequestBody(req, { limit: 8192 });
+      if (!read.ok) {
         return send(413, { error: 'Comando muito longo.' });
       }
 
       let cmd;
       try {
-        cmd = JSON.parse(body);
+        cmd = JSON.parse(read.body);
       } catch {
         return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
       }
 
-      const entry = queueAvatarCommand(cmd);
+      // Sem header o comando é do n8n "sem dono": fanout/pendente na fila.
+      const hasClient = Boolean(req.headers['x-usami-client'] || url.searchParams.get('client'));
+      const entry = queueAvatarCommand(cmd, { clientId: hasClient ? clientId : null, queue });
       if (!entry) {
         return send(400, { error: 'Comando inválido. Tipos válidos: say, proactive_say, gesture, set_expression, set_morph, set_mesh_visible, play_sequence.' });
       }
 
-      return send(200, { ok: true, id: entry.id, queued: n8nCommandQueue.length });
+      return send(200, { ok: true, id: entry.id, queued: queue.count() });
+    }
+
+    // POST /api/n8n/commands/ack — confirma o que foi aplicado. Escrita
+    // sensível: exige token (denyWithoutToken acima). Remove só os ids do
+    // cliente que pediu; ids desconhecidos são ignorados e a resposta é 200.
+    if (req.method === 'POST' && url.pathname === '/api/n8n/commands/ack') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+
+      const read = await readRequestBody(req, { limit: 8192 });
+      if (!read.ok) {
+        return send(413, { error: 'Confirmação muito longa.' });
+      }
+
+      let body;
+      try {
+        body = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+      if (!Array.isArray(body?.ids)) {
+        return send(400, { error: 'Envie {ids:[...]} com os comandos aplicados.' });
+      }
+
+      queue.acknowledge(clientId, body.ids.slice(0, 500));
+      return send(200, { ok: true });
     }
 
     return send(404, { error: 'Não encontrado.' });
@@ -1195,6 +1013,14 @@ export function createN8nCommandHandler(options = {}) {
 }
 
 // --- RAG: contexto do vault Obsidian ---------------------------------------
+
+// Headers de tuning do RAG (B18): `Number()` cru aceitava Infinity, negativo e
+// 1e9 — o mesmo clamp do vault-index, com teto por grandeza.
+export function clampRagNumber(value, fallback, max) {
+  const number = Math.floor(Number(value));
+  if (!Number.isFinite(number) || number < 1) return fallback;
+  return Math.min(number, max);
+}
 
 export function createRagContextHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
@@ -1218,9 +1044,9 @@ export function createRagContextHandler(options = {}) {
       return send(404, { error: 'Não encontrado.' });
     }
 
-    const maxFiles = Number(req.headers['x-rag-max-files'] || 10);
-    const maxCharsPerFile = Number(req.headers['x-rag-max-chars'] || 2000);
-    const maxTotalChars = Number(req.headers['x-rag-max-total'] || 6000);
+    const maxFiles = clampRagNumber(req.headers['x-rag-max-files'], 10, 50);
+    const maxCharsPerFile = clampRagNumber(req.headers['x-rag-max-chars'], 2000, 20000);
+    const maxTotalChars = clampRagNumber(req.headers['x-rag-max-total'], 6000, 60000);
 
     let context;
     try {
@@ -1297,14 +1123,11 @@ export function createPersonalityHandler(options = {}) {
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
     if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
 
-    let body = '';
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 4096) return send(413, { error: 'Pedido muito longo.' });
-    }
+    const read = await readRequestBody(req, { limit: 4096 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
     let payload;
     try {
-      payload = JSON.parse(body);
+      payload = JSON.parse(read.body);
     } catch {
       return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
     }
@@ -1352,20 +1175,12 @@ export function createMemoryHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 8192) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) return send(413, { error: 'Pedido muito longo.' });
+    const read = await readRequestBody(req, { limit: 8192 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
 
     let payload;
     try {
-      payload = JSON.parse(body);
+      payload = JSON.parse(read.body);
     } catch {
       return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
     }
@@ -1527,6 +1342,15 @@ function parseSseEvent(event) {
   return null;
 }
 
+// Um único signal para o provedor: o do cliente (closed.signal, disparado quando
+// a aba fecha) e o timeout de parede — aborta o que vier primeiro. Abortar o
+// fetch encerra o corpo do provedor, o reader.read() rejeita e o slot do
+// semáforo é liberado no finally (B10).
+export function ttsAbortSignal(clientSignal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return clientSignal ? AbortSignal.any([clientSignal, timeout]) : timeout;
+}
+
 // Voz em streaming: bombeia o PCM cru para a resposta na medida em que o provedor
 // entrega. Nada é escrito em `res` antes do primeiro pedaço de áudio — enquanto
 // não há áudio, o chamador ainda pode responder erro ou cair no caminho normal
@@ -1539,6 +1363,7 @@ export async function streamGeminiPcm({
   voice,
   text,
   res,
+  signal = null,
   timeoutMs = 30000,
 } = {}) {
   let response;
@@ -1547,10 +1372,10 @@ export async function streamGeminiPcm({
       method: 'POST',
       headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify(geminiSpeechBody({ text, voice })),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: ttsAbortSignal(signal, timeoutMs),
     });
   } catch {
-    return { ok: false, reason: 'fetch-falhou' };
+    return { ok: false, reason: signal?.aborted ? 'abortado' : 'fetch-falhou' };
   }
   if (!response || !response.ok) {
     return { ok: false, reason: 'http-' + (response?.status ?? 0) };
@@ -1588,6 +1413,15 @@ export async function streamGeminiPcm({
 
   try {
     for (;;) {
+      // Cliente foi embora: sai do loop sem esperar o próximo pedaço (o fetch
+      // também foi abortado; o reader pode ficar pendurado até o abort chegar).
+      if (signal?.aborted) {
+        try { await reader.cancel(); } catch {}
+        if (started) {
+          try { res.end(); } catch {}
+        }
+        return { ok: false, reason: 'abortado' };
+      }
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -1602,6 +1436,12 @@ export async function streamGeminiPcm({
     buffer += decoder.decode();
     if (buffer.trim()) feed(buffer);
   } catch (error) {
+    if (signal?.aborted) {
+      if (started) {
+        try { res.end(); } catch {}
+      }
+      return { ok: false, reason: 'abortado' };
+    }
     // Canais quebrados no meio da fala: o que já saiu tocou. Não há como
     // voltar atrás na resposta iniciada, então fecha e registra.
     console.warn('tts: streaming interrompido:', error?.message || error);
@@ -1647,7 +1487,7 @@ export function createTtsHandler(options = {}) {
   const geminiUrl = (options.geminiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const timeoutMs = options.timeoutMs || 30000;
   const gate = options.gate || createSemaphore({ limit: 1, maxQueue: 4 });
-  const cache = options.cache ? (options.cacheStore || createFileTtsCache({ directory: options.cacheDir || process.env.USAMI_TTS_CACHE_DIR || 'data/tts-cache' })) : null;
+  const cache = options.cache ? (options.cacheStore || createFileTtsCache({ directory: options.cacheDir || ttsCacheDir() })) : null;
 
   return async function handleTts(req, res) {
     const send = (status, data) => {
@@ -1671,20 +1511,12 @@ export function createTtsHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 8192) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) {
+    const read = await readRequestBody(req, { limit: 8192 });
+    if (!read.ok) {
       return send(413, { error: 'Texto muito longo.' });
     }
 
-    const parsedBody = parseTtsBody(body);
+    const parsedBody = parseTtsBody(read.body);
     if (!parsedBody.ok) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
@@ -1783,6 +1615,8 @@ export function createTtsHandler(options = {}) {
             voice: geminiVoice,
             text: geminiInstruction + parsedBody.text,
             res,
+            // Cliente que fecha a aba aborta o stream e libera o slot do semáforo.
+            signal: closed.signal,
             timeoutMs,
           });
           if (streamed.ok) {
@@ -1804,17 +1638,19 @@ export function createTtsHandler(options = {}) {
             method: 'POST',
             headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
             body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: geminiVoice })),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: ttsAbortSignal(closed.signal, timeoutMs),
           });
         } else {
           response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(config.voiceId) + '?output_format=mp3_44100_128', {
             method: 'POST',
             headers: { 'xi-api-key': config.apiKey, 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: parsedBody.text, model_id: model, output_format: 'mp3_44100_128' }),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: ttsAbortSignal(closed.signal, timeoutMs),
           });
         }
       } catch {
+        // Cliente desconectou: nada a responder e o provedor já foi abortado.
+        if (closed.signal.aborted) return;
         // timeout ou falha de rede; a apiKey nunca é exposta em resposta ou log
         return send(504, { error: 'TTS expirou.' });
       }
@@ -1946,8 +1782,12 @@ export function createSttHandler(options = {}) {
   const timeoutMs = options.timeoutMs || 60000;
   const language = options.language || 'pt';
   const beamSize = Number.isFinite(Number(options.beamSize)) ? Number(options.beamSize) : 1;
-  const tmpDir = options.tmpDir || process.env.USAMI_STT_TMP_DIR || 'tmp';
+  const tmpDir = options.tmpDir || sttTmpDir();
   const maxBodyBytes = options.maxBodyBytes || 8 * 1024 * 1024;
+  // Whisper carrega um modelo por processo (CPU/RAM): uma transcrição por vez,
+  // fila de 2. Sem o gate, N POSTs simultâneos spawnavam N pythons.
+  const gate = options.gate || createSemaphore({ limit: 1, maxQueue: 2 });
+  const queueTimeoutMs = options.queueTimeoutMs || 60000;
 
   return async function handleStt(req, res) {
     const send = (status, data) => {
@@ -1965,6 +1805,8 @@ export function createSttHandler(options = {}) {
     if (!isAllowedOrigin(origin, host, allowedOrigins)) {
       return send(403, { error: 'Origem não autorizada.' });
     }
+    // Escrita sensível (D2): áudio do microfone só entra com token.
+    if (denyWithoutToken(req, options, send)) return;
 
     const contentType = req.headers['content-type'] || '';
     const mime = contentType.split(';')[0].trim().toLowerCase();
@@ -1972,61 +1814,63 @@ export function createSttHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    const chunks = [];
-    let total = 0;
-    let tooLarge = false;
-    for await (const chunk of req) {
-      chunks.push(chunk);
-      total += chunk.length;
-      if (total > maxBodyBytes) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) {
+    // Limite por bytes lidos (chunks binários), não por tamanho de string.
+    const read = await readBodyBuffer(req, { limit: maxBodyBytes });
+    if (!read.ok) {
       return send(413, { error: 'Áudio muito grande.' });
     }
 
-    const parsed = parseMultipartAudio(Buffer.concat(chunks), contentType);
+    const parsed = parseMultipartAudio(read.buffer, contentType);
     if (!parsed.ok) {
       return send(parsed.status, { error: parsed.error });
     }
 
-    // config falhando não derruba o STT: o nome do modelo tem default funcional
-    let config = null;
+    let release;
     try {
-      config = await getConfig();
-    } catch {
-      config = null;
-    }
-    const modelName = model
-      || (typeof config === 'string' && config ? config : null)
-      || config?.whisperModel
-      || config?.WHISPER_MODEL
-      || process.env.WHISPER_MODEL
-      || 'base';
-
-    let audioPath;
-    try {
-      audioPath = await saveTempAudio(parsed.audio, { dir: tmpDir, extension: parsed.extension || 'webm' });
-    } catch {
-      return send(500, { error: 'Falha ao preparar o áudio.' });
-    }
-
-    let text;
-    try {
-      text = await withTimeout(transcribeImpl({ audioPath, modelName, language, beamSize, timeoutMs }), timeoutMs, 'Transcrição expirou.');
+      release = await gate.acquire({ timeoutMs: queueTimeoutMs });
     } catch (error) {
-      const timedOut = error?.name === 'TimeoutError';
-      return send(timedOut ? 504 : 500, { error: timedOut ? 'Transcrição expirou.' : 'Falha na transcrição.' });
-    } finally {
-      await removeTempAudio(audioPath);
+      if (!(error instanceof SemaphoreRejected)) throw error;
+      return send(error.reason === 'full' ? 429 : 503, { error: 'STT ocupado, tente novamente.' });
     }
+    try {
+      // config falhando não derruba o STT: o nome do modelo tem default funcional
+      let config = null;
+      try {
+        config = await getConfig();
+      } catch {
+        config = null;
+      }
+      const modelName = model
+        || (typeof config === 'string' && config ? config : null)
+        || config?.whisperModel
+        || config?.WHISPER_MODEL
+        || process.env.WHISPER_MODEL
+        || 'base';
 
-    if (typeof text !== 'string') {
-      return send(500, { error: 'Falha na transcrição.' });
+      let audioPath;
+      try {
+        audioPath = await saveTempAudio(parsed.audio, { dir: tmpDir, extension: parsed.extension || 'webm' });
+      } catch {
+        return send(500, { error: 'Falha ao preparar o áudio.' });
+      }
+
+      let text;
+      try {
+        text = await withTimeout(transcribeImpl({ audioPath, modelName, language, beamSize, timeoutMs }), timeoutMs, 'Transcrição expirou.');
+      } catch (error) {
+        const timedOut = error?.name === 'TimeoutError';
+        return send(timedOut ? 504 : 500, { error: timedOut ? 'Transcrição expirou.' : 'Falha na transcrição.' });
+      } finally {
+        await removeTempAudio(audioPath);
+      }
+
+      if (typeof text !== 'string') {
+        return send(500, { error: 'Falha na transcrição.' });
+      }
+      return send(200, { text: text.trim() });
+    } finally {
+      release();
     }
-    return send(200, { text: text.trim() });
   };
 }
 
@@ -2042,17 +1886,15 @@ const TECHNIQUE_BODY_LIMIT = 32 * 1024;
 const TECHNIQUE_TIMEOUT_MS = Math.max(1000, Number(process.env.TECHNIQUE_TIMEOUT_MS) || 45000);
 
 export function parseTechniqueRaw(raw) {
-  const text = String(raw ?? '').trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '');
+  // Mesma cerca/parse tolerante dos outros parsers (B14): o modelo às vezes
+  // devolve ```json e às vezes prosa antes do objeto.
+  const text = stripCodeFence(raw);
   if (!text || text.length > 20000) return { ok: false };
-  try {
-    const value = JSON.parse(text);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
-    return { ok: true, value };
-  } catch {
-    return { ok: false };
-  }
+  const parsed = parseJsonLoosely(text);
+  if (!parsed.ok) return { ok: false };
+  const value = parsed.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
+  return { ok: true, value };
 }
 
 export function parseTechniqueBody(raw) {
@@ -2096,7 +1938,7 @@ export function parseTechniqueNoteBody(raw) {
 }
 
 export function createTechniqueHandler(options = {}) {
-  const dataDir = options.dataDir || 'data';
+  const dataDir = options.dataDir || resolveDataDir();
   const store = options.store || createTechniqueStore({ dataDir });
   const readFicha = options.readFicha || (sourceId => readIngestedFicha(sourceId, { dataDir }));
   const llm = options.llm || (prompt => structureTechnique(prompt));
@@ -2106,6 +1948,9 @@ export function createTechniqueHandler(options = {}) {
   // direto do disco. Nunca é fonte da verdade.
   const index = options.index || createTechniqueIndex({ dataDir });
   const writeNote = options.writeNote || writeTechniqueNote;
+  // Base da subárvore de automação do vault (descendência validada em
+  // technique-docs.js). Injetável para os testes usarem um vault falso.
+  const vaultRoot = options.vaultRoot;
 
   return async function handleTechnique(req, res) {
     const send = (status, data) => {
@@ -2169,19 +2014,15 @@ export function createTechniqueHandler(options = {}) {
       return send(403, { error: 'Content-Type inválido.' });
     }
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > TECHNIQUE_BODY_LIMIT) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) return send(413, { error: 'Corpo muito longo.' });
+    const read = await readRequestBody(req, { limit: TECHNIQUE_BODY_LIMIT });
+    if (!read.ok) return send(413, { error: 'Corpo muito longo.' });
+    // O corpo vira `body` para os parsers da rota (nome preservado)
+    const body = read.body;
 
     // --- camada documental: JSON é a verdade, a nota é derivada e opcional ---
     if (route === '/api/technique/note') {
+      // Escreve no vault: escrita sensível, token obrigatório (D2).
+      if (denyWithoutToken(req, options, send)) return;
       const noteBody = parseTechniqueNoteBody(body);
       if (!noteBody.ok) return send(noteBody.status, { error: noteBody.error });
       const found = await store.get(noteBody.id);
@@ -2189,6 +2030,7 @@ export function createTechniqueHandler(options = {}) {
       const source = noteBody.sourceId ? await readFicha(noteBody.sourceId) : null;
       const written = await writeNote(found.technique, {
         vaultDir: noteBody.vaultDir,
+        vaultRoot,
         source: source?.ok ? source.ficha : undefined,
       });
       if (!written.ok) return send(422, { error: written.error });
@@ -2198,6 +2040,13 @@ export function createTechniqueHandler(options = {}) {
 
     const parsed = parseTechniqueBody(body);
     if (!parsed.ok) return send(parsed.status, { error: parsed.error });
+    // Gate de aprovação humana (B4): `proposta` é rascunho revisável; qualquer
+    // outro status (validada/rejeitada/...) alimenta ou bloqueia o planner e só
+    // o operador com token pode gravá-lo. A checagem fica no SERVIDOR — antes
+    // ela era só convenção do cliente.
+    if (parsed.status !== 'proposta') {
+      if (denyWithoutToken(req, options, send)) return;
+    }
 
     const loaded = await readFicha(parsed.sourceId);
     if (!loaded.ok) return send(404, { error: loaded.errors.join('; ') });
@@ -2276,7 +2125,7 @@ export function parsePlanBody(raw) {
 }
 
 export function createPlannerHandler(options = {}) {
-  const dataDir = options.dataDir || 'data';
+  const dataDir = options.dataDir || resolveDataDir();
   const techniques = options.techniques || (() => (options.store || createTechniqueStore({ dataDir })).list());
   const memory = options.memory || createLearningMemory({ dataDir });
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
@@ -2305,14 +2154,13 @@ export function createPlannerHandler(options = {}) {
     if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
     if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+    // Escritas sensíveis (D2): planejar e registrar veredito exigem token; a
+    // leitura (GET /api/learning) fica só com a borda de origem.
+    if (denyWithoutToken(req, options, send)) return;
 
-    let body = '';
-    let tooLarge = false;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > PLAN_BODY_LIMIT) { tooLarge = true; break; }
-    }
-    if (tooLarge) return send(413, { error: 'Corpo muito longo.' });
+    const read = await readRequestBody(req, { limit: PLAN_BODY_LIMIT });
+    if (!read.ok) return send(413, { error: 'Corpo muito longo.' });
+    const body = read.body;
 
     if (route === '/api/learning/verdict') {
       const verdict = parseLearningVerdict(body);
@@ -2372,6 +2220,13 @@ export function createMediaAnalyzeHandler(options = {}) {
   const getKey = options.getKey || (async () => readEnvValue('GEMINI_API_KEY'));
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
+  // Base64 + JSON.parse + frames multiplicam o payload em RAM: uma análise por
+  // vez, fila curta. O limite é por BYTES lidos (48 MB de corpo JSON), não pelo
+  // tamanho da string — a mensagem antiga dizia 45MB com limite real de 60MB.
+  const maxBodyBytes = options.maxBodyBytes || 48 * 1024 * 1024;
+  const maxPayloadLabel = options.maxPayloadLabel || '48MB';
+  const gate = options.gate || createSemaphore({ limit: 1, maxQueue: 1 });
+  const queueTimeoutMs = options.queueTimeoutMs || 90000;
 
   return async function handleMediaAnalyze(req, res) {
     const send = (status, data) => {
@@ -2389,24 +2244,18 @@ export function createMediaAnalyzeHandler(options = {}) {
     if (!isAllowedOrigin(origin, host, allowedOrigins)) {
       return send(403, { error: 'Origem não autorizada.' });
     }
+    // Escrita sensível (D2): o corpo carrega mídia e a rota gasta a chave de visão.
+    if (denyWithoutToken(req, options, send)) return;
 
-    let body = '';
-    let tooLarge = false;
-    const MAX_MEDIA_PAYLOAD = 60 * 1024 * 1024;
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > MAX_MEDIA_PAYLOAD) {
-        tooLarge = true;
-        break;
-      }
-    }
-    if (tooLarge) {
-      return send(413, { error: 'Mídia muito grande (máximo 45MB).' });
+    // Leitura em Buffers: soma bytes reais e decodifica UTF-8 uma única vez.
+    const read = await readBodyBuffer(req, { limit: maxBodyBytes });
+    if (!read.ok) {
+      return send(413, { error: 'Mídia muito grande (máximo ' + maxPayloadLabel + ').' });
     }
 
     let parsed;
     try {
-      parsed = JSON.parse(body);
+      parsed = JSON.parse(read.buffer.toString('utf8'));
     } catch {
       return send(400, { error: 'Corpo da requisição deve ser JSON válido.' });
     }
@@ -2415,6 +2264,9 @@ export function createMediaAnalyzeHandler(options = {}) {
     if (!data || typeof data !== 'string') {
       return send(400, { error: 'Campo "data" (base64) é obrigatório.' });
     }
+    // Catálogo opcional no corpo (mesmo formato do /api/chat). O frontend atual
+    // não envia, então sem catálogo o filtro mantém as ações válidas.
+    const capabilities = sanitizeCapabilities(parsed.capabilities);
 
     const apiKey = await getKey();
 
@@ -2439,18 +2291,34 @@ export function createMediaAnalyzeHandler(options = {}) {
       // continua sem persona detalhada se falhar
     }
 
-    const result = await analyzeMedia({
-      mimeType,
-      dataBase64: data,
-      filename,
-      userPrompt: prompt,
-      personaSystemPrompt: personaPrompt,
-      apiKey,
-      fetchImpl: options.fetchImpl || globalThis.fetch,
-      timeoutMs: 90000,
-    });
+    let release;
+    try {
+      release = await gate.acquire({ timeoutMs: queueTimeoutMs });
+    } catch (error) {
+      if (!(error instanceof SemaphoreRejected)) throw error;
+      return send(error.reason === 'full' ? 429 : 503, { error: 'Análise de mídia ocupada, tente novamente.' });
+    }
+    let result;
+    try {
+      result = await analyzeMedia({
+        mimeType,
+        dataBase64: data,
+        filename,
+        userPrompt: prompt,
+        personaSystemPrompt: personaPrompt,
+        apiKey,
+        fetchImpl: options.fetchImpl || globalThis.fetch,
+        extractMedia: options.extractMedia,
+        timeoutMs: 90000,
+      });
+    } finally {
+      release();
+    }
 
     if (result.ok) {
+      // B15: as ações da mídia passam pelo MESMO filtro de catálogo do chat —
+      // o que o avatar não tem (expressão/gesto/clip) não chega ao cliente.
+      result = { ...result, actions: filterActionsByCatalog(result.actions ?? [], capabilities) };
       try {
         const turnTimestamp = new Date().toISOString();
         const mediaTypeLabel = mimeType?.startsWith('video/') ? 'Vídeo' : 'Imagem';
@@ -2474,6 +2342,45 @@ export function createMediaAnalyzeHandler(options = {}) {
   };
 }
 
+// --- Proatividade: trigger e estado ----------------------------------------
+
+// Eram as únicas rotas despachadas inline, fora de isAllowedRequest e sem token
+// (B5). O gatilho gera fala proativa e o estado expõe o humor do runtime: os dois
+// passam a exigir a mesma borda das demais escritas (D2).
+export function createProactiveHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const engine = options.proactiveEngine || proactiveEngine;
+
+  return async function handleProactive(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    if (req.method === 'POST' && req.url === '/api/proactive/trigger') {
+      try {
+        return send(200, await engine.checkAndTrigger());
+      } catch {
+        return send(500, { error: 'Falha ao disparar a proatividade.' });
+      }
+    }
+    if (req.method === 'GET' && req.url === '/api/proactive/state') {
+      try {
+        return send(200, engine.getState());
+      } catch {
+        return send(500, { error: 'Falha ao ler o estado da proatividade.' });
+      }
+    }
+    return send(404, { error: 'Não encontrado.' });
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
@@ -2488,14 +2395,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
+  const handleProactive = createProactiveHandler();
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
     if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
     if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
-    if (req.method === 'GET' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
-    if (req.method === 'DELETE' && req.url === '/api/n8n/commands') return handleN8nCommand(req, res);
+    if (req.method === 'GET' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+    if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+    if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
     if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
     if (req.url === '/api/personality') return handlePersonality(req, res);
@@ -2503,21 +2412,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
       || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
-    if (req.method === 'POST' && req.url === '/api/proactive/trigger') {
-      proactiveEngine.checkAndTrigger().then(result => {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(result));
-      }).catch(err => {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: err.message }));
-      });
-      return;
-    }
-    if (req.method === 'GET' && req.url === '/api/proactive/state') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(proactiveEngine.getState()));
-      return;
-    }
+    if (req.url === '/api/proactive/trigger' || req.url === '/api/proactive/state') return handleProactive(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });

@@ -86,6 +86,61 @@ test('fila cheia responde 429 sem chamar o provedor', async () => {
   assert.equal((await second).statusCode, 200);
 });
 
+test('cliente que desconecta aborta o provedor e libera o slot (B10)', async () => {
+  const providerAborts = [];
+  let mode = 'hang';
+  const handler = createTtsHandler({
+    provider: 'gemini',
+    getConfig: config,
+    timeoutMs: 1000,
+    gate: createSemaphore({ limit: 1, maxQueue: 1 }),
+    fetchImpl: async (url, opts = {}) => {
+      if (opts.signal?.aborted) throw new Error('aborted');
+      if (mode === 'hang') {
+        return new Promise((resolve, reject) => {
+          opts.signal.addEventListener('abort', () => {
+            providerAborts.push(String(opts.signal.reason ?? 'abort'));
+            reject(new Error('aborted'));
+          });
+        });
+      }
+      return geminiAudioResponse();
+    },
+  });
+
+  const listeners = {};
+  const res = mockRes();
+  res.writableEnded = false;
+  res.headersSent = false;
+  res.on = (event, callback) => { (listeners[event] ||= []).push(callback); };
+  res.emit = (event) => { for (const callback of listeners[event] || []) callback(); };
+  const originalWriteHead = res.writeHead;
+  res.writeHead = (status, headers) => { res.headersSent = true; originalWriteHead(status, headers); };
+  const originalEnd = res.end;
+  res.end = (data) => { res.writableEnded = true; originalEnd(data); };
+
+  const req = {
+    method: 'POST',
+    url: '/api/tts',
+    headers: JSON_HEADERS,
+    async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ text: 'oi', stream: true })); },
+  };
+
+  const pending = handler(req, res);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  res.emit('close'); // aba fechou no meio da síntese
+  await pending;
+
+  assert.equal(providerAborts.length >= 1, true, 'o fetch em voo recebeu o abort do cliente');
+  assert.equal(res.statusCode, null, 'nada foi respondido a um cliente que saiu');
+  assert.equal(res.body, '');
+
+  // O slot do semáforo foi liberado: o próximo pedido sintetiza normalmente.
+  mode = 'ok';
+  const next = await speak(handler);
+  assert.equal(next.statusCode, 200, next.body);
+});
+
 test('a mesma frase pedida em paralelo sintetiza uma vez só: o cache serve a que esperou', async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), 'usami-tts-dup-'));
   let calls = 0;

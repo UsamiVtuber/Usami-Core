@@ -84,6 +84,27 @@ cobertos por testes, mas continuam experimentais até terem a mesma paridade
 operacional do handler ativo. Não trocar a rota de produção por ele apenas
 porque os testes unitários passam.
 
+## Módulos extraídos na auditoria de 2026-11-08
+
+- `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
+  (`parseProviderRaw`, `sanitizeActions`, `stripLeakedJson`, `stripCodeFence`,
+  `parseJsonLoosely`). `server.mjs`, `flow-services.js`, `llm-router.js` e
+  `media-analyzer.js` importam daqui; o ciclo `server.mjs ↔ flow-services.js`
+  foi cortado.
+- `src/data-paths.js` é a fonte única de caminhos de dados: `dataDir()` lê
+  `USAMI_DATA_DIR` a cada chamada (`process.env` pode mudar antes de instanciar
+  handlers em teste), `dataPath()` compõe, e `ttsCacheDir()`/`sttTmpDir()`
+  mantêm overrides específicos com prioridade.
+- `src/n8n-queue.js` é a fila de comandos por cliente (`x-usami-client`):
+  `poll` marca entregue sem reentregar, `acknowledge` remove só os ids
+  confirmados daquele cliente, POST sem cliente faz fanout para clientes ativos
+  (<60 s) ou fica pendente até o primeiro poll, entregue não confirmado é podado
+  em 120 s com log. O limite de 50 comandos por cliente descarta o mais antigo.
+- A borda de segurança (`src/api-security.js`) permanece o único ponto de
+  entrada: toda rota `/api` passa por `isAllowedRequest`; escritas sensíveis
+  exigem token. Rotas de leitura usadas pelo n8n (`/api/techniques`) ficam só
+  com a borda de origem até existir uma credencial no Nyarch.
+
 ## Integração Nyarch via SSH
 
 O projeto opera em ambiente híbrido Windows + Nyarch Linux, com comunicação via
@@ -127,7 +148,8 @@ Nenhum deles é publicado nem ativado sem autorização explícita.
 ## Segurança de borda da API local
 
 - `Host` e `Origin` passam por allowlist fechada (`src/api-security.js`): `127.0.0.1:8787`, `localhost:8787`, os hosts das origens do front e `USAMI_ALLOWED_HOSTS`. A regra antiga "Origin == Host" foi removida (DNS rebinding). Origens extras (LAN, `terminal.local`): `USAMI_ALLOWED_ORIGINS` e `USAMI_ALLOWED_HOSTS`, separadas por vírgula.
-- `/api/memory*`, `/api/personality`, `/api/rag/context` e `/api/n8n/command(s)` exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto). Sem o token no servidor a resposta é 503 (fail-closed). O proxy do Vite injeta o header, então o token não chega ao navegador; o n8n precisa enviá-lo.
+- Exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto): `/api/memory*`, `/api/personality`, `/api/rag/context`; toda escrita sensível de `/api/technique` (inclui `note` e status ≠ `proposta`), `/api/plan`, `POST /api/learning/verdict`, `/api/stt`, `/api/media/analyze`, `/api/proactive/*` e `/api/n8n/command(s)` + `/ack`. Sem o token no servidor a resposta é 503 (fail-closed); token errado/ausente é 401. O proxy do Vite injeta o header em todo `/api` do navegador, então o token não chega ao bundle; o n8n precisa enviá-lo quando chamar rota tokenizada.
+- Ficam só com a borda de Host/Origin (sem token): GETs de leitura usados pelo n8n (`/api/techniques`, `/api/technique?id`) e `GET /api/learning` — token neles exigiria credencial no Nyarch. O poll `GET /api/n8n/commands` **continua tokenizado** (é o frontend/proxy que o chama).
 - O `.env` é `USAMI_KEYS_FILE` ou `../.env` relativo ao projeto; não há mais caminhos fixos de `A:\` nem fallback para outro projeto.
 - Webhook para o n8n: com `N8N_WEBHOOK_SECRET` sai com `X-Usami-Timestamp` e `X-Usami-Signature` (`sha256=` + HMAC-SHA256 de `<timestamp>.<corpo>`); `N8N_WEBHOOK_OMIT_TEXT=true` remove `userMessage` e `reply`.
 

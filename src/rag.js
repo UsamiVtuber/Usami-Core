@@ -36,10 +36,16 @@ async function listRecentFiles(dir, limit = MAX_FILES) {
     .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
     .map(async (entry) => {
       const full = join(dir, entry.name);
-      const stats = await stat(full);
-      return { name: entry.name, path: full, mtimeMs: stats.mtimeMs };
+      try {
+        const stats = await stat(full);
+        return { name: entry.name, path: full, mtimeMs: stats.mtimeMs };
+      } catch {
+        // Arquivo sumiu/ficou inacessível entre o readdir e o stat: descarta só
+        // ele. Um stat que falha não pode derrubar a lista inteira do RAG.
+        return null;
+      }
     });
-  const resolved = await Promise.all(files);
+  const resolved = (await Promise.all(files)).filter(Boolean);
   resolved.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return resolved.slice(0, limit).map(entry => entry.path);
 }

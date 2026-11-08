@@ -15,6 +15,7 @@ const { createTechniqueIndex } = await import('../src/technique-index.js');
 const { createLearningMemory } = await import('../src/learning-memory.js');
 
 const SOURCE_ID = 'src-24772342f063';
+const API_TOKEN = 'token-teste';
 
 function mockReq({ method = 'POST', url = '/api/technique', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -36,12 +37,13 @@ function mockRes() {
 }
 
 const json = (res) => JSON.parse(res.body);
-const headers = { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json', host: '127.0.0.1:8787' };
+const headers = { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json', host: '127.0.0.1:8787', 'x-usami-token': API_TOKEN };
 
 async function fixture(options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'usami-kb-'));
   const dataDir = path.join(root, 'data');
-  const vaultDir = path.join(root, 'vault', 'Usami Obsidian', 'Usami', 'Techniques');
+  const vaultRoot = path.join(root, 'vault', 'Usami Obsidian', 'Usami', 'Inbox', 'Automations');
+  const vaultDir = path.join(vaultRoot, 'Techniques');
   await mkdir(vaultDir, { recursive: true });
   const ficha = {
     schema: 'usami.ingest.v1',
@@ -61,6 +63,8 @@ async function fixture(options = {}) {
     store: createTechniqueStore({ dataDir }),
     index: createTechniqueIndex({ dataDir }),
     allowedOrigins: ['http://127.0.0.1:5173'],
+    apiToken: API_TOKEN,
+    vaultRoot,
     ...options,
   });
   const planner = createPlannerHandler({
@@ -68,8 +72,9 @@ async function fixture(options = {}) {
     techniques: createTechniqueStore({ dataDir }).list,
     memory: createLearningMemory({ dataDir }),
     allowedOrigins: ['http://127.0.0.1:5173'],
+    apiToken: API_TOKEN,
   });
-  return { root, dataDir, vaultDir, handler, planner };
+  return { root, dataDir, vaultRoot, vaultDir, handler, planner };
 }
 
 async function save(fixture, technique, status = 'proposta') {
@@ -239,6 +244,23 @@ test('planner rejeita pedido fora do contrato e origem não permitida', async ()
   const semOrigin = mockRes();
   await fix.planner(mockReq({ headers: { ...headers, origin: 'https://exemplo.com' }, url: '/api/plan', body: '{}' }), semOrigin);
   assert.equal(semOrigin.statusCode, 403);
+});
+
+test('planner: POST /api/plan exige token; GET /api/learning continua aberto', async () => {
+  const fix = await fixture();
+  const { 'x-usami-token': _omit, ...noToken } = headers;
+  const denied = mockRes();
+  await fix.planner(mockReq({
+    headers: noToken,
+    url: '/api/plan',
+    body: JSON.stringify({ intent: 'wave', capabilities: { sequences: true, gestures: ['wave'], clips: [] } }),
+  }), denied);
+  assert.equal(denied.statusCode, 401);
+  assert.deepEqual(json(denied), { error: 'Token ausente ou inválido.' });
+
+  const leitura = mockRes();
+  await fix.planner(mockReq({ method: 'GET', url: '/api/learning', headers: noToken }), leitura);
+  assert.equal(leitura.statusCode, 200, leitura.body);
 });
 
 // --- memória de aprendizagem -----------------------------------------------

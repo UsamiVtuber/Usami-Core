@@ -84,6 +84,16 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
     const base = defaultData();
     if (!isPlainObject(input)) return base;
 
+    // Migração v1: `coreFacts` plano vira "other". Aqui NÃO se aplica o teto da
+    // seção — perder fato na migração era o bug (v1 não tinha limite). A seção
+    // fica marcada em `sectionsOverflow` para o rearranjo posterior (a UI/agente
+    // pode mover para seções específicas), e o próximo save não re-capa.
+    const migratingV1 = Array.isArray(input.coreFacts);
+    const overflow = new Set(
+      Array.isArray(input.sectionsOverflow) ? input.sectionsOverflow.filter(section => MEMORY_SECTIONS.includes(section)) : [],
+    );
+    if (migratingV1) overflow.add(FALLBACK_SECTION);
+
     const sections = emptySections();
     const seenFacts = new Set();
     const pushFact = (section, fact) => {
@@ -91,11 +101,13 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       if (!clean) return;
       const key = clean.toLowerCase();
       if (seenFacts.has(key)) return;
-      const bucket = sections[normalizeSection(section)];
-      const limit = SECTION_LIMITS[normalizeSection(section)];
+      const target = normalizeSection(section);
+      const bucket = sections[target];
+      const limit = SECTION_LIMITS[target];
       bucket.push(clean);
-      // FIFO: o arquivo mantém os mais recentes quando estoura o teto.
-      if (bucket.length > limit) bucket.shift();
+      // FIFO: o arquivo mantém os mais recentes quando estoura o teto — exceto
+      // em seção marcada como overflow de migração.
+      if (!overflow.has(target) && bucket.length > limit) bucket.shift();
       seenFacts.add(key);
     };
 
@@ -106,8 +118,12 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       }
     }
     // Migração v1: coreFacts vira "other" sem perder nada.
-    if (Array.isArray(input.coreFacts)) {
+    if (migratingV1) {
       for (const fact of input.coreFacts) pushFact(FALLBACK_SECTION, fact);
+    }
+    // Seção que voltou ao teto (fatos rearranjados/removidos) deixa de ser overflow.
+    for (const section of [...overflow]) {
+      if (sections[section].length <= SECTION_LIMITS[section]) overflow.delete(section);
     }
 
     const recentFacts = [];
@@ -157,6 +173,8 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       version: MEMORY_VERSION,
       user: { ...base.user, ...(isPlainObject(input.user) ? input.user : {}) },
       sections,
+      // Marcador só existe enquanto houver fato além do teto vindo de migração.
+      ...(overflow.size ? { sectionsOverflow: [...overflow] } : {}),
       recentFacts,
       dailyHistory: history,
       summaries,
@@ -169,6 +187,15 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
   }
 
   let data = defaultData();
+
+  // Limpa o marcador de overflow quando a seção volta ao teto normal (fato
+  // rearranjado/removido). Enquanto durar, novos saves não re-capam a seção.
+  function syncOverflow(section) {
+    if (!Array.isArray(data.sectionsOverflow)) return;
+    if (data.sections[section].length > SECTION_LIMITS[section]) return;
+    data.sectionsOverflow = data.sectionsOverflow.filter(item => item !== section);
+    if (!data.sectionsOverflow.length) delete data.sectionsOverflow;
+  }
 
   function ensureDataDir() {
     mkdirSync(dataDir, { recursive: true });
@@ -299,10 +326,12 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       if (existing) {
         if (existing.section === target) return data;
         data.sections[existing.section].splice(existing.index, 1);
+        syncOverflow(existing.section);
       }
       const bucket = data.sections[target];
       bucket.push(clean);
       if (bucket.length > SECTION_LIMITS[target]) bucket.shift();
+      syncOverflow(target);
       removeRecentFact(clean);
       return persist();
     },
@@ -336,6 +365,7 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       const index = bucket.findIndex((existing) => existing.toLowerCase() === clean.toLowerCase());
       if (index < 0) return false;
       bucket.splice(index, 1);
+      syncOverflow(section);
       persist();
       return true;
     },
@@ -346,6 +376,7 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
       const removed = data.sections[section].length;
       if (!removed) return 0;
       data.sections[section] = [];
+      syncOverflow(section);
       persist();
       return removed;
     },

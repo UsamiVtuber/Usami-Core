@@ -24,10 +24,12 @@ test('media-analyzer: analyzeMedia sem apiKey retorna resposta amigável de erro
 test('media-analyzer: analyzeMedia para imagem monta requisição Gemini e faz parse de OCR e resposta', async () => {
   let capturedUrl = '';
   let capturedBody = null;
+  let capturedHeaders = null;
 
   const mockFetch = async (url, opts) => {
     capturedUrl = url;
     capturedBody = JSON.parse(opts.body);
+    capturedHeaders = opts.headers;
     return {
       ok: true,
       status: 200,
@@ -60,7 +62,9 @@ test('media-analyzer: analyzeMedia para imagem monta requisição Gemini e faz p
 
   assert.equal(result.ok, true);
   assert.match(capturedUrl, new RegExp(DEFAULT_GEMINI_VISION_MODEL));
-  assert.match(capturedUrl, /key=mock-key-123/);
+  // B2: a chave vai no header x-goog-api-key, nunca na query string.
+  assert.doesNotMatch(capturedUrl, /[?&]key=/);
+  assert.equal(capturedHeaders['x-goog-api-key'], 'mock-key-123');
   assert.equal(capturedBody.contents[0].parts[0].inlineData.mimeType, 'image/png');
   assert.equal(result.reply, 'Que imagem legal! Li tudo que tava escrito aí.');
   assert.equal(result.gesture, 'clap');
@@ -72,6 +76,7 @@ test('media-analyzer: createMediaAnalyzeHandler valida rota e rejeita sem payloa
   const handler = createMediaAnalyzeHandler({
     allowedOrigins: ['http://localhost:5173'],
     getKey: async () => 'test-key',
+    apiToken: 'token-teste',
   });
 
   let status = 0;
@@ -81,14 +86,20 @@ test('media-analyzer: createMediaAnalyzeHandler valida rota e rejeita sem payloa
     end(d) { responseData = JSON.parse(d); },
   };
 
-  const reqGet = { method: 'GET', url: '/api/media/analyze', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' } };
+  const authHeaders = {
+    origin: 'http://localhost:5173',
+    host: 'localhost:5173',
+    'x-usami-token': 'token-teste',
+  };
+
+  const reqGet = { method: 'GET', url: '/api/media/analyze', headers: authHeaders };
   await handler(reqGet, mockRes);
   assert.equal(status, 404);
 
   const reqPostEmpty = {
     method: 'POST',
     url: '/api/media/analyze',
-    headers: { origin: 'http://localhost:5173', host: 'localhost:5173' },
+    headers: authHeaders,
     async *[Symbol.asyncIterator]() {
       yield Buffer.from('{}');
     },
@@ -137,6 +148,7 @@ test('media-analyzer: createMediaAnalyzeHandler persiste turno e resumo na memó
     getKey: async () => 'test-key',
     memoryStore: mockMemoryStore,
     fetchImpl: mockFetch,
+    apiToken: 'token-teste',
   });
 
   let status = 0;
@@ -148,7 +160,11 @@ test('media-analyzer: createMediaAnalyzeHandler persiste turno e resumo na memó
   const req = {
     method: 'POST',
     url: '/api/media/analyze',
-    headers: { origin: 'http://localhost:5173', host: 'localhost:5173' },
+    headers: {
+      origin: 'http://localhost:5173',
+      host: 'localhost:5173',
+      'x-usami-token': 'token-teste',
+    },
     async *[Symbol.asyncIterator]() {
       yield Buffer.from(JSON.stringify({
         mimeType: 'image/jpeg',

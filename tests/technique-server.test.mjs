@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -13,6 +14,8 @@ const { createTechniqueStore, readIngestedFicha } = await import('../src/techniq
 const { techniqueId } = await import('../src/technique-schema.js');
 
 const SOURCE_ID = 'src-24772342f063';
+const API_TOKEN = 'token-teste';
+const AUTH_HEADERS = { 'x-usami-token': API_TOKEN };
 
 function mockReq({ method = 'POST', url = '/api/technique', headers = {}, body = '' } = {}) {
   const chunks = body ? [Buffer.from(body)] : [];
@@ -55,6 +58,7 @@ async function fixture(options = {}) {
     dataDir,
     store: createTechniqueStore({ dataDir }),
     allowedOrigins: ['http://127.0.0.1:5173'],
+    apiToken: API_TOKEN,
     ...options,
   });
   return { root, dataDir, handler, ficha, techDir: () => path.join(dataDir, 'techniques') };
@@ -254,7 +258,7 @@ test('GET /api/techniques lista resumido e filtra por status', async () => {
   const first = mockRes();
   await handler(mockReq({ headers, body: JSON.stringify({ sourceId: SOURCE_ID, technique: OPERATOR_TECHNIQUE }) }), first);
   const second = mockRes();
-  await handler(mockReq({ headers, body: JSON.stringify({ sourceId: SOURCE_ID, status: 'validada', technique: { ...OPERATOR_TECHNIQUE, name: 'aceninho tímido' } }) }), second);
+  await handler(mockReq({ headers: { ...headers, ...AUTH_HEADERS }, body: JSON.stringify({ sourceId: SOURCE_ID, status: 'validada', technique: { ...OPERATOR_TECHNIQUE, name: 'aceninho tímido' } }) }), second);
 
   const list = mockRes();
   await handler(mockReq({ method: 'GET', url: '/api/techniques', headers }), list);
@@ -267,6 +271,57 @@ test('GET /api/techniques lista resumido e filtra por status', async () => {
   await handler(mockReq({ method: 'GET', url: '/api/techniques?status=validada', headers }), approved);
   assert.equal(json(approved).total, 1);
   assert.equal(json(approved).techniques[0].name, 'aceninho tímido');
+});
+
+// --- gate de aprovação (B4) --------------------------------------------------
+
+test('gate de aprovação: status != proposta exige token; proposta sem token passa', async () => {
+  const { handler } = await fixture();
+  const headers = { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json', host: '127.0.0.1:8787' };
+
+  const withoutToken = mockRes();
+  await handler(mockReq({ headers, body: JSON.stringify({ sourceId: SOURCE_ID, status: 'validada', technique: OPERATOR_TECHNIQUE }) }), withoutToken);
+  assert.equal(withoutToken.statusCode, 401);
+  assert.deepEqual(json(withoutToken), { error: 'Token ausente ou inválido.' });
+
+  const withToken = mockRes();
+  await handler(mockReq({ headers: { ...headers, ...AUTH_HEADERS }, body: JSON.stringify({ sourceId: SOURCE_ID, status: 'validada', technique: OPERATOR_TECHNIQUE }) }), withToken);
+  assert.equal(withToken.statusCode, 200, withToken.body);
+  assert.equal(json(withToken).technique.status, 'validada');
+
+  const draft = mockRes();
+  await handler(mockReq({ headers, body: JSON.stringify({ sourceId: SOURCE_ID, technique: OPERATOR_TECHNIQUE }) }), draft);
+  assert.equal(draft.statusCode, 200, draft.body);
+  assert.equal(json(draft).technique.status, 'proposta');
+});
+
+test('/api/technique/note exige token sempre (escrita no vault) e repassa a base', async () => {
+  const writes = [];
+  const { handler } = await fixture({
+    vaultRoot: '/vault-falso',
+    writeNote: async (technique, opts) => {
+      writes.push({ id: technique.id, opts });
+      return { ok: true, path: '/vault-falso/Inbox/Automations/Techniques/nota.md' };
+    },
+  });
+  const headers = { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json', host: '127.0.0.1:8787' };
+  const created = mockRes();
+  await handler(mockReq({ headers, body: JSON.stringify({ sourceId: SOURCE_ID, technique: OPERATOR_TECHNIQUE }) }), created);
+  const id = json(created).technique.id;
+
+  const denied = mockRes();
+  await handler(mockReq({ url: '/api/technique/note', headers, body: JSON.stringify({ id }) }), denied);
+  assert.equal(denied.statusCode, 401);
+  assert.equal(writes.length, 0);
+
+  const vaultDir = '/vault-falso/Inbox/Automations/Techniques';
+  const allowed = mockRes();
+  await handler(mockReq({ url: '/api/technique/note', headers: { ...headers, ...AUTH_HEADERS }, body: JSON.stringify({ id, vaultDir }) }), allowed);
+  assert.equal(allowed.statusCode, 200, allowed.body);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].id, id);
+  assert.equal(writes[0].opts.vaultRoot, '/vault-falso');
+  assert.equal(writes[0].opts.vaultDir, vaultDir);
 });
 
 // --- store -----------------------------------------------------------------
@@ -299,4 +354,55 @@ test('leitura de ficha: ausente e JSON corrompido são erro, não porta aberta',
   await mkdir(brokenDir, { recursive: true });
   await writeFile(path.join(brokenDir, 'ficha.json'), '{ nao é json', 'utf8');
   assert.match((await readIngestedFicha('src-000000000001', { dataDir })).errors[0], /ilegível/);
+});
+
+// --- B9: data dir único ------------------------------------------------------
+
+test('B9: handler sem dataDir usa USAMI_DATA_DIR e não escreve no data/ real', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'usami-data-dir-'));
+  const tmpData = path.join(root, 'data');
+  const previous = process.env.USAMI_DATA_DIR;
+  process.env.USAMI_DATA_DIR = tmpData;
+  try {
+    // Sem options.dataDir/store/index: o default precisa vir do env.
+    const handler = createTechniqueHandler({
+      allowedOrigins: ['http://127.0.0.1:5173'],
+      apiToken: API_TOKEN,
+    });
+    assert.ok(existsSync(tmpData), 'índice/config usou o diretório do env');
+
+    const ficha = {
+      schema: 'usami.ingest.v1',
+      id: SOURCE_ID,
+      createdAt: '2026-10-25T12:00:00Z',
+      source: { kind: 'video', path: 'tutorial.mp4', sha256: '1'.repeat(64), bytes: 10, title: 'demo' },
+      media: { durationMs: 1000, width: 320, height: 240, fps: 15, hasAudio: false },
+      transcript: { engine: 'faster-whisper', model: 'tiny', language: 'pt', text: 'texto', segments: [] },
+      frames: [],
+      technique: null,
+      warnings: [],
+    };
+    await mkdir(path.join(tmpData, 'ingest', SOURCE_ID), { recursive: true });
+    await writeFile(path.join(tmpData, 'ingest', SOURCE_ID, 'ficha.json'), JSON.stringify(ficha), 'utf8');
+
+    const res = mockRes();
+    await handler(mockReq({
+      headers: {
+        origin: 'http://127.0.0.1:5173',
+        host: '127.0.0.1:8787',
+        'content-type': 'application/json',
+        ...AUTH_HEADERS,
+      },
+      body: JSON.stringify({ sourceId: SOURCE_ID, status: 'validada', technique: OPERATOR_TECHNIQUE }),
+    }), res);
+    assert.equal(res.statusCode, 200);
+
+    const id = json(res).technique.id;
+    assert.ok(existsSync(path.join(tmpData, 'techniques', `${id}.json`)), 'técnica gravada no data dir do env');
+    assert.equal(existsSync(path.join(process.cwd(), 'data', 'techniques', `${id}.json`)), false,
+      'nada foi escrito no data/ real');
+  } finally {
+    if (previous === undefined) delete process.env.USAMI_DATA_DIR;
+    else process.env.USAMI_DATA_DIR = previous;
+  }
 });

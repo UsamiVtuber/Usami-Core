@@ -53,7 +53,7 @@ test('sem termos úteis (stopwords) ou sem match, cai para os mais recentes', ()
   assert.match(noMatch, /assunto de jardinagem/);
 }));
 
-test('refresh é incremental: arquivo alterado troca de conteúdo no índice', () => withIndex({}, (dirs, index) => {
+test('refresh é incremental: arquivo alterado troca de conteúdo no índice', () => withIndex({ throttleMs: 0 }, (dirs, index) => {
   const filePath = writeNote(dirs.vaultDir, 'nota.md', 'primeiro assunto: culinária', { minutesAgo: 5 });
   assert.match(index.search({ query: 'culinária' }), /primeiro assunto/);
 
@@ -89,4 +89,27 @@ test('pasta do vault ausente não apaga o índice nem explode', () => withIndex(
   const stats = index.refresh();
   assert.equal(stats.available, false);
   assert.equal(index.search({ query: 'qualquer coisa' }), null);
+}));
+
+test('B16: refresh é throttled quando o mtime do diretório não mudou', () => withIndex({}, (dirs, index) => {
+  const filePath = writeNote(dirs.vaultDir, 'nota.md', 'primeiro assunto: culinária', { minutesAgo: 5 });
+  assert.match(index.search({ query: 'culinária' }), /primeiro assunto/);
+
+  // Editar o CONTEÚDO não muda o mtime do diretório: dentro da janela de
+  // throttle o refresh é pulado (era um readdir+stat por arquivo a cada turno).
+  writeFileSync(filePath, 'segundo assunto: astronomia', 'utf8');
+  const later = (Date.now() + 60_000) / 1000;
+  utimesSync(filePath, later, later);
+  const skipped = index.refresh();
+  assert.equal(skipped.skipped, true);
+  assert.match(index.search({ query: 'culinária' }), /primeiro assunto/);
+
+  // force ignora a janela e reconcilia.
+  index.refresh({ force: true });
+  assert.match(index.search({ query: 'astronomia' }), /segundo assunto/);
+
+  // Criar arquivo MUDA o mtime do diretório: o próximo refresh roda mesmo
+  // dentro da janela e a nota nova entra.
+  writeNote(dirs.vaultDir, 'nova.md', 'conteúdo sobre xilofone', { minutesAgo: 1 });
+  assert.match(index.search({ query: 'xilofone' }), /conteúdo sobre xilofone/);
 }));

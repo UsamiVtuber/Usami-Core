@@ -32,6 +32,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { join } from 'node:path';
 import { VISUAL_VERDICTS } from './motion-experiments.js';
 import { SHAPE_PARAMS } from './sequence-shapes.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 
 export const LEARNING_FILE = 'learning.json';
 export const LEARNING_FILE_VERSION = 1;
@@ -265,7 +266,7 @@ const keyOf = entry => `${entry.techniqueId ?? '*'}|${entry.signature}`;
  * Relógio injetável; toda leitura é validada e toda escrita é atômica (tmp + rename).
  */
 export function createLearningMemory({
-  dataDir = 'data',
+  dataDir = defaultDataDir(),
   now = () => Date.now(),
   maxEntries = LEARNING_LIMITS.maxEntries,
   maxFileBytes = LEARNING_LIMITS.maxFileBytes,

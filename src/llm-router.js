@@ -15,6 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractJsonCandidate } from './json-salvage.js';
+import { parseJsonLoosely } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -268,22 +269,14 @@ export function jsonText({ content = '', reasoning = '' } = {}, requiredKey = nu
 
 function parseJsonSafe(raw, { label = '', answer = null } = {}) {
   const text = String(raw ?? '');
-  const fenced = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
-  try {
-    return JSON.parse(fenced);
-  } catch {
-    // Prosa de raciocínio antes do JSON: tenta o primeiro objeto balanceado.
-    const candidate = extractJsonCandidate(fenced);
-    if (candidate) {
-      try {
-        return JSON.parse(candidate);
-      } catch {}
-    }
-    // Sem isso a chamada falhava muda — `actions: []` no chat sem nenhum rastro.
-    const finish = answer?.finishReason ? ` finish=${answer.finishReason}` : '';
-    console.warn(`llm-router: saída ${label || 'do modelo'} não é JSON recuperável (${finish}; ${text.slice(0, 80)}...)`);
-    return {};
-  }
+  // Cerca + primeiro objeto balanceado: mesma limpeza do parser do servidor
+  // (B14) em vez de uma regex de fence própria por módulo.
+  const parsed = parseJsonLoosely(text);
+  if (parsed.ok) return parsed.value;
+  // Sem isso a chamada falhava muda — `actions: []` no chat sem nenhum rastro.
+  const finish = answer?.finishReason ? ` finish=${answer.finishReason}` : '';
+  console.warn(`llm-router: saída ${label || 'do modelo'} não é JSON recuperável (${finish}; ${text.slice(0, 80)}...)`);
+  return {};
 }
 
 function emotionToFacs(label) {

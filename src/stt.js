@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { sttTmpDir } from './data-paths.js';
 
 let cachedModelName = null;
 
@@ -89,7 +90,7 @@ export async function transcribeAudio({ audioPath, modelName = resolveWhisperMod
 
 // Temp do upload multipart: <dir>/<uuid>.<ext>, criado antes da transcrição e
 // apagado (best-effort) depois, tanto no sucesso quanto na falha.
-export async function saveTempAudio(buffer, { dir = process.env.USAMI_STT_TMP_DIR || 'tmp', extension = 'webm' } = {}) {
+export async function saveTempAudio(buffer, { dir = sttTmpDir(), extension = 'webm' } = {}) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('Buffer de áudio inválido.');
   await mkdir(dir, { recursive: true });
   const path = join(dir, randomUUID() + '.' + extension);

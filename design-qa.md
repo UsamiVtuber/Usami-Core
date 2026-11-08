@@ -18,10 +18,10 @@ The composer, call dock, history header, empty state, status pill, credit, and i
 
 ## Required fidelity surfaces
 
-- Fonts and typography: DM Sans remains the compact interface face; Playfair Display is used only for the intimate empty-state line. Weights and sizes preserve the quiet hierarchy of the references.
+- Fonts and typography: DM Sans remains the compact interface face; Fraunces (serif) is used only for the intimate empty-state line. Weights and sizes preserve the quiet hierarchy of the references.
 - Spacing and layout rhythm: the 640 px composer, centered avatar, bottom control stack, and 360 px history panel reproduce the main proportions without covering the character's face.
-- Colors and visual tokens: translucent near-black surfaces, restrained purple selection, green call action, red hang-up action, and low-contrast white metadata match the source direction.
-- Image quality and asset fidelity: `background.png` remains full-bleed with a light blur and darkening treatment; `shiro.vrm` is rendered live at native WebGL quality.
+- Colors and visual tokens: official Usami palette — Deep Blue `#0B132B` base, Charcoal `#282D42` surfaces, White/Ice `#F9F9FB` text, Vibrant Pink `#FF5E7E` actions, Soft Rose `#FFA6C9` highlights. The stage backdrop is shifted toward Deep Blue (`hue-rotate(-35deg)`, saturate .7, brightness .6) so the artwork matches the token palette.
+- Image quality and asset fidelity: `background.png` remains full-bleed with a 3 px blur, darkening and hue alignment; `shiro.vrm` is rendered live at native WebGL quality.
 - Copy and content: interface text is localized to Portuguese and describes the real Usami states rather than copying the reference product's brand or character copy.
 
 ## Comparison history
@@ -33,6 +33,8 @@ The composer, call dock, history header, empty state, status pill, credit, and i
    - Fix: added a 2 px background blur, slight overscan, and reduced brightness.
    - Post-fix evidence: the avatar reads as the focal plane while the room retains recognizable depth and color.
 3. Final desktop pass at 1600 × 900: no actionable P0, P1, or P2 visual mismatch remained.
+4. 2026-11-08 — official palette migration (D1): retired the MekaHime purple/cream system and applied the official tokens across `usami.css`, inline styles in `Usami.jsx`, `ErrorBoundary.jsx`, `BondPanel.jsx` and `PersonalityPanel.jsx`. Stage backdrop shifted to Deep Blue; 9–10.5 px font sizes normalized to 11 px; global `prefers-reduced-motion` block added.
+   - Post-fix evidence: desktop, history drawer, bond panel and settings panel captured in the running app; console clean (only pre-existing VRMA loader warnings).
 
 ## Primary interactions tested
 

@@ -5,7 +5,7 @@
 
 import { createMemoryStore } from './memory-store.js';
 import { calculateGain, applyGain, getStage, canGainMore, DAILY_CAP } from './affinity.js';
-import { filterActionsByCatalog, sanitizeCapabilities, sanitizeActions, parseProviderRaw } from '../server.mjs';
+import { filterActionsByCatalog, sanitizeCapabilities, sanitizeActions, parseProviderRaw } from './provider-parse.js';
 import { summarizeCapabilities } from './capability-manifest.js';
 import { transcribeAudio } from './stt.js';
 import { curateExpressions } from './expressions-catalog.js';

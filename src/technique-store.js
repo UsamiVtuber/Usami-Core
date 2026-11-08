@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { validateTechnique } from './technique-schema.js';
+import { dataDir as defaultDataDir } from './data-paths.js';
 
 const SOURCE_ID_RE = /^src-[0-9a-f]{12}$/;
 const TECHNIQUE_ID_RE = /^tc-[0-9a-f]{12}$/;
@@ -33,7 +34,7 @@ async function readJsonSafe(filePath) {
   }
 }
 
-export function createTechniqueStore({ dataDir = 'data' } = {}) {
+export function createTechniqueStore({ dataDir = defaultDataDir() } = {}) {
   const dir = path.join(dataDir, 'techniques');
 
   async function save(technique) {
@@ -74,7 +75,7 @@ export function createTechniqueStore({ dataDir = 'data' } = {}) {
 
 // Ficha de ingestão pelo id declarado na requisição. Caminho nunca é montado a
 // partir de texto livre: só `data/ingest/src-<12hex>/ficha.json`.
-export async function readIngestedFicha(sourceId, { dataDir = 'data' } = {}) {
+export async function readIngestedFicha(sourceId, { dataDir = defaultDataDir() } = {}) {
   if (!SOURCE_ID_RE.test(sourceId ?? '')) return { ok: false, errors: ['sourceId inválido (esperado src-<12 hex>)'] };
   const filePath = path.join(dataDir, 'ingest', sourceId, 'ficha.json');
   if (!existsSync(filePath)) return { ok: false, errors: [`ficha não encontrada em ${path.relative(process.cwd(), filePath)}`] };

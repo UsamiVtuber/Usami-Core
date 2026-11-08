@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useRef } from 'react';
 import { Heart, Smile, Users, Lock, X, Sparkles, MessageCircle, Mic, Phone, PenLine, Star } from 'lucide-react';
 import { METER_KEYS, LEVELS, LEVEL_NAMES, levelFor, meterProgress, bondSummary, relativeDay } from './bond.js';
+import { useModalFocus } from './focus-trap.js';
 
 const METER_META = {
   carinho: { label: 'Carinho', Icon: Heart },
@@ -12,19 +13,19 @@ const EVENT_ICONS = { chat: MessageCircle, voice: Mic, laugh: Smile, long: PenLi
 
 // Painel de vínculo (substitui o popover de barras). Fica à direita do palco
 // para a Usami continuar visível do lado esquerdo, como na referência VN.
-export default function BondPanel({ intimacy, log, onClose }) {
+export default function BondPanel({ intimacy, log, onClose, restoreRef }) {
   const summary = bondSummary(intimacy);
   const recent = (log || []).slice(0, 6);
+  const sheetRef = useRef(null);
+  const closeRef = useRef(null);
 
-  useEffect(() => {
-    const onKey = event => { if (event.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // Modal de verdade (F4): foco inicial no fechar, trap de Tab, Escape e
+  // devolução do foco ao pill de vínculo ao fechar.
+  useModalFocus({ containerRef: sheetRef, initialFocusRef: closeRef, restoreRef, onEscape: onClose });
 
   return <div className="bond-scrim" onClick={onClose}>
-    <section className="bond-sheet" role="dialog" aria-modal="true" aria-label="Vínculo com a Usami" onClick={event => event.stopPropagation()}>
-      <button className="bond-close" onClick={onClose} aria-label="Fechar vínculo"><X size={18}/></button>
+    <section ref={sheetRef} tabIndex={-1} className="bond-sheet" role="dialog" aria-modal="true" aria-label="Vínculo com a Usami" onClick={event => event.stopPropagation()}>
+      <button ref={closeRef} className="bond-close" onClick={onClose} aria-label="Fechar vínculo"><X size={18}/></button>
 
       <div className="bond-hero">
         <div className="bond-badge" aria-hidden="true">

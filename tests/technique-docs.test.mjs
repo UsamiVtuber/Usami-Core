@@ -36,8 +36,9 @@ function build(overrides = {}, options = {}) {
 async function vaultFixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'usami-tech-docs-'));
   // espelha a subárvore de automação real, mas NUNCA escreve no vault do projeto
-  const vaultDir = path.join(root, 'vault', 'Usami Obsidian', 'Usami', 'Techniques');
-  return { root, vaultDir };
+  const vaultRoot = path.join(root, 'vault', 'Usami Obsidian', 'Usami', 'Inbox', 'Automations');
+  const vaultDir = path.join(vaultRoot, 'Techniques');
+  return { root, vaultRoot, vaultDir };
 }
 
 const FICHA = {
@@ -127,9 +128,9 @@ test('material citado entra rotulado como dado, em blockquote, e não como instr
 
 test('writeTechniqueNote grava com nome id + slug, retorna {ok, path} e reescreve a própria nota', async () => {
   const tecnica = build();
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   try {
-    const first = await writeTechniqueNote(tecnica, { vaultDir, source: FICHA });
+    const first = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir, source: FICHA });
     assert.equal(first.ok, true, first.error);
     assert.ok(first.path.startsWith(vaultDir + path.sep));
     assert.match(path.basename(first.path), /^tc-[0-9a-f]{12} - aceno-em-tres-pulsos\.md$/);
@@ -137,7 +138,7 @@ test('writeTechniqueNote grava com nome id + slug, retorna {ok, path} e reescrev
     const content = await readFile(first.path, 'utf8');
     assert.ok(content.includes('usami.technique: "tc-'));
 
-    const second = await writeTechniqueNote(tecnica, { vaultDir, source: { ...FICHA, source: { kind: 'video', title: 'novo título' } } });
+    const second = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir, source: { ...FICHA, source: { kind: 'video', title: 'novo título' } } });
     assert.equal(second.ok, true);
     assert.equal(second.path, first.path, 'reescreve exatamente o arquivo que ela mesma criou');
     assert.ok((await readFile(second.path, 'utf8')).includes('novo título'));
@@ -148,7 +149,7 @@ test('writeTechniqueNote grava com nome id + slug, retorna {ok, path} e reescrev
 });
 
 test('nome de arquivo forjado é sanitizado: texto do tutorial nunca dita caminho', async () => {
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   try {
     const casos = [
       '../../../../etc/passwd',
@@ -158,7 +159,7 @@ test('nome de arquivo forjado é sanitizado: texto do tutorial nunca dita caminh
     ];
     for (const name of casos) {
       const tecnica = build({ name });
-      const result = await writeTechniqueNote(tecnica, { vaultDir });
+      const result = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir });
       assert.equal(result.ok, true, result.error);
       const base = path.basename(result.path);
       assert.ok(result.path.startsWith(vaultDir + path.sep), `destino fora da Techniques: ${result.path}`);
@@ -173,25 +174,33 @@ test('nome de arquivo forjado é sanitizado: texto do tutorial nunca dita caminh
   }
 });
 
-test('escrita fora da subárvore do vault é recusada com erro, não silêncio', async () => {
+test('escrita fora da subárvore de automação é recusada com erro, não silêncio', async () => {
   const tecnica = build();
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   try {
     const proibidos = [
       path.join(root, 'suelta'),
       path.join(root, 'vault'),
       path.join(root, 'vault', 'Usami Obsidian', 'Usami', 'Inbox'),
-      path.join(root, 'notes', 'Techniques'), // Techniques sem vault não é subárvore
+      vaultRoot, // a própria base não é descendente de si mesma
+      path.join(root, 'vault', 'Techniques'), // Techniques direto no vault não é subárvore de automação
+      path.join(root, 'notes', 'Techniques'),
     ];
     for (const alvo of proibidos) {
-      const result = await writeTechniqueNote(tecnica, { vaultDir: alvo });
+      const result = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir: alvo });
       assert.equal(result.ok, false, `deveria recusar ${alvo}`);
-      assert.match(result.error, /subárvore de automação|Techniques/);
+      assert.match(result.error, /subárvore de automação/);
       assert.ok(!existsSync(alvo) || (await readdir(alvo)).length === 0, 'recusa não cria nada');
     }
-    // vault/Techniques direto também é aceito: a trava é a subárvore, não um caminho fixo
-    const flexivel = await writeTechniqueNote(tecnica, { vaultDir: path.join(root, 'vault', 'Techniques') });
-    assert.equal(flexivel.ok, true, flexivel.error);
+    // caminho válido: descendente da subárvore de automação continua aceito
+    const valido = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir });
+    assert.equal(valido.ok, true, valido.error);
+    assert.ok(valido.path.startsWith(vaultDir + path.sep));
+    // subdiretório mais fundo dentro da subárvore também é aceito
+    const fundo = path.join(vaultRoot, 'Techniques', '2026', 'aceno');
+    const nested = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir: fundo });
+    assert.equal(nested.ok, true, nested.error);
+    assert.ok(nested.path.startsWith(fundo + path.sep));
   } finally {
     await rmRoot(root);
   }
@@ -199,21 +208,21 @@ test('escrita fora da subárvore do vault é recusada com erro, não silêncio',
 
 test('nota alheia com o mesmo nome de arquivo é intocável', async () => {
   const tecnica = build();
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   try {
-    const mine = await writeTechniqueNote(tecnica, { vaultDir });
+    const mine = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir });
     assert.equal(mine.ok, true);
     const alheia = '# nota de outra pessoa\n\nfrontmatter nenhum aqui.\n';
     await writeFile(mine.path, alheia, 'utf8');
 
-    const result = await writeTechniqueNote(tecnica, { vaultDir });
+    const result = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir });
     assert.equal(result.ok, false, 'mesmo caminho, mas não é mais a nota desta técnica');
     assert.match(result.error, /não é nota desta técnica/);
     assert.equal(await readFile(mine.path, 'utf8'), alheia, 'conteúdo alheio permanece intacto');
 
     // nota de OUTRA técnica com o mesmo id de frontmatter também não é nossa
     await writeFile(mine.path, `---\nusami.technique: "tc-000000000000"\n---\n# outra\n`, 'utf8');
-    const again = await writeTechniqueNote(tecnica, { vaultDir });
+    const again = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir });
     assert.equal(again.ok, false);
     assert.match(again.error, /não é nota desta técnica/);
   } finally {
@@ -223,10 +232,10 @@ test('nota alheia com o mesmo nome de arquivo é intocável', async () => {
 
 test('técnica inválida nunca vira nota', async () => {
   const legitima = build();
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   try {
     const forged = { ...legitima, name: 'outro nome' }; // id não bate mais com sources+name
-    const result = await writeTechniqueNote(forged, { vaultDir });
+    const result = await writeTechniqueNote(forged, { vaultRoot, vaultDir });
     assert.equal(result.ok, false);
     assert.match(result.error, /técnica inválida/);
     assert.ok(!existsSync(vaultDir), 'recusa não cria o diretório de notas');
@@ -237,21 +246,25 @@ test('técnica inválida nunca vira nota', async () => {
 
 test('USAMI_TECHNIQUE_VAULT_DIR configura o alvo e o parâmetro vaultDir tem prioridade', async () => {
   const tecnica = build();
-  const { root, vaultDir } = await vaultFixture();
+  const { root, vaultRoot, vaultDir } = await vaultFixture();
   const anterior = process.env.USAMI_TECHNIQUE_VAULT_DIR;
+  const anteriorRoot = process.env.USAMI_TECHNIQUE_VAULT_ROOT;
   try {
+    process.env.USAMI_TECHNIQUE_VAULT_ROOT = vaultRoot;
     process.env.USAMI_TECHNIQUE_VAULT_DIR = vaultDir;
     const byEnv = await writeTechniqueNote(tecnica, {});
     assert.equal(byEnv.ok, true, byEnv.error);
     assert.ok(byEnv.path.startsWith(vaultDir + path.sep));
 
     const fora = path.join(root, 'fora-do-vault');
-    const byParam = await writeTechniqueNote(tecnica, { vaultDir: fora });
+    const byParam = await writeTechniqueNote(tecnica, { vaultRoot, vaultDir: fora });
     assert.equal(byParam.ok, false, 'parâmetro vence o env e continua sujeito à trava');
     assert.match(byParam.error, /subárvore de automação/);
   } finally {
     if (anterior === undefined) delete process.env.USAMI_TECHNIQUE_VAULT_DIR;
     else process.env.USAMI_TECHNIQUE_VAULT_DIR = anterior;
+    if (anteriorRoot === undefined) delete process.env.USAMI_TECHNIQUE_VAULT_ROOT;
+    else process.env.USAMI_TECHNIQUE_VAULT_ROOT = anteriorRoot;
     await rmRoot(root);
   }
 });

@@ -74,6 +74,22 @@ Usuário escolheu um HUD minimalista, baseado no mock de referência: sem texto 
 - **Streaming de voz** (`stream: true` no `POST /api/tts`): `:streamGenerateContent?alt=sse` entrega PCM cru (`audio/l16; rate=24000; channels=1`, ~72 ms por pedaço) e o primeiro som sai ~1,0 s depois do pedido, contra ~5,3 s do WAV inteiro. O servidor responde Int16 LE sem header com `X-TTS-Stream: 1` e **não escreve nada antes do primeiro pedaço de áudio** — enquanto não há áudio o caminho normal ainda pode responder. O cliente (`src/stream-audio-player.js`) agrupa em quanta de ~100 ms (um `AudioBufferSourceNode` por quantum, não por chunk de rede) e conecta no **mesmo `AnalyserNode`** do lip-sync via `audioLipsync.getTap()` + `beginExternal()`: sem `beginExternal`, `update()` veria o `HTMLAudioElement` pausado e fecharia a boca no meio da fala. O HIT de cache **não** é stream (serve o WAV empacotado, sem o header), então o cliente decide pelo header, nunca pelo content-type. Áudio parcial (queda no meio) nunca entra no cache. O modo quieto continua pelo elemento: ele desacelera a voz com `playbackRate`, que o PCM não tem.
 - Para decidir "o que ela realmente falou", use o oracle local: sintetize e transcreva com `transcribeAudio` (faster-whisper está instalado na máquina). Duração de áudio é proxy fraco — o TTS é estocástico.
 
+## Decisões da auditoria multiagente (2026-11-08)
+
+Quatro decisões do usuário fecham a Fase 0 do roadmap em `docs/auditoria-2026-11-08.md`:
+
+- **Paleta (D1 = migrar):** a paleta oficial passa a ser a source of truth: Deep Blue `#0B132B` (base/fundo), Charcoal `#282D42` (superfícies/painéis), White/Ice `#F9F9FB` (texto), Vibrant Pink `#FF5E7E` (acento primário), Soft Rose `#FFA6C9` (acento secundário). O sistema roxo/creme "MekaHime" está aposentado, **incluindo o BondPanel**: a anatomia lilás de 2026-11-07 permanece, mas as cores migram para derivados da paleta oficial (cartões rose/ice sobre moldura deep blue/charcoal). `design-qa.md` deve refletir a paleta oficial.
+- **Borda de segurança (D2 = fechar todas):** toda rota passa por `isAllowedRequest` (Host/Origin); toda escrita sensível (`technique`, `plan`, `learning`, `proactive`, `stt`, `media`) e `GET /api/proactive/state` exigem `x-usami-token`. O proxy do Vite injeta o token em todo `/api` do navegador (o token nunca chega ao bundle). Os dois GETs de leitura que o workflow n8n agendado usa (`/api/techniques`, `/api/technique?id`) permanecem apenas com borda de origem — já estavam dentro dela; token neles exigiria credential no n8n do Nyarch (decisão pendente do usuário).
+- **Crédito (D3):** o crédito do modelo fica **sempre visível**, compacto em ≤700 px, fora do conjunto auto-ocultável do header (supersede o `display:none` mobile).
+- **Painéis (D4):** drawer de conversa, BondPanel e painel de configurações são **mutuamente exclusivos** — abrir um fecha os demais.
+
+## Fila de comandos n8n: entrega at-most-once (2026-11-08)
+
+- A fila é **por cliente** (`x-usami-client`, gerado por aba em `sessionStorage`). `POST /api/n8n/command` com header enfileira só para aquele cliente; sem header faz fanout para os clientes que pollaram nos últimos 60 s e, sem nenhum, fica pendente até o primeiro poll (TTL 5 min).
+- `GET /api/n8n/commands` **marca como entregue e não reentrega**; o cliente confirma com `POST /api/n8n/commands/ack` (`{ids:[...]}`), que remove só os ids daquele cliente. Comando entregue e não confirmado é podado após 120 s com log `[n8n] comando não confirmado ...`.
+- Não há reentrega por decisão explícita: repetir gesto/fala já aplicado é pior do que perder o comando. A fila é **em memória**: reiniciar a API descarta pendentes/entregues (o n8n precisa reenviar).
+- Fila limitada a 50 comandos por cliente (os mais antigos saem). Os GETs do n8n continuam sujeitos à borda de origem; `/api/n8n/command(s)` e `/ack` exigem token (D2).
+
 ## Testes não tocam em `data/`
 
 - `npm test` já escreveu na memória real da companion: `createChatHandler` fechava sobre o `memoryStore` criado na avaliação do `server.mjs`, então cada rodada de testes empilhava turnos `oi`/`olá` em `data/memory.json`, movia a afinidade e fabricava fatos ("usuário cumprimenta compulsivamente") a partir desse lixo. O handler aceita `memoryStore` injetado e `USAMI_DATA_DIR` redireciona o depósito de módulo — os testes apontam ambos para `mkdtemp`. Ao adicionar rota com estado, injete o depósito no handler; não importe o caminho padrão.

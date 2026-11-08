@@ -28,8 +28,8 @@ export class ErrorBoundary extends React.Component {
           alignItems: 'center',
           justifyContent: 'center',
           height: '100vh',
-          backgroundColor: '#1a1816',
-          color: '#f0e6df',
+          backgroundColor: '#0B132B',
+          color: '#F9F9FB',
           fontFamily: 'system-ui, -apple-system, sans-serif',
           padding: '24px',
           textAlign: 'center'
@@ -37,12 +37,12 @@ export class ErrorBoundary extends React.Component {
           <h2 style={{ marginBottom: '12px', fontSize: '1.4rem' }}>Ops! Algo deu errado ao carregar a Usami.</h2>
           <p style={{
             maxWidth: '500px',
-            color: '#c4b5aa',
+            color: '#C9CFDA',
             fontSize: '0.95rem',
             marginBottom: '20px',
             lineHeight: 1.5,
             wordBreak: 'break-word',
-            background: 'rgba(255,255,255,0.05)',
+            background: 'rgba(249,249,251,0.05)',
             padding: '12px 16px',
             borderRadius: '8px'
           }}>
@@ -52,14 +52,14 @@ export class ErrorBoundary extends React.Component {
             onClick={this.handleReload}
             style={{
               padding: '10px 22px',
-              backgroundColor: '#e06666',
-              color: '#fff',
+              backgroundColor: '#FF6B7A',
+              color: '#F9F9FB',
               border: 'none',
               borderRadius: '24px',
               fontSize: '1rem',
               fontWeight: 'bold',
               cursor: 'pointer',
-              boxShadow: '0 4px 12px rgba(224, 102, 102, 0.3)'
+              boxShadow: '0 4px 12px rgba(255, 107, 122, 0.3)'
             }}
           >
             Recarregar Usami

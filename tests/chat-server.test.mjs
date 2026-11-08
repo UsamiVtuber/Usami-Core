@@ -584,6 +584,39 @@ test('refino em background: falha do diretor é silenciosa, nunca do turno', asy
   assert.deepEqual(JSON.parse(res.body).commands, []);
 });
 
+// Contador atômico de turnos: com booleano, o primeiro turno a terminar
+// liberava a proatividade mesmo com outro ainda em andamento (duas abas).
+test('B16: turnos sobrepostos só liberam proactive busy quando o último termina', async () => {
+  const busy = [];
+  const proactiveEngine = {
+    markUserActivity() {},
+    setBusy(value) { busy.push(value); },
+  };
+  const handler = chatHandler({
+    getKey: async () => 'k',
+    proactiveEngine,
+    fetchImpl: async () => {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      return jsonResponse('{"reply":"oi","gesture":"neutral"}');
+    },
+  });
+  const request = () => mockReq({
+    headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' },
+    body: JSON.stringify({ message: 'oi' }),
+  });
+
+  const first = handler(request(), mockRes());
+  const second = handler(request(), mockRes());
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.deepEqual(busy, [true], 'dois turnos ativos = um único setBusy(true)');
+
+  await first;
+  assert.deepEqual(busy, [true], 'o primeiro turno não libera enquanto o segundo roda');
+
+  await second;
+  assert.deepEqual(busy, [true, false]);
+});
+
 // --- Hedge NVIDIA → OpenRouter -------------------------------------------
 
 // useNvidia() é avaliado por chamada, então o teste liga a rota NVIDIA só

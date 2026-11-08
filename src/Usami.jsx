@@ -34,6 +34,10 @@ import { deriveVoicePhase } from './voice-phase';
 import { MicBadge, VoiceBeacon } from './voice-ui';
 import { PersonalityPanel } from './PersonalityPanel';
 import BondPanel from './BondPanel';
+import { StageErrorBoundary } from './StageErrorBoundary';
+import { useModalFocus } from './focus-trap';
+import { apiFetch } from './api-client';
+import { safeGetItem, safeSetItem, safeRemoveItem } from './storage-safe';
 import { METER_KEYS, LEVELS, levelFor, meterProgress, describeChatGains, appendBondEvent, loadBondLog, saveBondLog, LEVEL_NAMES } from './bond.js';
 import { createVrmaManager, VRMA_ANIMATIONS } from './vrma-manager';
 import { classifyFacs } from './facs-classifier.js';
@@ -87,12 +91,30 @@ const INTIMACY_KEY = 'usami.intimidade.v1';
 const LAUGHTER_PATTERN = /kkk|haha|rsrs|😂|🤣|risada/i;
 const loadIntimacy = () => {
   try {
-    const saved = JSON.parse(localStorage.getItem(INTIMACY_KEY) || 'null') || {};
+    const saved = JSON.parse(safeGetItem(INTIMACY_KEY) || 'null') || {};
     const clamp = value => Math.min(999, Math.max(0, Math.floor(Number(value) || 0)));
     return { carinho: clamp(saved.carinho), humor: clamp(saved.humor), companhia: clamp(saved.companhia) };
   } catch { return { carinho: 0, humor: 0, companhia: 0 }; }
 };
 const formatCallTime = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+
+// Abas do painel de configurações (WAI-ARIA tabs com roving tabindex).
+const SETTINGS_TABS = [['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['memory', 'Memória'], ['personality', 'Jeito'], ['about', 'Sobre']];
+const settingsTabId = id => `settings-tab-${id}`;
+const settingsPanelId = id => `settings-panel-${id}`;
+
+// Mensagem do turno de erro do chat (F2): nunca repassa o texto cru do
+// provedor — rede/429/502/resto têm mensagens amigáveis próprias.
+const describeChatFailure = error => {
+  if (error instanceof TypeError && /fetch|load failed|network/i.test(error?.message || '')) {
+    return 'Sem conexão com a API da Usami — confira se o servidor local está rodando.';
+  }
+  const status = Number(error?.status);
+  if (status === 429) return 'Muitos pedidos agora. Respira um pouco e tenta de novo em instantes.';
+  if (status === 502 || status === 503 || status === 504) return 'O provedor de resposta falhou agora. Tenta de novo em instantes.';
+  if (status === 401 || status === 403) return 'A API recusou o pedido. Confira a configuração do servidor local.';
+  return 'Não consegui responder agora. Tenta de novo em instantes.';
+};
 
 // Rótulos dos gestos procedurais no painel de rig (os nomes crus são os que o LLM e a fila n8n usam).
 const GESTURE_LABELS = {
@@ -140,7 +162,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures, expressionDriverRef, busyRef, hearingRef, quietRef, speakingRef }) {
+function Avatar({ source, sourceType, sourceName, onReport, onProgress, onStageIssue, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures, expressionDriverRef, busyRef, hearingRef, quietRef, speakingRef }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -188,6 +210,24 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const morphList = [];
     const loader = sourceType === 'fbx' ? new FBXLoader() : new GLTFLoader();
     if (sourceType !== 'fbx') loader.register(parser => new VRMLoaderPlugin(parser));
+    // Progresso real do download quando o servidor manda Content-Length;
+    // sem total, o overlay do palco fica indeterminado em vez de mentir.
+    const handleProgress = event => {
+      if (disposed) return;
+      const loaded = Number(event?.loaded) || 0;
+      const total = Number(event?.total) || 0;
+      onProgress?.(total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : null);
+    };
+    // F23: contexto WebGL perdido deixa o canvas morto. O preventDefault
+    // permite a restauração; o palco avisa e oferece "Recarregar modelo".
+    const onContextLost = event => {
+      event.preventDefault();
+      onStageIssue?.('O contexto gráfico do palco foi perdido. Recarregue o modelo para voltar a vê-la.');
+    };
+    const onContextRestored = () => {
+      onStageIssue?.(null);
+      try { resize(); } catch {}
+    };
     loader.load(source, loaded => {
       if (disposed) return;
       vrm = sourceType === 'fbx' ? null : loaded.userData.vrm;
@@ -449,12 +489,14 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       manifest.gestures = Array.from(new Set([...(vrmGestures.current?.gestureNames ?? []), ...vrmaKeys]));
       const reportPayload = { format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: manifest.customIdle, customWave: manifest.customWave, customTilt: manifest.customTilt, sequences: manifest.sequences, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: manifest.gestures, meshList: manifest.meshes, manifest };
       onReport(reportPayload);
-    }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
-    const resize = () => {
+    }, handleProgress, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
+    canvas.addEventListener('webglcontextlost', onContextLost, false);
+    canvas.addEventListener('webglcontextrestored', onContextRestored, false);
+    function resize() {
       camera.aspect = element.clientWidth / element.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(element.clientWidth, element.clientHeight);
-    };
+    }
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     resize();
@@ -583,6 +625,8 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       if (ttsAudio?.current) { try { ttsAudio.current.pause(); } catch {} ttsAudio.current = null; }
       cancelAnimationFrame(frame);
       observer.disconnect();
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
       canvas.removeEventListener('pointermove', onPointerMove);
       if (vrm?.lookAt) vrm.lookAt.target = null;
       localTextures.forEach(texture => texture.dispose());
@@ -593,7 +637,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [source, sourceType, sourceName, onReport, controller]);
+  }, [source, sourceType, sourceName, onReport, onProgress, onStageIssue, controller]);
   return <div className="avatar" ref={host} aria-label="Visualização 3D do avatar" />;
 }
 
@@ -654,7 +698,7 @@ function MemoryPanel() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch('/api/memory');
+      const response = await apiFetch('/api/memory');
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Falha ao ler a memória.');
       setMemory(data.memory);
@@ -671,7 +715,7 @@ function MemoryPanel() {
     setBusy(true);
     setNotice('');
     try {
-      const response = await fetch('/api/memory/forget', {
+      const response = await apiFetch('/api/memory/forget', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...payload, confirm: confirmText.trim() }),
@@ -690,7 +734,7 @@ function MemoryPanel() {
 
   if (!memory) {
     return error
-      ? <p className="memory-error">{error}</p>
+      ? <p className="memory-error" role="alert">{error}</p>
       : <p className="settings-hint">Lendo a memória da Usami…</p>;
   }
 
@@ -767,8 +811,8 @@ function MemoryPanel() {
       </ul>
     </div> : null}
 
-    {notice ? <p className="memory-notice">{notice}</p> : null}
-    {error ? <p className="memory-error">{error}</p> : null}
+    {notice ? <p className="memory-notice" role="status" aria-live="polite">{notice}</p> : null}
+    {error ? <p className="memory-error" role="alert">{error}</p> : null}
 
     <div className="rig-actions memory-actions">
       <button
@@ -788,7 +832,11 @@ export function Usami() {
   const [modelPath, setModelPath] = useState('');
   const [report, setReport] = useState(null);
   const [meshPrefs, setMeshPrefs] = useState({});
-  const [chat, setChat] = useState(false);
+  // D4/R1: um único painel ativo por vez — drawer de conversa, vínculo e
+  // configurações são mutuamente exclusivos (nenhum backdrop sobreposto).
+  const [openPanel, setOpenPanel] = useState(null);
+  const chat = openPanel === 'chat';
+  const panel = openPanel === 'settings';
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
   // Aviso passageiro no pill de status quando o TTS oficial falha; o texto da
@@ -810,9 +858,11 @@ export function Usami() {
   const [micError, setMicError] = useState(false);
   const [voiceSpeaking, setVoiceSpeaking] = useState(false);
   const [intimacy, setIntimacy] = useState(loadIntimacy);
-  const [bondOpen, setBondOpen] = useState(false);
+  const bondOpen = openPanel === 'bond';
   const [bondLog, setBondLog] = useState(loadBondLog);
-  const closeBond = useCallback(() => setBondOpen(false), []);
+  const closeBond = useCallback(() => setOpenPanel(current => current === 'bond' ? null : current), []);
+  const closeSettings = useCallback(() => setOpenPanel(current => current === 'settings' ? null : current), []);
+  const bondTriggerRef = useRef(null);
   useEffect(() => { saveBondLog(bondLog); }, [bondLog]);
   // Subida de nível vira um momento no histórico. O ref nasce com o nível
   // carregado, então abrir a página não registra subida falsa.
@@ -824,26 +874,34 @@ export function Usami() {
     }
     bondLevelRef.current = bondLevel;
   }, [bondLevel]);
-  const [panel, setPanel] = useState(false);
   const [settingsTab, setSettingsTab] = useState('chat');
+  const [dangerConfirm, setDangerConfirm] = useState(null);
+  const settingsRef = useRef(null);
+  const settingsCloseRef = useRef(null);
+  const settingsTriggerRef = useRef(null);
   const stageRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [sceneOpen, setSceneOpen] = useState(false);
   const [vrmaOpen, setVrmaOpen] = useState(false);
   const [currentVrma, setCurrentVrma] = useState(null);
   const [armClearance, setArmClearance] = useState(30);
-  const [stageBg, setStageBg] = useState(() => {
-    try { return localStorage.getItem('usami_stage_bg') || '/background.png'; } catch { return '/background.png'; }
-  });
+  const [stageBg, setStageBg] = useState(() => safeGetItem('usami_stage_bg') || '/background.png');
   const [stageBlur, setStageBlur] = useState(() => {
-    try {
-      const v = localStorage.getItem('usami_stage_blur');
-      return v !== null ? Number(v) : 3;
-    } catch { return 3; }
+    const v = safeGetItem('usami_stage_blur');
+    return v !== null ? Number(v) : 3;
   });
+  // F8/F25/F23: estado de carga do modelo visível no palco (não só no painel).
+  const [modelReload, setModelReload] = useState(0);
+  const [modelProgress, setModelProgress] = useState(null);
+  const [stageIssue, setStageIssue] = useState(null);
+  const [modelOverlayDone, setModelOverlayDone] = useState(false);
   const bgFileInput = useRef(null);
   const [bubble, setBubble] = useState(null);
   const bubbleTimer = useRef(null);
+  // F3: auto-scroll do histórico só quando o usuário está perto do fim (ou na
+  // primeira renderização do drawer).
+  const chatScrollRef = useRef(null);
+  const chatForceScrollRef = useRef(true);
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
@@ -914,10 +972,17 @@ export function Usami() {
   }, []);
   const [uiActive, setUiActive] = useState(true);
   const uiHideTimer = useRef(null);
+  // F15: chamada/atenção suspendem o auto-hide mesmo quando o pointer/mouse
+  // reinicia o timer — a atividade não pode reagendar a escondida.
+  const uiSuspendRef = useRef(false);
 
   const resetUiTimer = useCallback(() => {
     setUiActive(true);
     if (uiHideTimer.current) clearTimeout(uiHideTimer.current);
+    if (uiSuspendRef.current) {
+      uiHideTimer.current = null;
+      return;
+    }
     uiHideTimer.current = setTimeout(() => {
       setUiActive(false);
     }, 4500);
@@ -927,15 +992,35 @@ export function Usami() {
     const handleActivity = () => resetUiTimer();
     window.addEventListener('mousemove', handleActivity, { passive: true });
     window.addEventListener('keydown', handleActivity, { passive: true });
+    // Touch: o palco inteiro revela o HUD (mousemove não existe no toque).
     window.addEventListener('touchstart', handleActivity, { passive: true });
+    window.addEventListener('pointerdown', handleActivity, { passive: true });
     resetUiTimer();
     return () => {
       window.removeEventListener('mousemove', handleActivity);
       window.removeEventListener('keydown', handleActivity);
       window.removeEventListener('touchstart', handleActivity);
+      window.removeEventListener('pointerdown', handleActivity);
       if (uiHideTimer.current) clearTimeout(uiHideTimer.current);
     };
   }, [resetUiTimer]);
+  // F15: em chamada/atividade o HUD não pode sumir (dock, hangup e timer).
+  // Enquanto suspenso, o timer de idle fica desligado; ao terminar, recomeça.
+  // F4/D4: painel/histórico/vínculo abertos também suspendem — fechar pelo
+  // teclado precisa devolver o foco ao gatilho, que não pode estar inert.
+  useEffect(() => {
+    const suspended = call || busy || voiceSpeaking || chat || panel || bondOpen || vrmaOpen;
+    uiSuspendRef.current = suspended;
+    if (suspended) {
+      setUiActive(true);
+      if (uiHideTimer.current) {
+        clearTimeout(uiHideTimer.current);
+        uiHideTimer.current = null;
+      }
+      return;
+    }
+    resetUiTimer();
+  }, [call, busy, voiceSpeaking, chat, panel, bondOpen, vrmaOpen, resetUiTimer]);
   useEffect(() => () => clearTimeout(bubbleTimer.current), []);
   useEffect(() => {
     const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -951,11 +1036,11 @@ export function Usami() {
   const updateStageBlur = val => {
     const clamped = Math.max(0, Math.min(24, Number(val) || 0));
     setStageBlur(clamped);
-    try { localStorage.setItem('usami_stage_blur', String(clamped)); } catch {}
+    safeSetItem('usami_stage_blur', String(clamped));
   };
   const updateStageBg = val => {
     setStageBg(val);
-    try { localStorage.setItem('usami_stage_bg', val); } catch {}
+    safeSetItem('usami_stage_bg', val);
   };
   const handleBgUpload = event => {
     const file = event.target.files?.[0];
@@ -995,7 +1080,7 @@ export function Usami() {
       setBubble(prev => prev ? { ...prev, visible: false } : null);
     }, ttl);
   };
-  const addTurn = (role, content, mode = 'text') => {
+  const addTurn = (role, content, mode = 'text', flags = null) => {
     const value = String(content || '').trim();
     if (!value) return;
     turnId.current += 1;
@@ -1004,7 +1089,10 @@ export function Usami() {
     // `turnId.current` final — chaves duplicadas na lista.
     const id = turnId.current;
     setConversation(previous => {
-      const next = [...previous, { id, role, content: value, mode }];
+      const turn = { id, role, content: value, mode };
+      // F2: turno de erro do chat tem tipo próprio e é persistido no storage.
+      if (flags?.error) turn.error = true;
+      const next = [...previous, turn];
       // O estado guarda a conversa inteira da sessão; o navegador fica com as
       // últimas 100 mensagens para não crescer sem limite.
       saveConversation(next);
@@ -1015,6 +1103,20 @@ export function Usami() {
     turnId.current = 0;
     setConversation([]);
     clearStoredConversation();
+  };
+  // F2: reenvia a última mensagem do usuário, descartando os turnos de erro
+  // para o retry não empilhar "tenta de novo" em cima do erro anterior. O
+  // usuário não fica órfão: a mensagem dele continua no histórico.
+  const retryLastMessage = () => {
+    if (busyRef.current) return;
+    const lastUser = [...conversation].reverse().find(turn => turn.role === 'user');
+    if (!lastUser) return;
+    setConversation(previous => {
+      const next = previous.filter(turn => !turn.error);
+      saveConversation(next);
+      return next;
+    });
+    submitRef.current?.(lastUser.content, { retry: true });
   };
   const exportChat = () => {
     if (!conversation.length) return;
@@ -1036,6 +1138,27 @@ export function Usami() {
     auto.current = value?.manifest && (value.blink || value.customIdle !== false) ? createAutoMotion({ blink: Boolean(value.blink), idle: value.customIdle !== false }) : null;
     lastIdleActive.current = false;
   }, []);
+  const handleModelProgress = useCallback(progress => setModelProgress(progress), []);
+  const handleStageIssue = useCallback(issue => setStageIssue(issue), []);
+  // F25: remonta o avatar com a mesma fonte (load/retry existente), limpando
+  // erro e progresso. Não recarrega a página.
+  const reloadModel = useCallback(() => {
+    setStageIssue(null);
+    setModelProgress(null);
+    setReport(null);
+    setModelOverlayDone(false);
+    setModelReload(count => count + 1);
+  }, []);
+  // O overlay some com fade: `done` pinta opacity 0 e só depois desmonta.
+  useEffect(() => {
+    const ready = Boolean(report && !report.error && !stageIssue);
+    if (!ready) {
+      setModelOverlayDone(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setModelOverlayDone(true), 450);
+    return () => clearTimeout(timer);
+  }, [report, stageIssue]);
   useEffect(() => () => { if (source.startsWith('blob:')) URL.revokeObjectURL(source); }, [source]);
   useEffect(() => () => clearTimeout(voiceNoticeTimer.current), []);
   useEffect(() => {
@@ -1043,10 +1166,40 @@ export function Usami() {
     const timer = setInterval(() => setCallSeconds(seconds => seconds + 1), 1000);
     return () => clearInterval(timer);
   }, [call]);
+  // F3: o histórico acompanha turnos novos/busy apenas quando o usuário está
+  // perto do fim (<=80px) ou na primeira renderização do drawer aberto.
+  useEffect(() => {
+    if (!chat) {
+      chatForceScrollRef.current = true;
+      return;
+    }
+    const scroller = chatScrollRef.current;
+    if (!scroller) return;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (chatForceScrollRef.current || distance <= 80) scroller.scrollTop = scroller.scrollHeight;
+    chatForceScrollRef.current = false;
+  }, [chat, conversation, busy]);
+  // F4: o painel de configurações é um diálogo modal (foco inicial, trap,
+  // Escape e foco devolvido ao botão de engrenagem).
+  useModalFocus({
+    active: panel,
+    containerRef: settingsRef,
+    initialFocusRef: settingsCloseRef,
+    restoreRef: settingsTriggerRef,
+    onEscape: closeSettings,
+  });
+  // A confirmação em dois passos (F7) morre junto com o painel: reabrir não
+  // mostra um botão já armado.
+  useEffect(() => {
+    if (!panel) setDangerConfirm(null);
+  }, [panel]);
   const loadFile = event => {
     const file = event.target.files?.[0];
     if (!file) return;
     setReport(null);
+    setModelProgress(null);
+    setStageIssue(null);
+    setModelOverlayDone(false);
     setBoneIndex(0); setAngle(0); setMorphValues({}); setSelectedClip('0');
     setSourceType(file.name.toLowerCase().endsWith('.fbx') ? 'fbx' : 'gltf');
     setSourceName(file.name);
@@ -1059,6 +1212,9 @@ export function Usami() {
     const extension = dot < 0 ? '' : target.slice(dot).toLowerCase();
     if (!target || !['.glb', '.gltf', '.vrm', '.fbx'].includes(extension)) return;
     setReport(null);
+    setModelProgress(null);
+    setStageIssue(null);
+    setModelOverlayDone(false);
     setBoneIndex(0); setAngle(0); setMorphValues({}); setSelectedClip('0');
     setSourceType(extension === '.fbx' ? 'fbx' : 'gltf');
     setSourceName(target.split('/').pop());
@@ -1162,6 +1318,12 @@ export function Usami() {
       }
     }
   };
+  // F5/F22: o intervalo de inatividade vive num effect com deps [] e ficaria
+  // preso ao `speakReply` do primeiro render. O ref sempre aponta para o atual
+  // (que lê quietRef/refs), então o modo dormir fala em rate .8 e não dispara
+  // o VRMA `talking`.
+  const speakReplyRef = useRef(speakReply);
+  useEffect(() => { speakReplyRef.current = speakReply; });
   const speakReplyQueue = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
     const rawParts = Array.isArray(reply) ? reply : parseReplyBalloons(String(reply ?? ''));
     const parts = rawParts
@@ -1183,7 +1345,8 @@ export function Usami() {
     // Assim o VRMA 'talking' nunca começa antes de existir áudio para dublar e
     // não reinicia a cada balão da mesma fila.
     const startTalking = () => {
-      if (quiet) return;
+      // F5: lê o ref, não o `quiet` capturado pelo render que criou a fila.
+      if (quietRef.current) return;
       if (controller.current?.getVrmaName?.() === 'talking') return;
       controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
     };
@@ -1235,10 +1398,10 @@ export function Usami() {
     // Streaming exige o grafo Web Audio da camada de boca: é por ele que o PCM
     // toca e é ele que mede o lábio. Sem AudioContext ou sem visemas, pede o
     // blob direto — senão cada frase custaria dois pedidos ao provedor de voz.
-    const canStream = !quiet && Boolean(audioLipSync.current?.getTap?.());
+    const canStream = !quietRef.current && Boolean(audioLipSync.current?.getTap?.());
     // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
     // requisição no ar — sem unhandled rejection.
-    const requestTtsOnce = (text, stream, partStyle) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
+    const requestTtsOnce = (text, stream, partStyle) => apiFetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
       .then(async response => {
         if (!response || !response.ok) return null;
         // PCM cru atrás do header de stream; qualquer outra resposta de áudio é
@@ -1290,7 +1453,7 @@ export function Usami() {
           runActionsAtSpeechStart();
         }
       }
-      audio.playbackRate = quiet ? .8 : 1;
+      audio.playbackRate = quietRef.current ? .8 : 1;
       await playAudioPart(audio, url, startTalking);
       URL.revokeObjectURL(url);
       played = true;
@@ -1395,7 +1558,7 @@ export function Usami() {
         if (next[key] !== (previous[key] || 0)) changed = true;
       });
       if (!changed) return previous;
-      try { localStorage.setItem(INTIMACY_KEY, JSON.stringify(next)); } catch {}
+      safeSetItem(INTIMACY_KEY, JSON.stringify(next));
       return next;
     });
     if (event) setBondLog(previous => appendBondEvent(previous, { ...event, at: Date.now(), gains }));
@@ -1479,7 +1642,7 @@ export function Usami() {
     callActiveRef.current = true;
     callStartRef.current = Date.now();
     setCallSeconds(0);
-    setChat(false);
+    setOpenPanel(current => current === 'chat' ? null : current);
     setCall(true);
 
     // Reação imediata de atendimento: aceno amigável da Usami
@@ -1512,10 +1675,12 @@ export function Usami() {
     return [immediate, timed];
   };
 
-  const submitMessage = async (content, { spoken = false } = {}) => {
+  const submitMessage = async (content, { spoken = false, retry = false } = {}) => {
     const value = String(content || '').trim();
     if (!value || busyRef.current) return;
-    if (!spoken) setText('');
+    // No retry o texto da mensagem do usuário já está limpo e no histórico:
+    // não reescreve o composer nem duplica o turno dela.
+    if (!spoken && !retry) setText('');
     busyRef.current = true;
     setBusy(true);
 
@@ -1523,7 +1688,9 @@ export function Usami() {
     const inSleepCompanion = Boolean(sleepCompanionRef.current);
     recordUserActivity();
 
-    if (wasSleeping && !inSleepCompanion) {
+    if (retry) {
+      // Reenvio da última mensagem: só o estado de "pensando" é refeito.
+    } else if (wasSleeping && !inSleepCompanion) {
       // Acorda imediatamente do sono com sobressalto e susto!
       setQuiet(false);
       quietRef.current = false;
@@ -1540,23 +1707,23 @@ export function Usami() {
       vrmGestures.current?.gesture('tilt');
     }
 
-    addTurn('user', value, spoken ? 'voice' : 'text');
-    // Frente 3: classifica a frase do usuário em AUs FACS e aplica ao
-    // expression-driver do Shiro enquanto o LLM processa (paralelo).
-    const facs = classifyFacs(value);
-    if (facs.aus.length > 0 && expressionDriverRef.current) {
-      applyFacsToDriver(facs.aus, facs.intensity, expressionDriverRef.current, { ttlMs: 4000 });
-    } else if (!wasSleeping && !inSleepCompanion) {
-      expressionDriverRef.current?.set('19-prefab_doubt', 0.40, { ttlMs: 3500 });
-    }
-    {
+    if (!retry) {
+      addTurn('user', value, spoken ? 'voice' : 'text');
+      // Frente 3: classifica a frase do usuário em AUs FACS e aplica ao
+      // expression-driver do Shiro enquanto o LLM processa (paralelo).
+      const facs = classifyFacs(value);
+      if (facs.aus.length > 0 && expressionDriverRef.current) {
+        applyFacsToDriver(facs.aus, facs.intensity, expressionDriverRef.current, { ttlMs: 4000 });
+      } else if (!wasSleeping && !inSleepCompanion) {
+        expressionDriverRef.current?.set('19-prefab_doubt', 0.40, { ttlMs: 3500 });
+      }
       const gains = gainsFor(value, spoken);
       awardXP(gains, describeChatGains(gains, { spoken }));
     }
     setMessage('Usami está pensando…');
     try {
       const manifest = report?.manifest ? { ...report.manifest, customIdle: report.customIdle !== false, customWave: report.customWave !== false, customTilt: report.customTilt !== false } : null;
-      const response = await fetch('/api/chat', {
+      const response = await apiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1567,8 +1734,13 @@ export function Usami() {
         })
       });
       let data = null;
-      try { data = await response.json(); } catch { throw new Error('Resposta inválida do servidor.'); }
-      if (!response.ok) throw new Error(data?.error || 'Falha na conversa.');
+      try { data = await response.json(); } catch { data = null; }
+      if (!response.ok) {
+        // O erro do provedor fica no servidor: o cliente só guarda o status.
+        const failure = new Error('chat request failed');
+        failure.status = response.status;
+        throw failure;
+      }
       if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new Error('Resposta inválida do servidor.');
       // Etapa 3: emoção confiável no texto aplica o engine e remove o set_expression
       // do LLM (evita blend duplo); sem confiança, as actions seguem intactas.
@@ -1609,13 +1781,11 @@ export function Usami() {
       speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), spoken ? 'voice' : 'text'));
       setMessage(fullCleanText + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
     } catch (error) {
-      // `fetch` sem servidor lança TypeError com mensagem do navegador
-      // ("Failed to fetch"/"Load failed"): dizer qual API está fora evita
-      // confundir servidor parado com a personagem "não respondendo".
-      const offline = error instanceof TypeError && /fetch|load failed|network/i.test(error.message || '');
-      const errMsg = offline
-        ? 'Sem conexão com a API da Usami — confira se o servidor local está rodando.'
-        : (error.message || 'Não foi possível conversar.');
+      // F2: turno de erro persistente, com retry no histórico. A mensagem do
+      // usuário continua na conversa (não fica órfã) e o texto cru do provedor
+      // nunca entra no turno — só a mensagem amigável por tipo de falha.
+      const errMsg = describeChatFailure(error);
+      addTurn('assistant', errMsg, 'text', { error: true });
       setMessage(errMsg);
       showSpeechBubble(errMsg);
     }
@@ -1624,7 +1794,7 @@ export function Usami() {
       setBusy(false);
       // Limpa mesmo quando a resposta falha: o texto enviado não fica preso no
       // composer esperando um novo clique. No modo voz o campo é outro fluxo.
-      if (!spoken) setText('');
+      if (!spoken && !retry) setText('');
     }
   };
   useEffect(() => { submitRef.current = submitMessage; });
@@ -1636,10 +1806,13 @@ export function Usami() {
     let timer;
     const poll = async () => {
       try {
-        const response = await fetch('/api/n8n/commands');
+        const response = await apiFetch('/api/n8n/commands');
         if (!response.ok) return;
         const data = await response.json();
         const commands = data?.commands ?? [];
+        // Contrato da onda 2: comandos com id são confirmados por ack. O
+        // endpoint pode ainda não existir — a falha é silenciosa (debug).
+        const acknowledged = [];
         for (const cmd of commands ?? []) {
           const ctrl = controller.current;
           if (!ctrl) continue;
@@ -1680,6 +1853,20 @@ export function Usami() {
             }
           } catch {
             // Falha ao aplicar um comando não interrompe os seguintes.
+          }
+          if (cmd?.id) acknowledged.push(cmd.id);
+        }
+        if (acknowledged.length) {
+          try {
+            const ack = await apiFetch('/api/n8n/commands/ack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids: acknowledged }),
+            });
+            if (!ack.ok) console.debug('[usami] ack da fila n8n sem suporte ainda:', ack.status);
+          } catch (error) {
+            // Endpoint chega na onda 2; enquanto isso o comando é reentregue.
+            console.debug('[usami] ack da fila n8n falhou:', error?.message || error);
           }
         }
       } catch {
@@ -1740,7 +1927,7 @@ export function Usami() {
           const endMsg = "[whisper_caring] Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
           const endDisplay = "Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
           const balloons = [{ display: endDisplay, ttsText: endMsg, emotionKey: 'whisper_caring', speechTags: [] }];
-          speakReply(balloons, 'whisper', [], part => addTurn('assistant', part, 'text'));
+          speakReplyRef.current(balloons, 'whisper', [], part => addTurn('assistant', part, 'text'));
           setMessage(endDisplay);
           showSpeechBubble(endDisplay, 'dormindo');
         }
@@ -1760,7 +1947,7 @@ export function Usami() {
         const msg = "Ei... ainda tá acordado? Não vai me deixar aqui falando sozinha, vai?";
         const balloons = [{ display: msg, ttsText: msg, emotionKey: 'confused', speechTags: [] }];
         controller.current?.gesture?.('tilt');
-        speakReply(balloons, 'neutral', [], part => addTurn('assistant', part, 'text'));
+        speakReplyRef.current(balloons, 'neutral', [], part => addTurn('assistant', part, 'text'));
         setMessage(msg);
         showSpeechBubble(msg, 'curiosa');
       }
@@ -1770,7 +1957,7 @@ export function Usami() {
         const msg = "Hmm... você tá aí ainda? Parece que alguém pegou no sono... Dá um sinal, senão eu vou acabar dormindo também...";
         const balloons = [{ display: msg, ttsText: msg, emotionKey: 'shy', speechTags: [] }];
         controller.current?.gesture?.('scratchHead');
-        speakReply(balloons, 'soft', [], part => addTurn('assistant', part, 'text'));
+        speakReplyRef.current(balloons, 'soft', [], part => addTurn('assistant', part, 'text'));
         setMessage(msg);
         showSpeechBubble(msg, 'sonolenta');
       }
@@ -1780,7 +1967,7 @@ export function Usami() {
         const msg = "[whisper_caring] Acho que você dormiu mesmo... boa noite então... <sigh>";
         const display = "Acho que você dormiu mesmo... boa noite então...";
         const balloons = [{ display, ttsText: msg, emotionKey: 'whisper_sleepy', speechTags: ['sigh'] }];
-        speakReply(balloons, 'whisper', [], part => addTurn('assistant', part, 'text')).then(() => {
+        speakReplyRef.current(balloons, 'whisper', [], part => addTurn('assistant', part, 'text')).then(() => {
           setQuiet(true);
           quietRef.current = true;
         });
@@ -1854,7 +2041,7 @@ export function Usami() {
         reader.readAsDataURL(media.file);
       });
 
-      const response = await fetch('/api/media/analyze', {
+      const response = await apiFetch('/api/media/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1928,6 +2115,8 @@ export function Usami() {
     submitMessage(toSend);
   };
   const meshList = report?.meshList || [];
+  const modelError = report?.error ? String(report.error) : (stageIssue || null);
+  const modelReady = Boolean(report && !report.error && !stageIssue);
   const topLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
   const defaultVisible = mesh => sourceType === 'fbx' ? true : mesh.skinned;
   const isMeshVisible = mesh => meshPrefs[mesh.name] ?? defaultVisible(mesh);
@@ -1946,10 +2135,30 @@ export function Usami() {
     controller.current?.applyDefaultVisibility();
   };
   return <main ref={stageRef} className={'stage ' + (call ? 'voice-mode' : 'text-mode') + (quiet ? ' companion' : '') + (chat ? ' history-open' : '') + (!uiActive && !chat && !panel && !vrmaOpen && !bondOpen && !selectedMedia ? ' ui-idle' : '')}>
-    <div className="backdrop" style={{ backgroundImage: `url("${stageBg}")`, filter: `saturate(.88) brightness(.72) blur(${stageBlur}px)` }} />
-    {sourceType === 'live2d'
-      ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} busyRef={busyRef} hearingRef={hearingRef} quietRef={quietRef} speakingRef={speakingRef} />}
+    <div className="backdrop" style={{ backgroundImage: `url("${stageBg}")`, filter: `saturate(.7) brightness(.6) blur(${stageBlur}px) hue-rotate(-35deg)` }} />
+    <StageErrorBoundary key={`stage-${modelReload}`} onRetry={reloadModel}>
+      {sourceType === 'live2d'
+        ? <Live2DAvatar controller={controller} onReport={reportModel} />
+        : <Avatar key={`${source}-${modelReload}`} source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} onProgress={handleModelProgress} onStageIssue={handleStageIssue} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} busyRef={busyRef} hearingRef={hearingRef} quietRef={quietRef} speakingRef={speakingRef} />}
+    </StageErrorBoundary>
+    {/* F8/F25/F23: o load do VRM aparece no palco (não só no painel fechado),
+        com progresso quando existe e retry em caso de falha. Não bloqueia o
+        composer: o overlay ignora ponteiros, só o botão os recebe. */}
+    {(modelError || !modelOverlayDone) && (
+      <div
+        className={`stage-model ${modelError ? 'error' : 'loading'}${modelReady ? ' done' : ''}`}
+        role={modelError ? 'alert' : 'status'}
+        aria-live="polite"
+      >
+        {modelError ? <>
+          <p>{modelError}</p>
+          <button type="button" className="stage-model-retry" onClick={reloadModel}>Recarregar modelo</button>
+        </> : <>
+          <span className="stage-model-spinner" aria-hidden="true" />
+          <p>Carregando modelo…{modelProgress != null ? ` ${modelProgress}%` : ''}</p>
+        </>}
+      </div>
+    )}
     {bubble && (
       <div
         className={`bubble her ${bubble.visible ? 'show in' : 'show'}`}
@@ -1966,17 +2175,20 @@ export function Usami() {
       </div>
     )}
     <header>
-      <div className="header-actions">
-        <button className={'icon' + (chat ? ' on' : '')} onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat} title="Conversa"><MessagesSquare size={19}/></button>
-        <button className={'icon' + (panel ? ' on' : '')} onClick={() => setPanel(true)} aria-label="Configurações e modelo" title="Configurações"><Settings size={19}/></button>
+      {/* F14: quando o idle esconde o header interativo, inert impede foco em
+          botões invisíveis. aria-hidden é omitido: com foco retido num
+          descendente o browser o bloquearia, e inert já remove a subárvore. */}
+      <div className="header-actions" inert={!uiActive || undefined}>
+        <button className={'icon' + (chat ? ' on' : '')} onClick={() => setOpenPanel(current => current === 'chat' ? null : 'chat')} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat} title="Conversa"><MessagesSquare size={19}/></button>
+        <button ref={settingsTriggerRef} className={'icon' + (panel ? ' on' : '')} onClick={() => setOpenPanel('settings')} aria-label="Configurações e modelo" title="Configurações"><Settings size={19}/></button>
         <button className="icon" onClick={recenterAvatar} aria-label="Recentralizar avatar e pose" title="Recentralizar avatar e pose"><RotateCcw size={18}/></button>
       </div>
-      <span className={'status stage-status' + (call ? ' calling' : '') + (busy ? ' thinking' : '')}>
+      <span className={'status stage-status' + (call ? ' calling' : '') + (busy ? ' thinking' : '')} aria-hidden={!uiActive ? 'true' : undefined}>
         <i className="status-dot" />
-        {voiceNotice || (call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você')}
+        <span className="status-text">{voiceNotice || (call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você')}</span>
       </span>
       <div className="corner">
-        <div className="corner-actions">
+        <div className="corner-actions" inert={!uiActive || undefined}>
           <button className={'icon' + (vrmaOpen ? ' on' : '')} onClick={e => { e.stopPropagation(); setVrmaOpen(o => !o); }} title="Testador de Animações VRMA" aria-label="Testador de Animações VRMA"><Clapperboard size={18}/></button>
           {vrmaOpen && (
             <div className="vrma-tester-panel" onClick={e => e.stopPropagation()}>
@@ -2010,7 +2222,7 @@ export function Usami() {
                     toggleSleepCompanion();
                     poke();
                   }}
-                  style={{ gridColumn: 'span 2', fontWeight: 600, background: sleepCompanion ? 'rgba(127, 90, 240, 0.4)' : undefined }}
+                  style={{ gridColumn: 'span 2', fontWeight: 600, background: sleepCompanion ? 'rgba(255, 94, 126, 0.4)' : undefined }}
                 >
                   {sleepCompanion ? `🌙 Encerrar Companion de Sono (${sleepCompanionMinutesLeft}m restantes)` : '🌙 Iniciar Companion p/ Dormir (30 min sussurrado)'}
                 </button>
@@ -2072,16 +2284,18 @@ export function Usami() {
             </div>
           )}
         </div>
-        <div className="bond">
-          <button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-haspopup="dialog" aria-label="Vínculo com a Usami">♥ Nível {topLevel}</button>
+        {/* D3: o crédito é informativo e fica sempre visível — fora do conjunto
+            que o idle esconde (inert) e sem display:none no mobile. */}
+        <div className="bond" inert={!uiActive || undefined}>
+          <button ref={bondTriggerRef} className="bond-pill" onClick={() => setOpenPanel(current => current === 'bond' ? null : 'bond')} aria-expanded={bondOpen} aria-haspopup="dialog" aria-label="Vínculo com a Usami">♥ Nível {topLevel}</button>
         </div>
-        <span className="credit">白ー (shiro) — Model by Sweet_nya555</span>
+        <span className="credit"><span className="credit-full">白ー (shiro) — Model by Sweet_nya555</span><span className="credit-short">Model by Sweet_nya555</span></span>
       </div>
     </header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
-      <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><div className="chat-history-actions"><button onClick={exportChat} disabled={!conversation.length} aria-label="Exportar histórico" title="Exportar histórico"><Download size={14}/></button><button onClick={clearChat} disabled={!conversation.length} aria-label="Limpar histórico" title="Limpar histórico"><Trash2 size={15}/></button><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div></div>
-      <div className="chat-scroll">
-        {conversation.length ? conversation.map(turn => <div className={'chat-turn ' + turn.role} key={turn.id}><span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span><p>{turn.content}</p></div>) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
+      <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><div className="chat-history-actions"><button onClick={exportChat} disabled={!conversation.length} aria-label="Exportar histórico" title="Exportar histórico"><Download size={14}/></button><button onClick={clearChat} disabled={!conversation.length} aria-label="Limpar histórico" title="Limpar histórico"><Trash2 size={15}/></button><button onClick={() => setOpenPanel(null)} aria-label="Ocultar histórico"><X size={15}/></button></div></div>
+      <div className="chat-scroll" ref={chatScrollRef}>
+        {conversation.length ? conversation.map(turn => <div className={'chat-turn ' + turn.role + (turn.error ? ' error' : '')} key={turn.id}><span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span><p role={turn.error ? 'alert' : undefined}>{turn.content}</p>{turn.error && <button type="button" className="chat-retry" onClick={retryLastMessage} disabled={busy}>Tentar de novo</button>}</div>) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
         {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
       </div>
     </section>}
@@ -2129,33 +2343,77 @@ export function Usami() {
       </form>
       {call && <div className="dock" aria-label="Controles da chamada">
         <button className={'round live ' + voicePhase.id} disabled={!recognitionSupported} title={'Microfone: ' + voicePhase.label} aria-label={'Microfone: ' + voicePhase.label}><MicBadge phase={voicePhase}/></button>
-        <button className={'round '+(chat?'selected':'')} onClick={() => setChat(!chat)} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
+        <button className={'round '+(chat?'selected':'')} onClick={() => setOpenPanel(current => current === 'chat' ? null : 'chat')} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
         <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
         <button className={'round '+(voiceOff?'selected':'')} onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={19}/>:<Volume2 size={19}/>}</button>
         <button className={'round '+(sleepCompanion ? 'selected' : quiet ? 'on' : '')} onClick={toggleSleepCompanion} aria-label="Alternar modo companion para dormir" aria-pressed={sleepCompanion || quiet} title={sleepCompanion ? `Modo Dormir (${sleepCompanionMinutesLeft}m)` : 'Modo Companion para Dormir'}><Moon size={19}/></button>
       </div>}
     </div>
-    {bondOpen && <BondPanel intimacy={intimacy} log={bondLog} onClose={closeBond}/>}
-    {panel && <div className="scrim" onClick={() => setPanel(false)}>
-      <aside onClick={event => event.stopPropagation()} aria-label="Configurações da Usami">
+    {bondOpen && <BondPanel intimacy={intimacy} log={bondLog} onClose={closeBond} restoreRef={bondTriggerRef}/>}
+    {panel && <div className="scrim" onClick={closeSettings}>
+      <aside
+        ref={settingsRef}
+        className="settings-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="usami-settings-title"
+        onClick={event => event.stopPropagation()}
+      >
         <div className="panel-head">
-          <div><span className="eyebrow">CONFIGURAÇÕES</span><h2>Usami</h2></div>
-          <button className="icon" onClick={() => setPanel(false)} aria-label="Fechar"><X size={20}/></button>
+          <div><span className="eyebrow">CONFIGURAÇÕES</span><h2 id="usami-settings-title">Usami</h2></div>
+          <button ref={settingsCloseRef} className="icon" onClick={closeSettings} aria-label="Fechar"><X size={20}/></button>
         </div>
-        <div className="panel-tabs" role="tablist">
-          {[['chat', 'Conversa'], ['voice', 'Voz'], ['avatar', 'Avatar'], ['memory', 'Memória'], ['personality', 'Jeito'], ['about', 'Sobre']].map(([id, label]) => <button key={id} role="tab" aria-selected={settingsTab === id} className={settingsTab === id ? 'active' : ''} onClick={() => setSettingsTab(id)}>{label}</button>)}
+        <div className="panel-tabs" role="tablist" aria-label="Seções das configurações">
+          {SETTINGS_TABS.map(([id, label], index) => (
+            <button
+              key={id}
+              id={settingsTabId(id)}
+              role="tab"
+              type="button"
+              aria-selected={settingsTab === id}
+              aria-controls={settingsPanelId(id)}
+              tabIndex={settingsTab === id ? 0 : -1}
+              className={settingsTab === id ? 'active' : ''}
+              onClick={() => { setSettingsTab(id); setDangerConfirm(null); }}
+              onKeyDown={event => {
+                const last = SETTINGS_TABS.length - 1;
+                let next = null;
+                if (event.key === 'ArrowRight') next = index === last ? 0 : index + 1;
+                else if (event.key === 'ArrowLeft') next = index === 0 ? last : index - 1;
+                else if (event.key === 'Home') next = 0;
+                else if (event.key === 'End') next = last;
+                if (next == null) return;
+                event.preventDefault();
+                setSettingsTab(SETTINGS_TABS[next][0]);
+                setDangerConfirm(null);
+                document.getElementById(settingsTabId(SETTINGS_TABS[next][0]))?.focus();
+              }}
+            >{label}</button>
+          ))}
         </div>
-        <div className="panel-content" role="tabpanel">
+        <div
+          className="panel-content"
+          role="tabpanel"
+          id={settingsPanelId(settingsTab)}
+          aria-labelledby={settingsTabId(settingsTab)}
+          tabIndex={0}
+        >
           {settingsTab === 'chat' && <div>
             <h3>Histórico da conversa</h3>
             <p>As últimas {MAX_STORED_TURNS} mensagens ficam salvas apenas neste navegador.</p>
             <div className="rig-actions">
               <button onClick={exportChat} disabled={!conversation.length}>Exportar JSON</button>
-              <button onClick={clearChat} disabled={!conversation.length}>Limpar histórico</button>
+              {dangerConfirm === 'history' ? <>
+                <button className="danger" onClick={() => { clearChat(); setDangerConfirm(null); }}>Confirmar limpeza</button>
+                <button onClick={() => setDangerConfirm(null)}>Cancelar</button>
+              </> : <button className="danger" onClick={() => setDangerConfirm('history')} disabled={!conversation.length}>Limpar histórico</button>}
             </div>
             <h3>Intimidade</h3>
             <div className="rig-actions">
-              <button onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); setBondLog([]); try { localStorage.removeItem(INTIMACY_KEY); } catch {} }}>Zerar medidores</button>
+              {dangerConfirm === 'bond' ? <>
+                <button className="danger" onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); setBondLog([]); safeRemoveItem(INTIMACY_KEY); setDangerConfirm(null); }}>Confirmar e zerar</button>
+                <button onClick={() => setDangerConfirm(null)}>Cancelar</button>
+              </> : <button className="danger" onClick={() => setDangerConfirm('bond')}>Zerar medidores</button>}
             </div>
             <p className="settings-hint">Zerar os medidores também limpa o histórico de momentos, mas não apaga a conversa.</p>
           </div>}
