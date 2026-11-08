@@ -7,7 +7,6 @@ import { smoothLevel } from './voice-phase.js';
 export function MicBadge({ phase, size = 19 }) {
   const Icon = phase.id === 'error' || phase.id === 'idle' ? MicOff : Mic;
   return <span className={'mic-badge ' + phase.id} role="status" aria-label={'Microfone: ' + phase.label} title={'Microfone: ' + phase.label}>
-    <i className="mic-pulse" aria-hidden="true" />
     <Icon size={size} />
   </span>;
 }

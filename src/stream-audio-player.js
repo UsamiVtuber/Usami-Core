@@ -84,6 +84,9 @@ export async function playPcmStream({
       result.reason = 'no-body';
       return result;
     }
+    if (audioContext.state === 'suspended' && typeof audioContext.resume === 'function') {
+      try { await audioContext.resume(); } catch {}
+    }
 
     const rate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : DEFAULT_SAMPLE_RATE;
     const quantum = Math.max(2, Math.floor(minSamplesPerBuffer) || MIN_SAMPLES_PER_BUFFER) * 2;

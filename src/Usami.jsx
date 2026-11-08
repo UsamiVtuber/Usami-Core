@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2 } from 'lucide-react';
+import { Keyboard, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2, Maximize, Minimize, RotateCcw, Image as ImageIcon, Clapperboard } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
@@ -33,6 +33,9 @@ import { createAudioRevive } from './audio-revive';
 import { deriveVoicePhase } from './voice-phase';
 import { MicBadge, VoiceBeacon } from './voice-ui';
 import { PersonalityPanel } from './PersonalityPanel';
+import BondPanel from './BondPanel';
+import { METER_KEYS, LEVELS, levelFor, meterProgress, describeChatGains, appendBondEvent, loadBondLog, saveBondLog, LEVEL_NAMES } from './bond.js';
+import { createVrmaManager, VRMA_ANIMATIONS } from './vrma-manager';
 import { classifyFacs } from './facs-classifier.js';
 import { applyFacsToDriver } from './facs-apply.js';
 import './usami.css';
@@ -79,16 +82,8 @@ function playAudioPart(audio, url) {
 
 // Intimacy meters (visual-novel style bond): XP per interaction, cumulative level thresholds, localStorage persistence.
 const INTIMACY_KEY = 'usami.intimidade.v1';
-const METER_KEYS = ['carinho', 'humor', 'companhia'];
-const LEVELS = [0, 25, 60, 110, 180];
+// METER_KEYS, LEVELS, levelFor e meterProgress moram em ./bond.js (nomes dos níveis e histórico).
 const LAUGHTER_PATTERN = /kkk|haha|rsrs|😂|🤣|risada/i;
-const levelFor = xp => LEVELS.reduce((level, threshold, index) => xp >= threshold ? index + 1 : level, 1);
-const meterProgress = xp => {
-  const level = levelFor(xp);
-  if (level >= LEVELS.length) return 1;
-  const base = LEVELS[level - 1];
-  return Math.min(1, Math.max(0, (xp - base) / (LEVELS[level] - base)));
-};
 const loadIntimacy = () => {
   try {
     const saved = JSON.parse(localStorage.getItem(INTIMACY_KEY) || 'null') || {};
@@ -123,7 +118,7 @@ function Live2DAvatar({ controller, onReport }) {
         const app = LAppDelegate.getInstance();
         app.initialize();
         app.run();
-        controller.current = { gesture: () => false, stop: () => false, reset: () => false, setExpression: () => false };
+        controller.current = { gesture: () => false, stop: () => false, reset: () => false, recenter: () => false, setExpression: () => false };
         onReport({ format: 'Live2D Cubism 3', meshes: '—', bones: 'Parâmetros 2D', triangles: '—', animations: [{ name: 'daiji (idle)', boneTracks: 0, excludedTracks: 0 }], morphs: [], expressions: Array.from({ length: 11 }, (_, index) => `expression${index + 1}`), live2d: true, customIdle: true, customWave: false, meshList: [] });
       } catch (error) {
         onReport({ error: `Não foi possível inicializar o Cubism: ${error.message}` });
@@ -144,7 +139,7 @@ function Live2DAvatar({ controller, onReport }) {
   return <div className="avatar live2d-avatar" ref={host} aria-label="Visualização Live2D da Usami" />;
 }
 
-function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures, expressionDriverRef }) {
+function Avatar({ source, sourceType, sourceName, onReport, controller, auto, blinkMode, blinkName, lastIdleActive, audioLipSync, ttsAudio, emotionEngine, vrmGestures, expressionDriverRef, busyRef, hearingRef, quietRef, speakingRef }) {
   const host = useRef(null);
   useEffect(() => {
     const element = host.current;
@@ -182,7 +177,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
     const light = new THREE.DirectionalLight(0xffebd8, 2);
     light.position.set(2, 4, 4);
     scene.add(light);
-    let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null, idlePose = null;
+    let mixer, vrm, customMotion, expressionDriver = null, disposed = false, gesture = null, sway = null, swayBase = null, idlePose = null, vrmaManager = null;
     const eyeSaccades = createEyeSaccades();
     const naturalIdle = createNaturalIdle();
     let naturalBones = null;
@@ -232,16 +227,18 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       if (vrm?.humanoid) {
         const setArm = (name, sign) => {
           const node = vrm.humanoid.getNormalizedBoneNode?.(name);
-          if (node) node.rotation.z += sign * THREE.MathUtils.degToRad(65);
+          if (node) {
+            node.rotation.z += sign * THREE.MathUtils.degToRad(70);
+            node.rotation.x += THREE.MathUtils.degToRad(3);
+          }
         };
         setArm('leftUpperArm', 1);
         setArm('rightUpperArm', -1);
-        // Postura natural de repouso: leve flexão e rotação de cotovelos (elimina o aspecto de tábua)
+        // Postura natural de repouso estilo VTuber: braços repousando elegantemente ao lado do corpo
         const setForearm = (name, sign) => {
           const node = vrm.humanoid.getNormalizedBoneNode?.(name);
           if (node) {
-            node.rotation.z += sign * THREE.MathUtils.degToRad(-14);
-            node.rotation.x += THREE.MathUtils.degToRad(8);
+            node.rotation.x += THREE.MathUtils.degToRad(6);
           }
         };
         setForearm('leftLowerArm', 1);
@@ -264,7 +261,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           return node ? { part, node, x: node.rotation.x, z: node.rotation.z } : null;
         }).filter(Boolean);
 
-        // Nós capturados para respiração corporal completa, troca de peso e head-bobbing
+        // Nós capturados para respiração corporal completa, troca de peso, braços e head-bobbing
         const getNode = name => vrm.humanoid.getNormalizedBoneNode?.(name) || null;
         naturalBones = {
           chest: getNode('chest') ? { node: getNode('chest'), base: { x: getNode('chest').rotation.x, z: getNode('chest').rotation.z } } : null,
@@ -274,6 +271,8 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           leftShoulder: getNode('leftShoulder') ? { node: getNode('leftShoulder'), base: { z: getNode('leftShoulder').rotation.z } } : null,
           rightShoulder: getNode('rightShoulder') ? { node: getNode('rightShoulder'), base: { z: getNode('rightShoulder').rotation.z } } : null,
           hips: getNode('hips') ? { node: getNode('hips'), base: { rotZ: getNode('hips').rotation.z, posX: getNode('hips').position.x } } : null,
+          leftUpperArm: getNode('leftUpperArm') ? { node: getNode('leftUpperArm'), base: { x: getNode('leftUpperArm').rotation.x, z: getNode('leftUpperArm').rotation.z } } : null,
+          rightUpperArm: getNode('rightUpperArm') ? { node: getNode('rightUpperArm'), base: { x: getNode('rightUpperArm').rotation.x, z: getNode('rightUpperArm').rotation.z } } : null,
         };
       }
       if (vrm?.humanoid) {
@@ -317,19 +316,32 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         }
       });
       mixer = new THREE.AnimationMixer(avatar);
-      // Clipe de uma ação só: ao terminar, devolve o rig à pose de repouso para
-      // o sway procedural assumir de novo (sem pose presa no último frame).
+      if (vrm) {
+        vrmaManager = createVrmaManager({
+          vrm,
+          mixer,
+          crossfadeDuration: 0.45,
+          defaultArmClearanceDeg: 30,
+          stripFingers: true,
+        });
+      }
+      // Clipe de uma ação só: ao terminar, se ainda estiver falando, retoma
+      // o padrão de fala ('talking'); caso contrário, devolve o rig à pose de repouso.
       mixer.addEventListener('finished', event => {
         if (disposed) return;
         event.action?.stop();
-        if (idlePose) {
-          for (const [node, pose] of idlePose) {
-            node.quaternion.copy(pose.rotation);
-            node.position.copy(pose.position);
-            node.scale.copy(pose.scale);
+        if (speakingRef?.current && !quietRef?.current) {
+          vrmaManager?.play('talking', { loop: true, crossfade: 0.35 });
+        } else {
+          if (idlePose) {
+            for (const [node, pose] of idlePose) {
+              node.quaternion.copy(pose.rotation);
+              node.position.copy(pose.position);
+              node.scale.copy(pose.scale);
+            }
           }
+          vrm?.humanoid?.update?.();
         }
-        vrm?.humanoid?.update?.();
       });
       const animations = (loaded.animations || []).map(clip => inspectAnimation(clip, avatar));
       const expressionNames = vrm?.expressionManager?.expressions?.map(e => e.expressionName) || [];
@@ -367,8 +379,10 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       });
       controller.current = {
         gesture(name) {
-          // Etapa 4: layer do humanoid (VRM) primeiro — wave/tilt/idle em nós
-          // normalizados; o caminho Autumn (DEF-*) segue como fallback.
+          if (vrmaManager?.isAvailable?.() && VRMA_ANIMATIONS[name]) {
+            const isLoop = name === 'talking' || name === 'speech' || name === 'idle';
+            return vrmaManager.play(name, { loop: isLoop, crossfade: 0.35 });
+          }
           if (vrmGestures.current?.gesture(name)) return true;
           if (name === 'wave') { gesture = null; mixer.stopAllAction(); return customMotion.wave(); }
           if (name === 'idle') { gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); }
@@ -387,9 +401,26 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
           return vrmGestures.current.playSequence(request) === true;
         },
         play(index) { const animation = animations[index]; if (!animation?.clip || animation.excludedTracks) return; gesture = null; customMotion.stop(); mixer.stopAllAction(); const action = mixer.clipAction(animation.clip); action.reset().setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = false; action.play(); },
-        stop() { mixer.stopAllAction(); gesture = null; customMotion.stop(); vrmGestures.current?.stopGesture(); },
-        idle() { if (vrmGestures.current?.gesture('idle')) return true; gesture = null; mixer.stopAllAction(); return customMotion.startIdle(); },
-        wave() { if (vrmGestures.current?.gesture('wave')) return true; gesture = null; mixer.stopAllAction(); return customMotion.wave(); },
+        stop() { mixer.stopAllAction(); gesture = null; customMotion.stop(); vrmGestures.current?.stopGesture(); vrmaManager?.stop(); },
+        idle() {
+          if (vrmGestures.current?.gesture('idle')) return true;
+          gesture = null;
+          mixer.stopAllAction();
+          return customMotion.startIdle();
+        },
+        wave() {
+          if (vrmGestures.current?.gesture('wave')) return true;
+          gesture = null;
+          mixer.stopAllAction();
+          return customMotion.wave();
+        },
+        playVrma(name, opts) { return vrmaManager?.play(name, opts) ?? false; },
+        stopVrma() { vrmaManager?.stop(); },
+        isVrmaActive() { return vrmaManager?.isVrmaActive() ?? false; },
+        getVrmaName() { return vrmaManager?.getCurrentName() ?? null; },
+        setArmClearanceDeg(deg) { vrmaManager?.setArmClearanceDeg(deg); },
+        getArmClearanceDeg() { return vrmaManager?.getArmClearanceDeg() ?? 14; },
+        setFilterFingers(val) { vrmaManager?.setFilterFingers(val); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
         setMorph(name, value) { this.morph(name, value); },
         setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; return expressionDriver?.set(name, weight, { ttlMs: 4000 }) ?? false; },
@@ -403,13 +434,18 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         },
         setMeshVisible(name, visible) { avatar.traverse(object => { if (object.isMesh && object.name === name) object.visible = Boolean(visible); }); },
         applyDefaultVisibility() { resolveMeshVisibility(manifest, sourceType === 'fbx' ? Object.fromEntries(manifest.meshes.map(mesh => [mesh.name, true])) : {}).forEach((visible, index) => { const meshObject = findMesh(avatar, manifest.meshes[index], manifest.meshes); if (meshObject) meshObject.visible = visible; }); },
-        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); audioLipSync.current?.clear(); }
+        recenter() { camera.position.set(0, 1.2, 4.4); camera.lookAt(0, 1.2, 0); camera.updateProjectionMatrix(); if (avatar) avatar.position.set(0, 0, 0); },
+        reset() { mixer.stopAllAction(); gesture = null; customMotion.stop(); boneList.forEach((bone, i) => bone.quaternion.copy(initialRotations[i])); morphList.forEach(item => { item.object.morphTargetInfluences[item.index] = 0; }); expressionDriver?.clear(); vrmGestures.current?.clear(); audioLipSync.current?.clear(); vrmaManager?.stop(); }
       };
+      if (typeof window !== 'undefined') {
+        window.usami = controller.current;
+      }
       manifest.customIdle = customMotion.idleAvailable || Boolean(vrmGestures.current?.available.idle);
       manifest.customWave = customMotion.waveAvailable || Boolean(vrmGestures.current?.available.wave);
       manifest.customTilt = boneList.some(bone => bone.name === 'DEF-spine006') || Boolean(vrmGestures.current?.available.tilt);
       manifest.sequences = Boolean(vrmGestures.current?.available.sequences);
-      manifest.gestures = vrmGestures.current?.gestureNames ?? [];
+      const vrmaKeys = Object.keys(VRMA_ANIMATIONS);
+      manifest.gestures = Array.from(new Set([...(vrmGestures.current?.gestureNames ?? []), ...vrmaKeys]));
       const reportPayload = { format: sourceType === 'fbx' ? 'FBX' : vrm ? 'VRM' : 'GLB / glTF', meshes, bones, customIdle: manifest.customIdle, customWave: manifest.customWave, customTilt: manifest.customTilt, sequences: manifest.sequences, boneNames: boneList.map((bone, index) => ({ name: bone.name || 'Sem nome', index })), triangles: Math.round(triangles), morphs: [...morphs], bounds: size.toArray().map(n => n.toFixed(2)).join(' × '), animations: animations.map(({ name, boneTracks, excludedTracks }) => ({ name, boneTracks, excludedTracks })), expressions: expressionNames, blink: detectedBlink !== null, blinkName: detectedBlink, gestures: manifest.gestures, meshList: manifest.meshes, manifest };
       onReport(reportPayload);
     }, undefined, () => { if (!disposed) onReport({ error: 'Não foi possível carregar o modelo. Verifique se é um GLB, VRM ou FBX válido.' }); });
@@ -427,8 +463,13 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       frame = requestAnimationFrame(draw);
       timer.update?.(timestamp);
       const delta = Math.min(timer.getDelta(), .1);
+      const isSleeping = Boolean(quietRef?.current);
       const state = auto?.current?.update?.();
-      if (state?.blink !== undefined && blinkMode?.current && blinkName?.current) {
+      if (isSleeping && blinkName?.current) {
+        // Modo dormir/zen: olhos fechados com calma
+        if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, 1);
+        else morphList.filter(item => item.name === blinkName.current).forEach(item => { item.object.morphTargetInfluences[item.index] = 1; });
+      } else if (state?.blink !== undefined && blinkMode?.current && blinkName?.current) {
         // Etapa 3: emoções de olhos fechados suprimem o blink (gate do emotion-engine).
         const blinkGate = emotionEngine?.current?.blinkMultiplier() ?? 1;
         if (blinkMode.current === 'expression') vrm?.expressionManager?.setValue(blinkName.current, state.blink * blinkGate);
@@ -440,55 +481,77 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
         if (state.idleActive) controller.current?.idle?.();
         else controller.current?.stop?.();
       }
-      // Respiração corporal completa, ombros e weight shift (estilo Neuro-sama)
-      if (naturalIdle && naturalBones) {
-        const speechLevel = audioLipSync.current?.getLevel() || 0;
-        const pose = naturalIdle.update(timestamp, {
-          speechLevel,
-          deltaSeconds: delta,
-          isThinking: busyRef.current,
-        });
-        if (naturalBones.chest) naturalBones.chest.node.rotation.x = naturalBones.chest.base.x + pose.chest.rotX;
-        if (naturalBones.leftShoulder) naturalBones.leftShoulder.node.rotation.z = naturalBones.leftShoulder.base.z + pose.shoulders.leftRotZ;
-        if (naturalBones.rightShoulder) naturalBones.rightShoulder.node.rotation.z = naturalBones.rightShoulder.base.z + pose.shoulders.rightRotZ;
-        if (naturalBones.hips) {
-          naturalBones.hips.node.rotation.z = naturalBones.hips.base.rotZ + pose.hips.rotZ;
-          naturalBones.hips.node.position.x = naturalBones.hips.base.posX + pose.hips.posX;
+      let idlePoseResult = null;
+      if (!vrmaManager?.isVrmaActive()) {
+        if (naturalIdle && naturalBones) {
+          const speechLevel = audioLipSync.current?.getLevel() || 0;
+          const isThinking = Boolean(busyRef?.current);
+          const isListening = Boolean(hearingRef?.current);
+          idlePoseResult = naturalIdle.update(timestamp, {
+            speechLevel,
+            deltaSeconds: delta,
+            isThinking,
+            isListening,
+            isSleeping,
+          });
+          if (naturalBones.chest) naturalBones.chest.node.rotation.x = naturalBones.chest.base.x + idlePoseResult.chest.rotX;
+          if (naturalBones.leftShoulder) naturalBones.leftShoulder.node.rotation.z = naturalBones.leftShoulder.base.z + idlePoseResult.shoulders.leftRotZ;
+          if (naturalBones.rightShoulder) naturalBones.rightShoulder.node.rotation.z = naturalBones.rightShoulder.base.z + idlePoseResult.shoulders.rightRotZ;
+          if (naturalBones.hips) {
+            naturalBones.hips.node.rotation.z = naturalBones.hips.base.rotZ + idlePoseResult.hips.rotZ;
+            naturalBones.hips.node.position.x = naturalBones.hips.base.posX + idlePoseResult.hips.posX;
+          }
+          if (naturalBones.spine) naturalBones.spine.node.rotation.z = naturalBones.spine.base.z + idlePoseResult.spine.rotZ;
+          if (naturalBones.neck) {
+            naturalBones.neck.node.rotation.x = naturalBones.neck.base.x + idlePoseResult.neck.rotX;
+            naturalBones.neck.node.rotation.z = naturalBones.neck.base.z + idlePoseResult.neck.rotZ;
+          }
+          // Micro-balanço orgânico dos braços no idle (apenas quando não há gesto ativo nos braços)
+          const gestureActive = vrmGestures.current?.active?.();
+          const hasArmGesture = Boolean(gestureActive?.wave || gestureActive?.gesture || gestureActive?.sequence);
+          if (!hasArmGesture && idlePoseResult.arms) {
+            if (naturalBones.leftUpperArm) {
+              naturalBones.leftUpperArm.node.rotation.z = naturalBones.leftUpperArm.base.z + idlePoseResult.arms.leftRotZ;
+              naturalBones.leftUpperArm.node.rotation.x = naturalBones.leftUpperArm.base.x + idlePoseResult.arms.leftRotX;
+            }
+            if (naturalBones.rightUpperArm) {
+              naturalBones.rightUpperArm.node.rotation.z = naturalBones.rightUpperArm.base.z + idlePoseResult.arms.rightRotZ;
+              naturalBones.rightUpperArm.node.rotation.x = naturalBones.rightUpperArm.base.x + idlePoseResult.arms.rightRotX;
+            }
+          }
+        } else if (sway && swayBase?.length) {
+          const pose = sway.update();
+          for (const base of swayBase) {
+            if (base.part === 'chest') base.node.rotation.x = base.x + (pose.breath - .5) * .05;
+            else if (base.part === 'spine') base.node.rotation.z = base.z + pose.swayX * .04;
+            else if (base.part === 'neck') base.node.rotation.z = base.z + pose.swayZ * .03;
+          }
         }
-        if (naturalBones.spine) naturalBones.spine.node.rotation.z = naturalBones.spine.base.z + pose.spine.rotZ;
-        if (naturalBones.neck) {
-          naturalBones.neck.node.rotation.x = naturalBones.neck.base.x + pose.neck.rotX;
-          naturalBones.neck.node.rotation.z = naturalBones.neck.base.z + pose.neck.rotZ;
-        }
-      } else if (sway && swayBase?.length) {
-        const pose = sway.update();
-        for (const base of swayBase) {
-          if (base.part === 'chest') base.node.rotation.x = base.x + (pose.breath - .5) * .05;
-          else if (base.part === 'spine') base.node.rotation.z = base.z + pose.swayX * .04;
-          else if (base.part === 'neck') base.node.rotation.z = base.z + pose.swayZ * .03;
+        // Etapa 4: gestos + pose emocional do humanoid, junto do sway e antes do vrm.update.
+        vrmGestures.current?.update();
+
+        // Speech-reactive head bobbing e micro-inclinação (aditivo na cabeça após vrmGestures)
+        if (idlePoseResult && naturalBones?.head) {
+          if (!vrmGestures.current) {
+            naturalBones.head.node.rotation.x = naturalBones.head.base.x + idlePoseResult.head.rotX;
+            naturalBones.head.node.rotation.y = naturalBones.head.base.y + idlePoseResult.head.rotY;
+            naturalBones.head.node.rotation.z = naturalBones.head.base.z + idlePoseResult.head.rotZ;
+          } else {
+            naturalBones.head.node.rotation.x += idlePoseResult.head.rotX;
+            naturalBones.head.node.rotation.y += idlePoseResult.head.rotY;
+            naturalBones.head.node.rotation.z += idlePoseResult.head.rotZ;
+          }
         }
       }
-      // Etapa 4: gestos + pose emocional do humanoid, junto do sway e antes do vrm.update.
-      vrmGestures.current?.update();
 
-      // Speech-reactive head bobbing e micro-inclinação (aditivo na cabeça)
-      if (naturalIdle && naturalBones?.head) {
-        const speechLevel = audioLipSync.current?.getLevel() || 0;
-        if (speechLevel > 0.04 || busyRef.current) {
-          const pose = naturalIdle.update(timestamp, { speechLevel, deltaSeconds: delta, isThinking: busyRef.current });
-          naturalBones.head.node.rotation.x += pose.head.rotX;
-          naturalBones.head.node.rotation.y += pose.head.rotY;
-          naturalBones.head.node.rotation.z += pose.head.rotZ;
-        }
-      }
-
-      // Micro-sacadas e olhar vivo autônomo (estilo Neuro-sama)
+      // Micro-sacadas e olhar vivo autônomo (estilo Neuro-sama, desligado no sono)
       if (lookTarget) {
-        const saccade = eyeSaccades ? eyeSaccades.update(delta, {
-          isThinking: busyRef.current,
+        const saccade = (eyeSaccades && !isSleeping) ? eyeSaccades.update(delta, {
+          isThinking: Boolean(busyRef?.current),
+          isListening: Boolean(hearingRef?.current),
           hasPointer: hasPointerActivity,
         }) : { x: 0, y: 0 };
-        const currentLook = hasPointerActivity ? lookDesired : new THREE.Vector3(0, 1.45, 2.5);
+        const currentLook = (hasPointerActivity && !isSleeping) ? lookDesired : new THREE.Vector3(0, 1.45, 2.5);
         const targetPos = new THREE.Vector3(
           currentLook.x + saccade.x,
           currentLook.y + saccade.y,
@@ -499,7 +562,9 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       // Etapa 5: a boca segue o áudio real — RMS contínuo do AnalyserNode com a
       // rampa 30/80 ms, sem timeline textual. Fallback gracioso embutido no layer.
       audioLipSync.current?.update();
-      mixer?.update(delta); vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera);
+      mixer?.update(delta);
+      vrmaManager?.applyPostCorrection();
+      vrm?.update(delta); customMotion?.update(delta); if (gesture) { gesture.elapsed += delta; const progress = Math.min(gesture.elapsed / 2, 1); gesture.bone.quaternion.copy(gesture.base); gesture.bone.rotateZ(Math.sin(Math.PI * progress) * .12); if (progress === 1) gesture = null; } renderer.render(scene, camera);
     };
     draw();
     return () => {
@@ -507,6 +572,7 @@ function Avatar({ source, sourceType, sourceName, onReport, controller, auto, bl
       controller.current = null;
       emotionEngine.current = null;
       if (vrmGestures) vrmGestures.current = null;
+      vrmaManager?.dispose();
       // Fecha o AudioContext e descarta o layer. O HTMLAudioElement do TTS foi
       // consumido pelo MediaElementSource deste contexto (um elemento só pode
       // ser roteado uma vez na vida), então a referência cai também — a próxima
@@ -721,7 +787,7 @@ export function Usami() {
   const [modelPath, setModelPath] = useState('');
   const [report, setReport] = useState(null);
   const [meshPrefs, setMeshPrefs] = useState({});
-  const [chat, setChat] = useState(true);
+  const [chat, setChat] = useState(false);
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
   const [conversation, setConversation] = useState(loadConversation);
@@ -741,8 +807,39 @@ export function Usami() {
   const [voiceSpeaking, setVoiceSpeaking] = useState(false);
   const [intimacy, setIntimacy] = useState(loadIntimacy);
   const [bondOpen, setBondOpen] = useState(false);
+  const [bondLog, setBondLog] = useState(loadBondLog);
+  const closeBond = useCallback(() => setBondOpen(false), []);
+  useEffect(() => { saveBondLog(bondLog); }, [bondLog]);
+  // Subida de nível vira um momento no histórico. O ref nasce com o nível
+  // carregado, então abrir a página não registra subida falsa.
+  const bondLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
+  const bondLevelRef = useRef(bondLevel);
+  useEffect(() => {
+    if (bondLevel > bondLevelRef.current) {
+      setBondLog(previous => appendBondEvent(previous, { kind: 'level', text: `Vínculo subiu para Nv.${bondLevel} · ${LEVEL_NAMES[bondLevel - 1]}`, at: Date.now() }));
+    }
+    bondLevelRef.current = bondLevel;
+  }, [bondLevel]);
   const [panel, setPanel] = useState(false);
   const [settingsTab, setSettingsTab] = useState('chat');
+  const stageRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [sceneOpen, setSceneOpen] = useState(false);
+  const [vrmaOpen, setVrmaOpen] = useState(false);
+  const [currentVrma, setCurrentVrma] = useState(null);
+  const [armClearance, setArmClearance] = useState(30);
+  const [stageBg, setStageBg] = useState(() => {
+    try { return localStorage.getItem('usami_stage_bg') || '/background.png'; } catch { return '/background.png'; }
+  });
+  const [stageBlur, setStageBlur] = useState(() => {
+    try {
+      const v = localStorage.getItem('usami_stage_blur');
+      return v !== null ? Number(v) : 3;
+    } catch { return 3; }
+  });
+  const bgFileInput = useRef(null);
+  const [bubble, setBubble] = useState(null);
+  const bubbleTimer = useRef(null);
   const fileInput = useRef(null);
   const controller = useRef(null);
   const director = useRef(null);
@@ -769,11 +866,37 @@ export function Usami() {
   const ptVoiceRef = useRef(null);
   const speakingRef = useRef(false);
   const busyRef = useRef(false);
+  const hearingRef = useRef(false);
+  const quietRef = useRef(false);
   const submitRef = useRef(null);
   const turnId = useRef(latestTurnId(conversation));
-  const recognitionSupported = typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
-  const synthesisSupported = typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function';
-  const poke = () => auto.current?.notifyActivity();
+  const recognitionSupported = typeof window !== 'undefined' && (typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function');
+  const synthesisSupported = typeof window !== 'undefined' && (typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function');
+
+  // Inatividade (10 min com 2 toques) e Modo Companion para Dormir (30 min)
+  const lastUserActivity = useRef(Date.now());
+  const prodsCount = useRef(0);
+  const [sleepCompanion, setSleepCompanion] = useState(false);
+  const sleepCompanionRef = useRef(false);
+  const sleepCompanionStart = useRef(0);
+  const [sleepCompanionMinutesLeft, setSleepCompanionMinutesLeft] = useState(30);
+
+  // Compartilhamento multimodal de mídia (OCR, frames de vídeo e áudio)
+  const [selectedMedia, setSelectedMedia] = useState(null);
+  const [mediaAnalyzing, setMediaAnalyzing] = useState(false);
+  const mediaInputRef = useRef(null);
+
+  const recordUserActivity = useCallback(() => {
+    lastUserActivity.current = Date.now();
+    if (!quietRef.current) {
+      prodsCount.current = 0;
+    }
+  }, []);
+
+  const poke = () => {
+    recordUserActivity();
+    auto.current?.notifyActivity();
+  };
   const voicePhase = deriveVoicePhase({ call, micError, listening: micListening, hearing: micHearing, busy, speaking: voiceSpeaking });
   const getVoiceLevel = useCallback(() => audioLipSync.current?.getLevel?.() ?? 0, []);
   // Audio revive: prepara e retoma o AudioContext no primeiro gesto, ao voltar
@@ -786,7 +909,89 @@ export function Usami() {
     revive.attach();
     return () => revive.detach();
   }, []);
-  useEffect(() => () => clearTimeout(hearingTimer.current), []);
+  const [uiActive, setUiActive] = useState(true);
+  const uiHideTimer = useRef(null);
+
+  const resetUiTimer = useCallback(() => {
+    setUiActive(true);
+    if (uiHideTimer.current) clearTimeout(uiHideTimer.current);
+    uiHideTimer.current = setTimeout(() => {
+      setUiActive(false);
+    }, 4500);
+  }, []);
+
+  useEffect(() => {
+    const handleActivity = () => resetUiTimer();
+    window.addEventListener('mousemove', handleActivity, { passive: true });
+    window.addEventListener('keydown', handleActivity, { passive: true });
+    window.addEventListener('touchstart', handleActivity, { passive: true });
+    resetUiTimer();
+    return () => {
+      window.removeEventListener('mousemove', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+      window.removeEventListener('touchstart', handleActivity);
+      if (uiHideTimer.current) clearTimeout(uiHideTimer.current);
+    };
+  }, [resetUiTimer]);
+  useEffect(() => () => clearTimeout(bubbleTimer.current), []);
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+  useEffect(() => {
+    quietRef.current = quiet;
+    if (quiet) {
+      controller.current?.stopVrma?.({ crossfade: 0.5 });
+    }
+  }, [quiet]);
+  const updateStageBlur = val => {
+    const clamped = Math.max(0, Math.min(24, Number(val) || 0));
+    setStageBlur(clamped);
+    try { localStorage.setItem('usami_stage_blur', String(clamped)); } catch {}
+  };
+  const updateStageBg = val => {
+    setStageBg(val);
+    try { localStorage.setItem('usami_stage_bg', val); } catch {}
+  };
+  const handleBgUpload = event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    updateStageBg(url);
+    event.target.value = '';
+  };
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        if (stageRef.current?.requestFullscreen) await stageRef.current.requestFullscreen();
+      } else {
+        if (document.exitFullscreen) await document.exitFullscreen();
+      }
+    } catch {}
+  };
+  const recenterAvatar = () => {
+    controller.current?.recenter?.();
+    controller.current?.reset?.();
+    poke();
+  };
+  const showSpeechBubble = (content, emotion = null, durationMs = null) => {
+    const clean = String(content || '')
+      .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+      .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+      .replace(/['"]\s*,\s*['"]?\s*$/, '')
+      .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
+      .replace(/\*\*|__/g, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+    if (!clean) return;
+    if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
+    setBubble({ text: clean, emotion, visible: true });
+    const ttl = durationMs || Math.min(14000, Math.max(5000, clean.length * 75));
+    bubbleTimer.current = setTimeout(() => {
+      setBubble(prev => prev ? { ...prev, visible: false } : null);
+    }, ttl);
+  };
   const addTurn = (role, content, mode = 'text') => {
     const value = String(content || '').trim();
     if (!value) return;
@@ -891,6 +1096,44 @@ export function Usami() {
   const holdFace = text => expressionDriverRef.current?.extend(pace().holdMs(String(text ?? '').length));
   const learnPace = (text, elapsedMs) => pace().observe(String(text ?? '').length, elapsedMs);
 
+  function resolveSpontaneousGesture(emotionKey, text = '') {
+    const lower = String(text || '').toLowerCase();
+    if (/^(olá|ola|oi|oie|oii|ei|hey|hello|tchau|até|ate|bye)/i.test(lower)) return 'wave';
+    if (/^(sim|claro|com certeza|concordo|exato|exatamente|pode deixar|entendi|isso mesmo)/i.test(lower)) return 'nod';
+    if (/(parabéns|parabens|arrasou|uhul|uhu|incrível|incrivel|demais|comemorar|sensacional)/i.test(lower)) return 'clap';
+    if (/(oba|yay|eita|que legal|maravilha|adoro|amei|viva)/i.test(lower)) return 'jump';
+    if (/(hmm|uhm|será|sera|pensando bem|deixa eu ver|analisando)/i.test(lower)) return 'thinking';
+    if (/(não entendi|nao entendi|como assim|ué|ue|estranho|confuso|não sei|nao sei)/i.test(lower)) return 'scratchHead';
+    if (/(fofo|fofa|bobo|obrigada|vergonha|carinho|elogio)/i.test(lower)) return 'blush';
+    if (/(que isso|não gostei|nao gostei|ei!|baka|absurdo|chata)/i.test(lower)) return 'angry';
+    if (/(nossa!|uau|meu deus|chocada|chocado|sério\?|serio\?)/i.test(lower)) return 'surprised';
+    if (/(desculp|perdão|perdao|obrigad|arigat|sinto muito|prazer)/i.test(lower)) return 'bow';
+    if (/\?/.test(lower)) return 'tilt';
+    switch (emotionKey) {
+      case 'happy':
+      case 'cheerful':
+      case 'casual_laughing':
+        return 'jump';
+      case 'shy':
+      case 'blush':
+      case 'intimate_shy':
+        return 'blush';
+      case 'confused':
+      case 'casual_thinking':
+        return 'thinking';
+      case 'serious_anger':
+      case 'casual_frustrated':
+        return 'angry';
+      case 'casual_surprised':
+        return 'surprised';
+      case 'sad':
+      case 'casual_sad':
+        return 'sad';
+      default:
+        return null;
+    }
+  }
+
   // Fila de áudio da resposta: UMA síntese por vez. O provedor de voz não
   // tolera requisições concorrentes (5 POST /api/tts em paralelo = 5×504; com
   // uma em voo todas voltam 200), então cada parte é sintetizada, exibida e
@@ -907,7 +1150,19 @@ export function Usami() {
     // que uma fila abandonada apague o "falando" da fila que a substituiu.
     const mine = ttsQueue.current + 1;
     setVoiceSpeaking(true);
-    try { await speakReplyQueue(...args); } finally { if (ttsQueue.current <= mine) setVoiceSpeaking(false); }
+    speakingRef.current = true;
+    if (!quiet) {
+      controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
+    }
+    try { await speakReplyQueue(...args); } finally {
+      if (ttsQueue.current <= mine) {
+        setVoiceSpeaking(false);
+        speakingRef.current = false;
+        if (controller.current?.getVrmaName?.() === 'talking') {
+          controller.current?.stopVrma?.();
+        }
+      }
+    }
   };
   const speakReplyQueue = async (reply, styleId = 'neutral', timedActions = [], onPart = () => {}) => {
     const rawParts = Array.isArray(reply) ? reply : parseReplyBalloons(String(reply ?? ''));
@@ -936,12 +1191,20 @@ export function Usami() {
     const runActionsAtSpeechStart = () => {
       if (actionsStarted) return;
       actionsStarted = true;
-      for (const action of timedActions) {
-        if (action?.trigger === 'end') continue;
-        const delay = Number(action?.delayMs);
-        if (Number.isFinite(delay) && delay > 0) {
-          setTimeout(() => { if (alive()) director.current?.execute([action]); }, delay);
-        } else director.current?.execute([action]);
+      if (timedActions.length > 0) {
+        for (const action of timedActions) {
+          if (action?.trigger === 'end') continue;
+          const delay = Number(action?.delayMs);
+          if (Number.isFinite(delay) && delay > 0) {
+            setTimeout(() => { if (alive()) director.current?.execute([action]); }, delay);
+          } else director.current?.execute([action]);
+        }
+      } else {
+        // Gesto espontâneo expressivo estilo VTuber (Neuro-sama)
+        const spontaneous = resolveSpontaneousGesture(parts[0]?.emotionKey, parts[0]?.display);
+        if (spontaneous) {
+          controller.current?.gesture?.(spontaneous);
+        }
       }
     };
     const runActionsAtSpeechEnd = () => {
@@ -957,6 +1220,7 @@ export function Usami() {
           applyVrmEmotion(part.emotionKey, expressionDriverRef.current);
         }
       });
+      showSpeechBubble(parts.map(p => p.display).join(' '), parts[0]?.emotionKey);
       flushTimedActions();
       return;
     }
@@ -968,7 +1232,7 @@ export function Usami() {
     const canStream = !quiet && Boolean(audioLipSync.current?.getTap?.());
     // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
     // requisição no ar — sem unhandled rejection.
-    const askTts = (text, stream, partStyle = styleId) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
+    const requestTtsOnce = (text, stream, partStyle) => fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
       .then(async response => {
         if (!response || !response.ok) return null;
         // PCM cru atrás do header de stream; qualquer outra resposta de áudio é
@@ -979,6 +1243,21 @@ export function Usami() {
         return { url: URL.createObjectURL(await response.blob()) };
       })
       .catch(() => null);
+    const askTts = async (text, stream, partStyle = styleId) => {
+      const cleanText = String(text ?? '')
+        .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+        .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+        .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+      if (!cleanText) return null;
+      const first = await requestTtsOnce(cleanText, stream, partStyle);
+      if (first || !alive()) return first;
+      // Retry único em modo WAV após pausa curta se o provedor oscilou (429/502/503/504)
+      await new Promise(resolve => setTimeout(resolve, 300));
+      if (!alive()) return null;
+      return requestTtsOnce(cleanText, false, partStyle);
+    };
     let attached = false;
     let played = false;
     // Etapa 5: a boca é dirigida pelo áudio que realmente toca — o layer se
@@ -1001,6 +1280,8 @@ export function Usami() {
               director.current?.execute([action]);
             },
           });
+        } else if (!actionsStarted) {
+          runActionsAtSpeechStart();
         }
       }
       audio.playbackRate = quiet ? .8 : 1;
@@ -1008,10 +1289,16 @@ export function Usami() {
       URL.revokeObjectURL(url);
       played = true;
     };
+    const ensureNextPending = index => {
+      if (!pending && index + 1 < parts.length && alive()) {
+        const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
+        pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
+      }
+    };
     const firstStyle = parts[0]?.emotionKey ? getVrmEmotionConfig(parts[0].emotionKey).coarse : styleId;
     let pending = askTts(parts[0].ttsText, canStream, firstStyle);
     for (let index = 0; index < parts.length; index += 1) {
-      const job = await pending;
+      let job = await pending;
       pending = null;
       // Fila superseded ou mute durante a síntese: larga o resto.
       if (!alive()) { if (job?.url) URL.revokeObjectURL(job.url); break; }
@@ -1019,6 +1306,7 @@ export function Usami() {
       // `shown` evita o segundo onPart da mesma frase.
       let shown = false;
       const partStartedAt = performance.now();
+      const partStyle = parts[index].emotionKey ? getVrmEmotionConfig(parts[index].emotionKey).coarse : styleId;
       if (job?.stream) {
         const tap = audioLipSync.current?.getTap?.() || null;
         const external = tap ? audioLipSync.current.beginExternal() : false;
@@ -1034,6 +1322,7 @@ export function Usami() {
                 if (!alive()) return;
                 shown = true;
                 onPart(parts[index].display);
+                showSpeechBubble(parts[index].display, parts[index].emotionKey);
                 runActionsAtSpeechStart();
                 if (parts[index].emotionKey && expressionDriverRef.current) {
                   applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
@@ -1041,10 +1330,7 @@ export function Usami() {
                 holdFace(parts[index].display);
               },
               onStreamEnd: () => {
-                if (!pending && index + 1 < parts.length) {
-                  const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
-                  pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
-                }
+                ensureNextPending(index);
               },
             });
           } finally {
@@ -1053,21 +1339,23 @@ export function Usami() {
         }
         if (outcome.streamed) {
           played = true;
+          ensureNextPending(index);
           learnPace(parts[index].display, performance.now() - partStartedAt);
           runActionsAtSpeechEnd();
           if (!alive()) break;
           continue;
         }
-        // Stream entregue mas mudo (Web Audio perdido no meio do turno, ou a
-        // rede caiu antes da primeira amostra): sem segunda síntese — pedir de
-        // novo custaria outro provedor inteiro. O texto ainda aparece abaixo.
+        // Se o stream falhou antes da primeira amostra de áudio, tenta recuperar em WAV
+        if (alive()) {
+          job = await requestTtsOnce(parts[index].ttsText, false, partStyle);
+        }
       }
-      if (!shown) onPart(parts[index].display);
+      if (!shown) {
+        onPart(parts[index].display);
+        showSpeechBubble(parts[index].display, parts[index].emotionKey);
+      }
+      ensureNextPending(index);
       if (!job?.url) continue;
-      if (!pending && index + 1 < parts.length) {
-        const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
-        pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
-      }
       if (parts[index].emotionKey && expressionDriverRef.current) {
         applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
       }
@@ -1079,9 +1367,15 @@ export function Usami() {
     // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
     // revoga quando resolver. revoke em URL já revogada é no-op.
     if (pending) Promise.resolve(pending).then(late => { if (late?.url) URL.revokeObjectURL(late.url); });
-    if (!played) { audioLipSync.current?.clear(); flushTimedActions(); }
+    if (!played) {
+      audioLipSync.current?.clear();
+      flushTimedActions();
+      if (alive() && synthesisSupported && !voiceOffRef.current) {
+        await speakSpoken(parts.map(p => p.display).join(' '), timedActions);
+      }
+    }
   };
-  const awardXP = gains => {
+  const awardXP = (gains, event = null) => {
     setIntimacy(previous => {
       const next = {};
       let changed = false;
@@ -1093,6 +1387,7 @@ export function Usami() {
       try { localStorage.setItem(INTIMACY_KEY, JSON.stringify(next)); } catch {}
       return next;
     });
+    if (event) setBondLog(previous => appendBondEvent(previous, { ...event, at: Date.now(), gains }));
   };
   const gainsFor = (content, duringCall) => {
     const gains = { carinho: 1 };
@@ -1100,9 +1395,10 @@ export function Usami() {
     if (content.length > 120 || duringCall) gains.companhia = 2;
     return gains;
   };
-  const speakSpoken = (reply, timedActions = []) => {
+  const speakSpoken = (reply, timedActions = []) => new Promise(resolve => {
+    showSpeechBubble(reply);
     // Mute: skip browser synthesis too — the caller keeps animating the lips.
-    if (!synthesisSupported || voiceOffRef.current) return;
+    if (!synthesisSupported || voiceOffRef.current) { resolve(); return; }
     const synthesis = window.speechSynthesis;
     try { synthesis.cancel(); } catch {}
     const utterance = new SpeechSynthesisUtterance(String(reply || '').slice(0, 400));
@@ -1112,6 +1408,14 @@ export function Usami() {
     if (voice) utterance.voice = voice;
     utterance.rate = quiet ? .8 : .98;
     utterance.pitch = quiet ? .95 : 1;
+    let settled = false;
+    const safetyTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      speakingRef.current = false;
+      setVoiceSpeaking(false);
+      resolve();
+    }, 15000);
     utterance.onstart = () => {
       speakingRef.current = true;
       setVoiceSpeaking(true);
@@ -1126,16 +1430,23 @@ export function Usami() {
         }
       }
     };
-    const releaseMic = () => { speakingRef.current = false; setVoiceSpeaking(false); };
+    const releaseMic = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(safetyTimer);
+      speakingRef.current = false;
+      setVoiceSpeaking(false);
+      resolve();
+    };
     utterance.onend = () => {
-      releaseMic();
       for (const action of timedActions ?? []) {
         if (action?.trigger === 'end') director.current?.execute([action]);
       }
+      releaseMic();
     };
     utterance.onerror = releaseMic;
-    synthesis.speak(utterance);
-  };
+    try { synthesis.speak(utterance); } catch { releaseMic(); }
+  });
   const endCall = reason => {
     if (!callActiveRef.current) return;
     callActiveRef.current = false;
@@ -1143,16 +1454,18 @@ export function Usami() {
     recognitionRef.current = null;
     try { recognition?.abort(); } catch {}
     if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
+    if (ttsAudio.current) { try { ttsAudio.current.pause(); } catch {} }
+    audioLipSync.current?.clear();
     speakingRef.current = false;
     clearTimeout(hearingTimer.current);
     setMicListening(false);
     setMicHearing(false);
+    hearingRef.current = false;
     setMicError(false);
     setVoiceSpeaking(false);
     const minutes = Math.max(0, Math.floor((Date.now() - callStartRef.current) / 60000));
-    if (minutes > 0) awardXP({ companhia: minutes });
+    if (minutes > 0) awardXP({ companhia: minutes }, { kind: 'call', text: `Chamada de voz · ${minutes} min` });
     setCall(false);
-    setChat(true);
     setMessage(reason || 'Chamada encerrada.');
   };
   const startCall = () => {
@@ -1169,8 +1482,13 @@ export function Usami() {
       // Qualquer resultado (inclusive parcial) acende o "te ouvindo"; apaga
       // sozinho se a fala parar, sem depender do evento final.
       setMicHearing(true);
+      hearingRef.current = true;
+      controller.current?.gesture?.('tilt');
       clearTimeout(hearingTimer.current);
-      hearingTimer.current = setTimeout(() => setMicHearing(false), 1200);
+      hearingTimer.current = setTimeout(() => {
+        setMicHearing(false);
+        hearingRef.current = false;
+      }, 1200);
       let final = '';
       for (let index = event.resultIndex; index < event.results.length; index++) if (event.results[index].isFinal) final += event.results[index][0].transcript;
       const heard = final.trim();
@@ -1182,7 +1500,19 @@ export function Usami() {
       else if (event.error === 'audio-capture') endCall('Nenhum microfone encontrado.');
       else if (event.error === 'network') endCall('Falha de rede no reconhecimento de voz.');
     };
-    recognition.onend = () => { setMicListening(false); if (callActiveRef.current) { try { recognition.start(); } catch { endCall(); } } };
+    recognition.onend = () => {
+      setMicListening(false);
+      if (callActiveRef.current) {
+        try {
+          recognition.start();
+        } catch {
+          setTimeout(() => {
+            if (!callActiveRef.current) return;
+            try { recognition.start(); } catch { endCall(); }
+          }, 250);
+        }
+      }
+    };
     recognitionRef.current = recognition;
     try { recognition.start(); } catch { setMessage('Não foi possível iniciar o microfone.'); return; }
     callActiveRef.current = true;
@@ -1190,6 +1520,24 @@ export function Usami() {
     setCallSeconds(0);
     setChat(false);
     setCall(true);
+
+    // Reação imediata de atendimento: aceno amigável da Usami
+    if (vrmGestures.current?.gesture('wave')) poke();
+    else if (controller.current?.wave?.()) poke();
+
+    // Saudação de atendimento calorosa na voz oficial da Usami
+    const CALL_GREETINGS = [
+      'Alô? Oi! Pode falar, tô te ouvindo!',
+      'Oi! Que bom que você ligou! Como você tá?',
+      'Alô, alô! Tô aqui com você, o que manda?',
+      'Oi! Pronto, pode falar que tô na escuta!'
+    ];
+    const greeting = CALL_GREETINGS[Math.floor(Math.random() * CALL_GREETINGS.length)];
+    const balloons = [{ display: greeting, ttsText: greeting, emotionKey: 'happy', speechTags: [] }];
+    holdFace(greeting);
+    speakReply(balloons, 'cheerful', [], part => addTurn('assistant', part, 'voice'));
+    setMessage(greeting);
+    showSpeechBubble(greeting, 'alegre');
   };
   // Frente 2: particiona actions em imediatas (executar agora) e timed
   // (disparar durante a fala via delayMs ou trigger 'start'/'middle'/'end').
@@ -1206,24 +1554,55 @@ export function Usami() {
   const submitMessage = async (content, { spoken = false } = {}) => {
     const value = String(content || '').trim();
     if (!value || busyRef.current) return;
+    if (!spoken) setText('');
     busyRef.current = true;
     setBusy(true);
+
+    const wasSleeping = Boolean(quietRef.current);
+    const inSleepCompanion = Boolean(sleepCompanionRef.current);
+    recordUserActivity();
+
+    if (wasSleeping && !inSleepCompanion) {
+      // Acorda imediatamente do sono com sobressalto e susto!
+      setQuiet(false);
+      quietRef.current = false;
+      controller.current?.playVrma?.('surprised', { loop: false, crossfade: 0.1 });
+      expressionDriverRef.current?.set('20-prefab_startled', 1, { ttlMs: 3500 });
+    } else if (inSleepCompanion) {
+      // Interrompeu o modo de dormir: bronca brava de tsundere!
+      controller.current?.playVrma?.('angry', { loop: false, crossfade: 0.25 });
+      expressionDriverRef.current?.set('07-prefab_angry01', 0.9, { ttlMs: 4000 });
+    } else {
+      // Reação de escuta ativa / reflexão imediata (Neuro-sama style)
+      vrmGestures.current?.gesture('tilt');
+    }
+
     addTurn('user', value, spoken ? 'voice' : 'text');
     // Frente 3: classifica a frase do usuário em AUs FACS e aplica ao
     // expression-driver do Shiro enquanto o LLM processa (paralelo).
     const facs = classifyFacs(value);
     if (facs.aus.length > 0 && expressionDriverRef.current) {
       applyFacsToDriver(facs.aus, facs.intensity, expressionDriverRef.current, { ttlMs: 4000 });
-    } else {
+    } else if (!wasSleeping && !inSleepCompanion) {
       expressionDriverRef.current?.set('19-prefab_doubt', 0.40, { ttlMs: 3500 });
     }
-    // Reação de escuta ativa / reflexão imediata (Neuro-sama style)
-    vrmGestures.current?.gesture('tilt');
-    awardXP(gainsFor(value, spoken));
+    {
+      const gains = gainsFor(value, spoken);
+      awardXP(gains, describeChatGains(gains, { spoken }));
+    }
     setMessage('Usami está pensando…');
     try {
       const manifest = report?.manifest ? { ...report.manifest, customIdle: report.customIdle !== false, customWave: report.customWave !== false, customTilt: report.customTilt !== false } : null;
-      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: value, capabilities: manifest ? summarizeCapabilities(manifest) : undefined }) });
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: value,
+          capabilities: manifest ? summarizeCapabilities(manifest) : undefined,
+          wakeUpJolt: wasSleeping && !inSleepCompanion,
+          sleepCompanionActive: inSleepCompanion,
+        })
+      });
       let data = null;
       try { data = await response.json(); } catch { throw new Error('Resposta inválida do servidor.'); }
       if (!response.ok) throw new Error(data?.error || 'Falha na conversa.');
@@ -1235,6 +1614,9 @@ export function Usami() {
       // confiança, a pose vigente decai sozinha até neutral — nada a fazer aqui.
       if (resolved.applied && resolved.emotion) vrmGestures.current?.setEmotion(resolved.emotion.label, resolved.emotion.intensity, 4500);
       const [immediateActions, timedActions] = partitionByTiming(resolved.actions);
+      if (data.gesture && data.gesture !== 'neutral' && !immediateActions.some(a => a?.type === 'gesture') && !timedActions.some(a => a?.type === 'gesture')) {
+        immediateActions.push({ type: 'gesture', name: data.gesture });
+      }
       const results = director.current?.execute(immediateActions)?.results || [];
       // A expressão do turno nasce com prazo proporcional à resposta inteira: a
       // síntese do primeiro balão pode levar mais que o TTL padrão, e o rosto
@@ -1246,13 +1628,7 @@ export function Usami() {
       // Respostas longas viram vários balões (~60 chars, máx 5, sem perder
       // texto) com tags de emoção e SFX fatiados pelo parser do OpenAmika V2.
       let effectiveReply = data.reply;
-      if (data.surface?.mode === 'say+think' && data.surface?.reply) {
-        const blurt = String(data.surface.reply).trim();
-        if (blurt && !effectiveReply.toLowerCase().includes(blurt.toLowerCase())) {
-          const toneTag = data.surface.tone ? `[${data.surface.tone}]` : '';
-          effectiveReply = `${toneTag} ${blurt}. ${effectiveReply}`.trim();
-        }
-      }
+
 
       const parsedBalloons = parseReplyBalloons(effectiveReply);
       const balloons = parsedBalloons.length
@@ -1265,21 +1641,15 @@ export function Usami() {
         last.ttsText = `${last.ttsText} ${speechTags.map(t => `<${t}>`).join(' ')}`;
       }
       const fullCleanText = balloons.map(b => b.display).join(' ');
-      if (spoken) {
-        // Call mode: speechSynthesis não passa pelo Web Audio (não existe
-        // HTMLAudioElement) nem pela fila de partes — timing via
-        // utterance.onend / setTimeout e balões exibidos de uma vez. Tags de
-        // som não se aplicam aqui; a fala sintetizada é só o texto exibido.
-        speakSpoken(fullCleanText, timedActions);
-        balloons.forEach(part => addTurn('assistant', part.display, 'voice'));
-      } else {
-        // Cada balão é exibido por speakReply no instante em que a fala dele
-        // toca: mensagem → áudio → mensagem → áudio, um atrás do outro.
-        const defaultStyle = resolved.emotion?.label || styleIdForActions(resolved.actions);
-        speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
-      }
+      // Voz oficial da Usami (Gemini TTS) com lip-sync e expressões tanto em texto quanto em chamada
+      const defaultStyle = resolved.emotion?.label || styleIdForActions(resolved.actions);
+      speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), spoken ? 'voice' : 'text'));
       setMessage(fullCleanText + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
-    } catch (error) { setMessage(error.message || 'Não foi possível conversar.'); }
+    } catch (error) {
+      const errMsg = error.message || 'Não foi possível conversar.';
+      setMessage(errMsg);
+      showSpeechBubble(errMsg);
+    }
     finally {
       busyRef.current = false;
       setBusy(false);
@@ -1326,6 +1696,7 @@ export function Usami() {
                 holdFace(effectiveReply);
                 speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), 'text'));
                 setMessage(fullCleanText);
+                showSpeechBubble(fullCleanText, cmd.emotion);
               }
             } else if (cmd.type === 'gesture') {
               ctrl.gesture(cmd.name);
@@ -1351,7 +1722,242 @@ export function Usami() {
     return () => clearInterval(timer);
   }, [controller]);
 
-  const sendMessage = event => { event.preventDefault(); submitMessage(text); };
+  const toggleSleepCompanion = () => {
+    if (sleepCompanionRef.current) {
+      sleepCompanionRef.current = false;
+      setSleepCompanion(false);
+      setQuiet(false);
+      quietRef.current = false;
+      recordUserActivity();
+      const msg = "Prontinho, desativei o modo dormir! Ainda quer conversar?";
+      const balloons = [{ display: msg, ttsText: msg, emotionKey: 'casual_happy', speechTags: [] }];
+      controller.current?.playVrma?.('nod', { loop: false, crossfade: 0.3 });
+      speakReply(balloons, 'cheerful', [], part => addTurn('assistant', part, 'text'));
+      showSpeechBubble(msg, 'feliz');
+      return;
+    }
+
+    sleepCompanionRef.current = true;
+    setSleepCompanion(true);
+    sleepCompanionStart.current = Date.now();
+    setSleepCompanionMinutesLeft(30);
+    setQuiet(true);
+    quietRef.current = true;
+
+    const openingMsg = "[whisper_caring] Tá na hora de descansar... pode fechar os olhos. Eu vou ficar aqui com você pelos próximos 30 minutos até você pegar no sono... não precisa se preocupar com nada agora.";
+    const displayMsg = "Tá na hora de descansar... pode fechar os olhos. Eu vou ficar aqui com você pelos próximos 30 minutos até você pegar no sono... não precisa se preocupar com nada agora.";
+    const balloons = [{ display: displayMsg, ttsText: openingMsg, emotionKey: 'whisper_caring', speechTags: [] }];
+    speakReply(balloons, 'whisper', [], part => addTurn('assistant', part, 'text'));
+    setMessage(displayMsg);
+    showSpeechBubble(displayMsg, 'sussurrando');
+  };
+
+  // Monitoramento de inatividade (10 min com 2 toques) e companion de sono (30 min)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // 1. Companion de Sono (30 minutos)
+      if (sleepCompanionRef.current) {
+        const elapsed = Date.now() - sleepCompanionStart.current;
+        const totalMs = 30 * 60 * 1000;
+        const remainingMinutes = Math.max(0, Math.ceil((totalMs - elapsed) / 60000));
+        setSleepCompanionMinutesLeft(remainingMinutes);
+
+        // Ao completar 30 minutos
+        if (elapsed >= totalMs) {
+          sleepCompanionRef.current = false;
+          setSleepCompanion(false);
+          setQuiet(true);
+          quietRef.current = true;
+          const endMsg = "[whisper_caring] Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
+          const endDisplay = "Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
+          const balloons = [{ display: endDisplay, ttsText: endMsg, emotionKey: 'whisper_caring', speechTags: [] }];
+          speakReply(balloons, 'whisper', [], part => addTurn('assistant', part, 'text'));
+          setMessage(endDisplay);
+          showSpeechBubble(endDisplay, 'dormindo');
+        }
+        return;
+      }
+
+      // 2. Inatividade normal (10 minutos para adormecer)
+      if (busyRef.current || speakingRef.current || callActiveRef.current || quietRef.current) {
+        return;
+      }
+
+      const idleMs = Date.now() - lastUserActivity.current;
+
+      // Toque 1: ~3.5 minutos (210.000 ms)
+      if (idleMs >= 210000 && prodsCount.current === 0) {
+        prodsCount.current = 1;
+        const msg = "Ei... ainda tá acordado? Não vai me deixar aqui falando sozinha, vai?";
+        const balloons = [{ display: msg, ttsText: msg, emotionKey: 'confused', speechTags: [] }];
+        controller.current?.gesture?.('tilt');
+        speakReply(balloons, 'neutral', [], part => addTurn('assistant', part, 'text'));
+        setMessage(msg);
+        showSpeechBubble(msg, 'curiosa');
+      }
+      // Toque 2: ~7 minutos (420.000 ms)
+      else if (idleMs >= 420000 && prodsCount.current === 1) {
+        prodsCount.current = 2;
+        const msg = "Hmm... você tá aí ainda? Parece que alguém pegou no sono... Dá um sinal, senão eu vou acabar dormindo também...";
+        const balloons = [{ display: msg, ttsText: msg, emotionKey: 'shy', speechTags: [] }];
+        controller.current?.gesture?.('scratchHead');
+        speakReply(balloons, 'soft', [], part => addTurn('assistant', part, 'text'));
+        setMessage(msg);
+        showSpeechBubble(msg, 'sonolenta');
+      }
+      // Adormecer aos 10 minutos (600.000 ms)
+      else if (idleMs >= 600000 && prodsCount.current === 2) {
+        prodsCount.current = 3;
+        const msg = "[whisper_caring] Acho que você dormiu mesmo... boa noite então... <sigh>";
+        const display = "Acho que você dormiu mesmo... boa noite então...";
+        const balloons = [{ display, ttsText: msg, emotionKey: 'whisper_sleepy', speechTags: ['sigh'] }];
+        speakReply(balloons, 'whisper', [], part => addTurn('assistant', part, 'text')).then(() => {
+          setQuiet(true);
+          quietRef.current = true;
+        });
+        setMessage(display);
+        showSpeechBubble(display, 'dormindo');
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleMediaSelect = event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(file.name);
+    const previewUrl = URL.createObjectURL(file);
+    setSelectedMedia({
+      file,
+      name: file.name,
+      size: file.size,
+      type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+      previewUrl,
+      isVideo,
+    });
+    event.target.value = '';
+  };
+
+  const submitMediaMessage = async (media, userText) => {
+    recordUserActivity();
+    poke();
+    setBusy(true);
+    busyRef.current = true;
+    setMediaAnalyzing(true);
+
+    const isVideo = media.isVideo;
+    const mediaPrompt = userText || (isVideo ? 'Dá uma olhada nesse vídeo que eu compartilhei!' : 'Dá uma olhada nessa imagem que eu compartilhei!');
+
+    addTurn('user', `[${isVideo ? 'Vídeo 🎬' : 'Imagem 🖼️'}: ${media.name}] ${userText}`.trim(), 'text');
+
+    // 1. Fala reativa imediata da Usami enquanto processa ("Assistindo / olhando...")
+    const immediatePhrases = isVideo
+      ? [
+          'Peraí, deixa eu dar uma olhada nesse vídeo com atenção... tô assistindo aqui!',
+          'Ué, um vídeo? Pera aí que eu tô prestando atenção na tela e no áudio...',
+          'Calma aí, tô vendo o vídeo! Deixa eu assistir direitinho o que tão mostrando e falando...',
+        ]
+      : [
+          'Hmm? Deixa eu ver essa imagem de perto... analisando os detalhes e os textos!',
+          'O que você mandou aí? Peraí que eu tô olhando e lendo com calma...',
+          'Deixa eu examinar essa imagem com atenção... já te digo o que achei!',
+        ];
+    const immediateText = immediatePhrases[Math.floor(Math.random() * immediatePhrases.length)];
+
+    controller.current?.setExpression?.('19-prefab_doubt', 1);
+    controller.current?.gesture?.('thinking');
+    showSpeechBubble(immediateText, isVideo ? 'assistindo vídeo' : 'vendo imagem', 8000);
+    setMessage(immediateText);
+
+    const immediateBalloons = [{ display: immediateText, ttsText: immediateText, emotionKey: 'curious', speechTags: [] }];
+    speakReply(immediateBalloons, 'curious', [], part => addTurn('assistant', part, 'text'));
+
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = reader.result;
+          const b64 = typeof res === 'string' ? res.split(',')[1] : '';
+          resolve(b64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(media.file);
+      });
+
+      const response = await fetch('/api/media/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mimeType: media.type,
+          data: base64,
+          filename: media.name,
+          prompt: mediaPrompt,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || data?.reply || 'Falha ao analisar a mídia.');
+      }
+
+      if (Array.isArray(data.actions) && data.actions.length) {
+        const [immediateActions] = partitionByTiming(data.actions);
+        director.current?.execute(immediateActions);
+      }
+      if (data.gesture) {
+        controller.current?.gesture?.(data.gesture);
+      }
+
+      const replyText = data.reply || 'Terminei de ver!';
+      const parsedBalloons = parseReplyBalloons(replyText);
+      const balloons = parsedBalloons.length
+        ? parsedBalloons
+        : [{ display: replyText, ttsText: replyText, emotionKey: null, speechTags: [] }];
+
+      let detailSummary = '';
+      if (Array.isArray(data.ocr) && data.ocr.length) {
+        detailSummary += `\n[🔍 OCR detectado: ${data.ocr.join(' | ')}]`;
+      }
+      if (data.transcript) {
+        detailSummary += `\n[🎙️ Áudio: ${data.transcript}]`;
+      }
+
+      const fullCleanText = balloons.map(b => b.display).join(' ');
+      showSpeechBubble(fullCleanText, 'comentando mídia');
+      setMessage(fullCleanText);
+
+      await speakReply(balloons, 'neutral', [], part => addTurn('assistant', part + (part === balloons[balloons.length - 1].display ? detailSummary : ''), 'text'));
+    } catch (err) {
+      const errMsg = `Hmph... deu um erro ao tentar ver esse arquivo: ${err.message}`;
+      showSpeechBubble(errMsg, 'confusa');
+      setMessage(errMsg);
+      addTurn('assistant', errMsg, 'text');
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      setMediaAnalyzing(false);
+    }
+  };
+
+  const sendMessage = async event => {
+    event.preventDefault();
+    if (busyRef.current) return;
+
+    if (selectedMedia) {
+      const mediaToSend = selectedMedia;
+      const userText = text.trim();
+      setText('');
+      setSelectedMedia(null);
+      await submitMediaMessage(mediaToSend, userText);
+      return;
+    }
+
+    const toSend = text.trim();
+    if (!toSend) return;
+    setText('');
+    submitMessage(toSend);
+  };
   const meshList = report?.meshList || [];
   const topLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
   const defaultVisible = mesh => sourceType === 'fbx' ? true : mesh.skinned;
@@ -1370,12 +1976,139 @@ export function Usami() {
     setMeshPrefs({});
     controller.current?.applyDefaultVisibility();
   };
-  return <main className={'stage ' + (call ? 'voice-mode' : 'text-mode') + (quiet ? ' companion' : '') + (chat ? ' history-open' : '')}>
-    <div className="backdrop" />
+  return <main ref={stageRef} className={'stage ' + (call ? 'voice-mode' : 'text-mode') + (quiet ? ' companion' : '') + (chat ? ' history-open' : '') + (!uiActive && !chat && !panel && !vrmaOpen && !bondOpen && !selectedMedia ? ' ui-idle' : '')}>
+    <div className="backdrop" style={{ backgroundImage: `url("${stageBg}")`, filter: `saturate(.88) brightness(.72) blur(${stageBlur}px)` }} />
     {sourceType === 'live2d'
       ? <Live2DAvatar controller={controller} onReport={reportModel} />
-      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} />}
-    <header><div className="header-actions"><button className="icon" onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat}><MessagesSquare size={19}/></button><button className="icon" onClick={() => setPanel(true)} aria-label="Configurações e modelo"><Settings size={19}/></button></div><span className={'status' + (call ? ' calling' : '')}><i />{call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}</span><div className="corner"><div className="bond"><button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-label="Medidores de intimidade">♥ Nível {topLevel}</button>{bondOpen && <div className="bond-bars"><BondMeters intimacy={intimacy}/></div>}</div><span className="credit">白ー (shiro) — Model by Sweet_nya555</span></div></header>
+      : <Avatar source={source} sourceType={sourceType} sourceName={sourceName} onReport={reportModel} controller={controller} auto={auto} blinkMode={blinkMode} blinkName={blinkName} lastIdleActive={lastIdleActive} audioLipSync={audioLipSync} ttsAudio={ttsAudio} emotionEngine={emotionEngine} vrmGestures={vrmGestures} expressionDriverRef={expressionDriverRef} busyRef={busyRef} hearingRef={hearingRef} quietRef={quietRef} speakingRef={speakingRef} />}
+    {bubble && (
+      <div
+        className={`bubble her ${bubble.visible ? 'show in' : 'show'}`}
+        onClick={() => setBubble(null)}
+        role="status"
+        aria-live="polite"
+        title="Clique para dispensar"
+      >
+        <div className="who">
+          <span className="who-name">Usami</span>
+          {bubble.emotion && <span className="who-emo">· {bubble.emotion}</span>}
+        </div>
+        <div className="text">{bubble.text}</div>
+      </div>
+    )}
+    <header>
+      <div className="header-actions">
+        <button className={'icon' + (chat ? ' on' : '')} onClick={() => setChat(open => !open)} aria-label={chat ? 'Ocultar conversa' : 'Mostrar conversa'} aria-expanded={chat} title="Conversa"><MessagesSquare size={19}/></button>
+        <button className={'icon' + (panel ? ' on' : '')} onClick={() => setPanel(true)} aria-label="Configurações e modelo" title="Configurações"><Settings size={19}/></button>
+        <button className="icon" onClick={recenterAvatar} aria-label="Recentralizar avatar e pose" title="Recentralizar avatar e pose"><RotateCcw size={18}/></button>
+      </div>
+      <span className={'status stage-status' + (call ? ' calling' : '') + (busy ? ' thinking' : '')}>
+        <i className="status-dot" />
+        {call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}
+      </span>
+      <div className="corner">
+        <div className="corner-actions">
+          <button className={'icon' + (vrmaOpen ? ' on' : '')} onClick={e => { e.stopPropagation(); setVrmaOpen(o => !o); }} title="Testador de Animações VRMA" aria-label="Testador de Animações VRMA"><Clapperboard size={18}/></button>
+          {vrmaOpen && (
+            <div className="vrma-tester-panel" onClick={e => e.stopPropagation()}>
+              <div className="vrma-tester-header">
+                <span className="vrma-tester-title">🎬 Animações VRMA</span>
+                <span className="vrma-current-badge">{currentVrma ? `▶ ${currentVrma}` : 'Idle Natural'}</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--muted)' }}>
+                  <span>Abertura das Mangas</span>
+                  <b>{armClearance}°</b>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="30"
+                  step="1"
+                  value={armClearance}
+                  onChange={e => {
+                    const val = Number(e.target.value);
+                    setArmClearance(val);
+                    controller.current?.setArmClearanceDeg?.(val);
+                  }}
+                  style={{ width: '100%', accentColor: 'var(--primary)' }}
+                />
+              </div>
+              <div className="vrma-grid">
+                <button
+                  className={'vrma-btn' + (sleepCompanion ? ' active' : '')}
+                  onClick={() => {
+                    toggleSleepCompanion();
+                    poke();
+                  }}
+                  style={{ gridColumn: 'span 2', fontWeight: 600, background: sleepCompanion ? 'rgba(127, 90, 240, 0.4)' : undefined }}
+                >
+                  {sleepCompanion ? `🌙 Encerrar Companion de Sono (${sleepCompanionMinutesLeft}m restantes)` : '🌙 Iniciar Companion p/ Dormir (30 min sussurrado)'}
+                </button>
+                <button
+                  className={'vrma-btn' + (quiet && !sleepCompanion ? ' active' : '')}
+                  onClick={() => {
+                    if (sleepCompanion) {
+                      sleepCompanionRef.current = false;
+                      setSleepCompanion(false);
+                    }
+                    setQuiet(q => !q);
+                    poke();
+                  }}
+                  style={{ gridColumn: 'span 2', fontSize: '11px', opacity: 0.85 }}
+                >
+                  {quiet && !sleepCompanion ? '💤 Acordar Avatar (Voltar ao Idle)' : '💤 Dormir Agora (Zen Instantâneo)'}
+                </button>
+                {[
+                  ['talking', 'Falando (Conversa)', true],
+                  ['idle', 'Novo Idle Suave', true],
+                  ['nod', 'Afirmar com Cabeça', false],
+                  ['scratchHead', 'Coçar Cabeça (Dúvida)', false],
+                  ['thinking', 'Pensar', true],
+                  ['lookAround', 'Olhar em volta', true],
+                  ['wave', 'Acenar', false],
+                  ['clap', 'Palmas', true],
+                  ['blush', 'Tímida', false],
+                  ['angry', 'Brava', false],
+                  ['surprised', 'Surpresa', false],
+                  ['sad', 'Triste', false],
+                  ['jump', 'Pulo de Alegria', false],
+                  ['idleOriginal', 'Idle Original', true],
+                ].map(([id, label, loop]) => (
+                  <button
+                    key={id}
+                    className={'vrma-btn' + (currentVrma === id ? ' active' : '')}
+                    onClick={() => {
+                      if (quiet) setQuiet(false);
+                      setCurrentVrma(id);
+                      controller.current?.playVrma?.(id, { loop, crossfade: 0.4 });
+                      poke();
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <button
+                  className="vrma-btn stop"
+                  onClick={() => {
+                    setCurrentVrma(null);
+                    controller.current?.stopVrma?.();
+                    if (quiet) setQuiet(false);
+                    poke();
+                  }}
+                >
+                  ⏹ Parar (Voltar ao Idle Natural)
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="bond">
+          <button className="bond-pill" onClick={() => setBondOpen(open => !open)} aria-expanded={bondOpen} aria-haspopup="dialog" aria-label="Vínculo com a Usami">♥ Nível {topLevel}</button>
+        </div>
+        <span className="credit">白ー (shiro) — Model by Sweet_nya555</span>
+      </div>
+    </header>
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><div className="chat-history-actions"><button onClick={exportChat} disabled={!conversation.length} aria-label="Exportar histórico" title="Exportar histórico"><Download size={14}/></button><button onClick={clearChat} disabled={!conversation.length} aria-label="Limpar histórico" title="Limpar histórico"><Trash2 size={15}/></button><button onClick={() => setChat(false)} aria-label="Ocultar histórico"><X size={15}/></button></div></div>
       <div className="chat-scroll">
@@ -1383,26 +2116,57 @@ export function Usami() {
         {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
       </div>
     </section>}
-    {call && <VoiceBeacon phase={voicePhase} getLevel={getVoiceLevel} />}
     <div className="controls">
       {call && message && <p className="voice-caption" role="status">{message}</p>}
       <div className="privacy-note">Mensagens usam os provedores configurados para responder.</div>
+      {selectedMedia && (
+        <div className="media-preview-bar">
+          <div className="media-preview-info">
+            {selectedMedia.isVideo ? <Clapperboard size={16} className="media-preview-icon" /> : <ImageIcon size={16} className="media-preview-icon" />}
+            <span className="media-preview-name">{selectedMedia.name}</span>
+            <span className="media-preview-type">{selectedMedia.isVideo ? 'Vídeo' : 'Imagem'}</span>
+          </div>
+          <button type="button" className="media-preview-remove" onClick={() => setSelectedMedia(null)} aria-label="Remover mídia"><X size={14}/></button>
+        </div>
+      )}
       <form className="composer" onSubmit={sendMessage}>
-        <button className="composer-tool" type="button" disabled title="Envio de imagem em breve" aria-label="Enviar imagem indisponível"><ImagePlus size={18}/></button>
-        <input value={text} onChange={event => setText(event.target.value)} placeholder={call ? 'Escreva enquanto fala...' : 'Diga alguma coisa...'} aria-label="Mensagem" maxLength={2000} />
-        {!call && <button className="composer-call" type="button" onClick={startCall} disabled={!recognitionSupported} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador.' : 'Iniciar chamada de voz'} aria-label="Iniciar chamada de voz"><Phone size={18}/></button>}
-        {!call && <button className="composer-call" type="button" onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={18}/>:<Volume2 size={18}/>}</button>}
-        <button className="composer-send" aria-label="Enviar mensagem" type="submit" disabled={busy || !text.trim()}><Send size={18}/></button>
+        <input
+          type="file"
+          ref={mediaInputRef}
+          style={{ display: 'none' }}
+          accept="image/*,video/*"
+          onChange={handleMediaSelect}
+        />
+        <button
+          className={'composer-tool' + (selectedMedia ? ' active' : '')}
+          type="button"
+          onClick={() => mediaInputRef.current?.click()}
+          title={selectedMedia ? `Mídia selecionada: ${selectedMedia.name} (clique para trocar)` : 'Compartilhar imagem ou vídeo com a Usami'}
+          aria-label="Compartilhar imagem ou vídeo"
+        >
+          <ImagePlus size={18}/>
+        </button>
+        <input
+          value={text}
+          onChange={event => setText(event.target.value)}
+          placeholder={selectedMedia ? (selectedMedia.isVideo ? 'Diga algo sobre o vídeo (ou envie direto)...' : 'Diga algo sobre a imagem (ou envie direto)...') : call ? 'Escreva enquanto fala...' : 'Diga alguma coisa...'}
+          aria-label="Mensagem"
+          maxLength={2000}
+        />
+        {!call && <button className={'composer-call' + (call ? ' active' : '')} type="button" onClick={startCall} disabled={!recognitionSupported} title={!recognitionSupported ? 'Reconhecimento de voz indisponível neste navegador.' : 'Iniciar chamada de voz'} aria-label="Iniciar chamada de voz"><Phone size={18}/></button>}
+        {!call && <button className={'composer-call' + (voiceOff ? ' off' : '')} type="button" onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={18}/>:<Volume2 size={18}/>}</button>}
+        {!call && <button className={'composer-call' + (sleepCompanion ? ' active' : quiet ? ' on' : '')} type="button" onClick={toggleSleepCompanion} aria-label="Companion de Sono (30 min)" title={sleepCompanion ? `Modo Dormir Ativo (${sleepCompanionMinutesLeft}m restantes)` : quiet ? 'Avatar dormindo (clique para acordar)' : 'Iniciar Modo Companion para Dormir (30 min)'}><Moon size={18}/></button>}
+        <button className="composer-send" aria-label="Enviar mensagem" type="submit" disabled={busy || (!text.trim() && !selectedMedia)}><Send size={18}/></button>
       </form>
       {call && <div className="dock" aria-label="Controles da chamada">
         <button className={'round live ' + voicePhase.id} disabled={!recognitionSupported} title={'Microfone: ' + voicePhase.label} aria-label={'Microfone: ' + voicePhase.label}><MicBadge phase={voicePhase}/></button>
         <button className={'round '+(chat?'selected':'')} onClick={() => setChat(!chat)} aria-label={chat?'Ocultar histórico':'Mostrar histórico'} aria-expanded={chat}><Keyboard size={19}/></button>
         <button className="round hangup" onClick={() => endCall()} aria-label="Encerrar chamada"><PhoneOff size={19}/></button>
         <button className={'round '+(voiceOff?'selected':'')} onClick={toggleVoice} aria-label="Alternar voz" aria-pressed={voiceOff} title={voiceOff?'Voz silenciada':'Silenciar voz'}>{voiceOff?<VolumeX size={19}/>:<Volume2 size={19}/>}</button>
-        <button className={'round '+(quiet?'selected':'')} onClick={() => setQuiet(!quiet)} aria-label="Alternar modo companion" aria-pressed={quiet}><Moon size={19}/></button>
+        <button className={'round '+(sleepCompanion ? 'selected' : quiet ? 'on' : '')} onClick={toggleSleepCompanion} aria-label="Alternar modo companion para dormir" aria-pressed={sleepCompanion || quiet} title={sleepCompanion ? `Modo Dormir (${sleepCompanionMinutesLeft}m)` : 'Modo Companion para Dormir'}><Moon size={19}/></button>
       </div>}
-      {!call && !chat && <button className="history-toggle" onClick={() => setChat(true)}><MessagesSquare size={16}/> Mostrar conversa</button>}
     </div>
+    {bondOpen && <BondPanel intimacy={intimacy} log={bondLog} onClose={closeBond}/>}
     {panel && <div className="scrim" onClick={() => setPanel(false)}>
       <aside onClick={event => event.stopPropagation()} aria-label="Configurações da Usami">
         <div className="panel-head">
@@ -1422,9 +2186,9 @@ export function Usami() {
             </div>
             <h3>Intimidade</h3>
             <div className="rig-actions">
-              <button onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); try { localStorage.removeItem(INTIMACY_KEY); } catch {} }}>Zerar medidores</button>
+              <button onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); setBondLog([]); try { localStorage.removeItem(INTIMACY_KEY); } catch {} }}>Zerar medidores</button>
             </div>
-            <p className="settings-hint">Zerar os medidores não apaga a conversa.</p>
+            <p className="settings-hint">Zerar os medidores também limpa o histórico de momentos, mas não apaga a conversa.</p>
           </div>}
           {settingsTab === 'voice' && <div>
             <h3>Voz oficial</h3>
@@ -1435,6 +2199,22 @@ export function Usami() {
             <p>A chave da API permanece no servidor. O painel não pede nem guarda chaves.</p>
           </div>}
           {settingsTab === 'avatar' && <div>
+            <h3>Cenário de Fundo</h3>
+            <p>Personalize o fundo do palco e o nível de desfoque.</p>
+            <label className="rig-label">
+              Desfoque: {stageBlur}px
+              <input type="range" min="0" max="16" step="1" value={stageBlur} onChange={e => updateStageBlur(Number(e.target.value))} />
+            </label>
+            <div className="rig-actions">
+              <input ref={bgFileInput} type="file" accept="image/*" hidden onChange={handleBgUpload} />
+              <button onClick={() => bgFileInput.current?.click()}><Upload size={16}/> Trocar imagem de fundo</button>
+              {stageBg !== '/background.png' && <button onClick={() => updateStageBg('/background.png')}>Restaurar padrão</button>}
+            </div>
+            <div className="rig-actions" style={{ marginTop: '8px' }}>
+              <button onClick={toggleFullscreen}>
+                {isFullscreen ? <><Minimize size={16}/> Sair da tela cheia</> : <><Maximize size={16}/> Entrar em tela cheia</>}
+              </button>
+            </div>
             <h3>Modelo</h3>
             <p>Teste os controles reais do modelo. O arquivo permanece neste navegador.</p>
             <input ref={fileInput} type="file" accept=".glb,.vrm,.fbx" hidden onChange={loadFile}/>
