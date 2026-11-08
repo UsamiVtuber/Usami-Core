@@ -51,7 +51,7 @@ const VISEME_EXPRESSION_NAMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 // Toca uma parte do TTS e resolve no 'ended'. Navegador/codecs sem 'ended'
 // são cobertos por um timeout de segurança: conservador até `loadedmetadata`
 // trazer a duração real, rearmada junto do playbackRate.
-function playAudioPart(audio, url) {
+function playAudioPart(audio, url, onStart) {
   return new Promise(resolve => {
     let settled = false;
     let timer = null;
@@ -73,6 +73,7 @@ function playAudioPart(audio, url) {
     };
     audio.onended = finish;
     try { audio.addEventListener?.('loadedmetadata', onMeta, { once: true }); } catch {}
+    if (onStart) { try { audio.addEventListener?.('playing', onStart, { once: true }); } catch {} }
     arm(25000);
     audio.src = url;
     const playing = audio.play();
@@ -1151,9 +1152,9 @@ export function Usami() {
     const mine = ttsQueue.current + 1;
     setVoiceSpeaking(true);
     speakingRef.current = true;
-    if (!quiet) {
-      controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
-    }
+    // O corpo entra em 'talking' no primeiro som (dentro da fila), não aqui:
+    // entre a resposta chegar e o TTS responder pode haver segundos de rede, e
+    // a boneca gesticulava "falando" no vazio.
     try { await speakReplyQueue(...args); } finally {
       if (ttsQueue.current <= mine) {
         setVoiceSpeaking(false);
@@ -1181,6 +1182,14 @@ export function Usami() {
     if (!parts.length) return;
     const queueId = ++ttsQueue.current;
     const alive = () => !voiceOffRef.current && ttsQueue.current === queueId;
+    // Ligado só no primeiro som — stream (onFirstAudio) ou elemento ('playing').
+    // Assim o VRMA 'talking' nunca começa antes de existir áudio para dublar e
+    // não reinicia a cada balão da mesma fila.
+    const startTalking = () => {
+      if (quiet) return;
+      if (controller.current?.getVrmaName?.() === 'talking') return;
+      controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
+    };
     // Sem áudio (mudo ou síntese quebrada) as ações agendadas não têm com que
     // se sincronizar: executar em vez de descartar, senão o corpo não reage.
     const flushTimedActions = () => { for (const action of timedActions) director.current?.execute([action]); };
@@ -1285,7 +1294,7 @@ export function Usami() {
         }
       }
       audio.playbackRate = quiet ? .8 : 1;
-      await playAudioPart(audio, url);
+      await playAudioPart(audio, url, startTalking);
       URL.revokeObjectURL(url);
       played = true;
     };
@@ -1323,6 +1332,7 @@ export function Usami() {
                 shown = true;
                 onPart(parts[index].display);
                 showSpeechBubble(parts[index].display, parts[index].emotionKey);
+                startTalking();
                 runActionsAtSpeechStart();
                 if (parts[index].emotionKey && expressionDriverRef.current) {
                   applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
@@ -1419,6 +1429,11 @@ export function Usami() {
     utterance.onstart = () => {
       speakingRef.current = true;
       setVoiceSpeaking(true);
+      // O caminho de fallback (TTS falhou) também anima o corpo: antes ele
+      // herdava o 'talking' que o speakReply ligava cedo demais.
+      if (!quiet && controller.current?.getVrmaName?.() !== 'talking') {
+        controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
+      }
       // Frente 2: ações com timing no modo chamada — start executa agora,
       // delayMs via setTimeout, end via onend da utterance (middle não tem
       // duração conhecida no speechSynthesis).
@@ -1481,9 +1496,12 @@ export function Usami() {
       if (speakingRef.current) return;
       // Qualquer resultado (inclusive parcial) acende o "te ouvindo"; apaga
       // sozinho se a fala parar, sem depender do evento final.
+      // Um tilt por fala: o reconhecimento devolve um resultado parcial a cada
+      // palavra, e chamar o gesto em todos reiniciava a animação sem parar.
+      // `hearingRef` só vira false depois de 1,2 s de silêncio.
+      if (!hearingRef.current) controller.current?.gesture?.('tilt');
       setMicHearing(true);
       hearingRef.current = true;
-      controller.current?.gesture?.('tilt');
       clearTimeout(hearingTimer.current);
       hearingTimer.current = setTimeout(() => {
         setMicHearing(false);
@@ -1572,8 +1590,10 @@ export function Usami() {
       // Interrompeu o modo de dormir: bronca brava de tsundere!
       controller.current?.playVrma?.('angry', { loop: false, crossfade: 0.25 });
       expressionDriverRef.current?.set('07-prefab_angry01', 0.9, { ttlMs: 4000 });
-    } else {
-      // Reação de escuta ativa / reflexão imediata (Neuro-sama style)
+    } else if (!spoken) {
+      // Reação de escuta ativa / reflexão imediata (Neuro-sama style).
+      // No modo voz o tilt já foi disparado pelo onresult; repetir aqui
+      // reiniciava o gesto no exato instante em que o usuário terminava.
       vrmGestures.current?.gesture('tilt');
     }
 

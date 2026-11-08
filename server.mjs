@@ -63,6 +63,16 @@ const envMs = (name, fallback) => Math.max(1000, Number(process.env[name]) || fa
 const TURN_DEADLINE_MS = envMs('USAMI_TURN_DEADLINE_MS', 40000);
 const NVIDIA_BUDGET_MS = envMs('USAMI_NVIDIA_BUDGET_MS', 25000);
 const FALLBACK_MIN_MS = 8000;
+// Hedge: se a NVIDIA não responder neste tempo, o OpenRouter entra em paralelo
+// e vence quem responder primeiro (o perdedor é abortado). 0 desliga a corrida
+// e volta ao fallback sequencial. 7 s cobre os turnos normais (3–12 s) sem
+// pagar uma segunda chamada em todo turno.
+const HEDGE_AFTER_MS = (() => {
+  const raw = process.env.USAMI_HEDGE_MS;
+  if (raw === undefined || raw === '') return 7000;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : 7000;
+})();
 
 const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
 
@@ -554,6 +564,73 @@ export function parseProviderRaw(raw) {
   };
 }
 
+// Erro de provedor com status HTTP próprio: o handler devolve a mensagem ao
+// cliente em vez de fingir que foi falha da NVIDIA.
+function providerError(message, httpStatus = 502) {
+  return Object.assign(new Error(message), { httpStatus });
+}
+
+// Corrida entre provedores. A NVIDIA começa na hora; se não tiver respondido em
+// `hedgeMs`, o fallback entra em paralelo (se `hedgeMs` for 0, a corrida vira
+// sequencial: o fallback só começa quando a NVIDIA falha). Vence o primeiro que
+// trouxer resposta e o perdedor é abortado — sem isso o hedge só somaria custo.
+// Falha de um lado não encerra a corrida enquanto o outro estiver pendente.
+async function raceProviders({ hedgeMs, startPrimary, startFallback, abortPrimary, abortFallback, onHedge }) {
+  const settled = {};
+  let notify;
+  let changed = new Promise(resolve => { notify = resolve; });
+  const settle = (name, outcome) => {
+    settled[name] = outcome;
+    const resume = notify;
+    changed = new Promise(resolve => { notify = resolve; });
+    resume();
+  };
+  const launch = (name, start) => Promise.resolve().then(start).then(
+    value => settle(name, { ok: true, value }),
+    error => settle(name, { ok: false, error }),
+  );
+
+  launch('primary', startPrimary);
+  let fallback = null;
+  const startFallbackOnce = (hedged = false) => {
+    if (!fallback) {
+      if (hedged) onHedge?.();
+      fallback = launch('fallback', startFallback);
+    }
+    return fallback;
+  };
+  const timer = hedgeMs > 0 ? setTimeout(() => startFallbackOnce(true), hedgeMs) : null;
+  timer?.unref?.();
+
+  for (;;) {
+    if (settled.primary?.ok) {
+      clearTimeout(timer);
+      abortFallback?.();
+      return settled.primary.value;
+    }
+    if (settled.fallback?.ok) {
+      clearTimeout(timer);
+      abortPrimary?.();
+      return settled.fallback.value;
+    }
+    // A NVIDIA falhou antes do hedge: não há por que esperar o cronômetro.
+    if (settled.primary && !fallback) startFallbackOnce();
+    if (settled.primary && settled.fallback && !settled.primary.ok && !settled.fallback.ok) {
+      clearTimeout(timer);
+      settled.fallback.error.fallbackAttempted = true;
+      throw settled.fallback.error;
+    }
+    await changed;
+  }
+}
+
+// O reflexo local (Surface Reflex) já foi falado antes da chamada ao provedor;
+// o texto precisa continuar a conversa em vez de repetir a abertura.
+function withSurfaceReconciliation(system, surface) {
+  if (surface?.mode !== 'say+think' || !surface.reply) return system;
+  return system + `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${surface.reply.trim()}"\nO usuário JÁ OUVIU essa frase.\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
+}
+
 export function createChatHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
@@ -569,6 +646,9 @@ export function createChatHandler(options = {}) {
   const model = options.model || process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
   const systemBase = options.system || DEFAULT_SYSTEM;
   const now = options.now || (() => Date.now());
+  // Injetável para os testes exercitarem o hedge sem bater na NVIDIA.
+  const generateReply = options.generateReply || generateReplyWithActions;
+  const hedgeAfterMs = options.hedgeAfterMs ?? HEDGE_AFTER_MS;
   // Testes injetam um depósito temporário; sem isso o handler do chat escreveria
   // em data/memory.json de verdade a cada npm test.
   const memoryStore = options.memoryStore || installMemoryStore;
@@ -713,48 +793,120 @@ export function createChatHandler(options = {}) {
     };
     mark('context');
 
+    // Chave do OpenRouter resolvida uma vez por turno: o hedge só dispara se
+    // houver para onde cair, e o fallback sequencial não relê o .env.
+    let routerKey = null;
+    let routerKeyError = null;
+    let routerKeyResolved = false;
+    const resolveRouterKey = async () => {
+      if (!routerKeyResolved) {
+        routerKeyResolved = true;
+        try {
+          routerKey = await getKey();
+        } catch (error) {
+          routerKeyError = error;
+        }
+      }
+      return routerKey;
+    };
+
+    // Uma implementação só do OpenRouter: usada pelo hedge e pelo fallback
+    // sequencial (NVIDIA desligada ou falha sem corrida).
+    let routerUsed = false;
+    const openRouterReply = (key, signal) => {
+      routerUsed = true;
+      return timeStage('llm', async () => {
+        let response;
+        try {
+          response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
+            signal,
+          });
+        } catch (error) {
+          // Aborto por perder a corrida ou por o cliente sair não é falha do
+          // provedor: não vira log nem mensagem de erro.
+          if (signal?.aborted && error?.name !== 'TimeoutError') throw error;
+          if (turn.signal.aborted) throw error;
+          console.warn('OpenRouter falhou:', describeFetchError(error));
+          throw providerError(error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.');
+        }
+        if (!response || !response.ok) {
+          throw providerError('A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').');
+        }
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          throw providerError('Resposta inválida do provedor.');
+        }
+        const parsedRouter = parseProviderRaw(data?.choices?.[0]?.message?.content);
+        if (!parsedRouter.ok) throw providerError(parsedRouter.error, parsedRouter.status);
+        return { ...parsedRouter, classification, source: 'openrouter' };
+      });
+    };
+
+    let hedged = false;
     if (useNvidia()) {
       // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
       try {
         // A classificação só alimenta o webhook do n8n (o cliente deriva a emoção
         // do texto localmente), então roda no classificador determinístico: não
         // gasta chamada nem um slot do rate limiter de 40 req/min por turno.
-        classification = await classifyUserMessage(parsedBody.message, { local: true });
+        const [classified] = await Promise.all([
+          classifyUserMessage(parsedBody.message, { local: true }),
+          resolveRouterKey(),
+        ]);
+        classification = classified;
 
-        const rawReply = await timeStage('llm', () => generateReplyWithActions(
+        const nvidiaAbort = new AbortController();
+        const routerAbort = new AbortController();
+        const startNvidia = () => timeStage('llm', () => generateReply(
           withCapabilities(system, capabilities),
           parsedBody.message,
           {
             temperature: 0.7,
-            signal: AbortSignal.any([turn.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+            signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
             blurtReply: surface.mode === 'say+think' ? surface.reply : null,
           },
-        ));
+        )).then(rawReply => {
+          const parsedReply = parseProviderRaw(rawReply);
+          if (!parsedReply.ok) throw new Error(parsedReply.error);
+          return { ...parsedReply, source: 'nvidia' };
+        });
 
-        const parsedReply = parseProviderRaw(rawReply);
-        if (!parsedReply.ok) throw new Error(parsedReply.error);
+        // Sem chave do OpenRouter não há corrida: correr sozinho não acelera.
+        parsed = routerKey
+          ? await raceProviders({
+            hedgeMs: hedgeAfterMs,
+            startPrimary: startNvidia,
+            startFallback: () => openRouterReply(routerKey, AbortSignal.any([
+              turn.signal,
+              routerAbort.signal,
+              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+            ])),
+            abortPrimary: () => nvidiaAbort.abort(),
+            abortFallback: () => routerAbort.abort(),
+            onHedge: () => { hedged = true; },
+          })
+          : await startNvidia();
 
         // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
         // background e o refino chega pela fila de comandos. Nunca bloqueia a
         // resposta — a fala já está na mão do cliente.
-        if (!parsedReply.actions.length && capabilities) {
-          void refineAnimationInBackground(parsedReply.reply, capabilities);
+        if (parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
+          void refineAnimationInBackground(parsed.reply, capabilities);
         }
         mark('animation');
-
-        parsed = {
-          ok: true,
-          reply: parsedReply.reply,
-          gesture: parsedReply.gesture,
-          actions: parsedReply.actions,
-          remember: parsedReply.remember,
-          ...(parsedReply.speechTags ? { speechTags: parsedReply.speechTags } : {}),
-          source: 'nvidia',
-        };
       } catch (error) {
         nvidiaFailed = true;
+        if (turn.signal.aborted) return;
+        // O fallback já foi tentado (em paralelo ou depois da falha): repetir
+        // a chamada ao mesmo provedor só gastaria tokens.
+        if (error?.fallbackAttempted) return send(error.httpStatus || 502, { error: error.message });
         console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
-        // Fallback para OpenRouter abaixo
+        // Fallback sequencial abaixo (offline quando não há chave).
       }
     }
 
@@ -763,10 +915,8 @@ export function createChatHandler(options = {}) {
 
     if (!parsed || !parsed.ok) {
       // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
-      let key;
-      try {
-        key = await getKey();
-      } catch {
+      const key = await resolveRouterKey();
+      if (routerKeyError) {
         return send(502, { error: 'Não foi possível acessar a configuração.' });
       }
       if (!key) {
@@ -793,50 +943,15 @@ export function createChatHandler(options = {}) {
           source: 'offline',
         };
       } else {
-        let openRouterSystem = system;
-        if (surface.mode === 'say+think' && surface.reply) {
-          openRouterSystem += `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${surface.reply.trim()}"\nO usuário JÁ OUVIU essa frase.\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
-        }
-
-        let response;
         try {
-          response = await timeStage('llm', () => fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: openRouterSystem }, { role: 'user', content: parsedBody.message }] }),
-            signal: AbortSignal.any([
-              turn.signal,
-              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
-            ]),
-          }));
+          parsed = await openRouterReply(key, AbortSignal.any([
+            turn.signal,
+            AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+          ]));
         } catch (error) {
           if (turn.signal.aborted) return;
-          console.warn('OpenRouter falhou:', describeFetchError(error));
-          return send(502, { error: error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.' });
+          return send(error.httpStatus || 502, { error: error.message });
         }
-
-        if (!response || !response.ok) {
-          return send(502, { error: 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').' });
-        }
-
-        let data;
-        try {
-          data = await timeStage('llm', () => response.json());
-        } catch {
-          return send(502, { error: 'Resposta inválida do provedor.' });
-        }
-
-        const raw = data?.choices?.[0]?.message?.content;
-        const parsedRouter = parseProviderRaw(raw);
-        if (!parsedRouter.ok) {
-          return send(parsedRouter.status, { error: parsedRouter.error });
-        }
-
-        parsed = {
-          ...parsedRouter,
-          classification,
-          source: 'openrouter',
-        };
         // Contribuição da animação no caminho do balão: aqui só o pós-processamento
         // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
         // e é medido à parte em refineAnimationInBackground, fora do totalMs.
@@ -908,7 +1023,8 @@ export function createChatHandler(options = {}) {
     console.log('[chat] inicio=' + chatStartedAt + ' fim=' + now()
       + ' llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
       + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source
-      + (nvidiaFailed && parsed.source !== 'nvidia' ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
+      + (hedged ? ' (hedge: OpenRouter entrou em paralelo)' : '')
+      + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
     return send(200, {
       reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,

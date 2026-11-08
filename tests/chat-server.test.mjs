@@ -583,3 +583,131 @@ test('refino em background: falha do diretor é silenciosa, nunca do turno', asy
   await createN8nCommandHandler({ apiToken: 't' })(mockReq({ method: 'GET', url: '/api/n8n/commands', headers: { host: '127.0.0.1:8787', 'x-usami-token': 't' } }), res);
   assert.deepEqual(JSON.parse(res.body).commands, []);
 });
+
+// --- Hedge NVIDIA → OpenRouter -------------------------------------------
+
+// useNvidia() é avaliado por chamada, então o teste liga a rota NVIDIA só
+// enquanto roda — o resto do arquivo continua no caminho OpenRouter puro.
+async function withNvidiaRoute(fn) {
+  process.env.USE_NVIDIA = 'true';
+  try {
+    return await fn();
+  } finally {
+    process.env.USE_NVIDIA = 'false';
+  }
+}
+
+const chatRequest = () => mockReq({
+  headers: { 'content-type': 'application/json', host: '127.0.0.1:8787' },
+  body: JSON.stringify({ message: 'oi' }),
+});
+
+test('hedge: OpenRouter vence quando a NVIDIA passa do limite e a perdedora é abortada', async () => {
+  await withNvidiaRoute(async () => {
+    let aborted = false;
+    let routerCalls = 0;
+    const handler = chatHandler({
+      getKey: async () => 'k',
+      hedgeAfterMs: 20,
+      // NVIDIA lenta de mentira: só termina (ou é abortada) se o hedge não agir.
+      generateReply: (_system, _message, { signal }) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve('{"reply":"nvidia","gesture":"tilt"}'), 1000);
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          clearTimeout(timer);
+          reject(Object.assign(new Error('perdeu a corrida'), { name: 'AbortError' }));
+        }, { once: true });
+      }),
+      fetchImpl: async () => { routerCalls++; return jsonResponse('{"reply":"router","gesture":"neutral"}'); },
+    });
+
+    const startedAt = Date.now();
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    const elapsed = Date.now() - startedAt;
+
+    assert.equal(res.statusCode, 200);
+    const data = JSON.parse(res.body);
+    assert.equal(data.source, 'openrouter');
+    assert.equal(data.reply, 'router');
+    assert.equal(routerCalls, 1);
+    assert.ok(elapsed < 900, `a resposta não pode esperar a NVIDIA lenta (levou ${elapsed}ms)`);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(aborted, true, 'a chamada perdedora precisa ser abortada, não deixada correndo');
+  });
+});
+
+test('hedge: NVIDIA que responde antes do limite vence sem chamar o OpenRouter', async () => {
+  await withNvidiaRoute(async () => {
+    let routerCalls = 0;
+    const handler = chatHandler({
+      getKey: async () => 'k',
+      hedgeAfterMs: 200,
+      generateReply: async () => '{"reply":"nvidia","gesture":"tilt","actions":[{"type":"gesture","name":"tilt"}]}',
+      fetchImpl: async () => { routerCalls++; return jsonResponse('{"reply":"router"}'); },
+    });
+
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    assert.equal(res.statusCode, 200);
+    const data = JSON.parse(res.body);
+    assert.equal(data.source, 'nvidia');
+    assert.equal(data.reply, 'nvidia');
+    assert.deepEqual(data.actions, [{ type: 'gesture', name: 'tilt' }]);
+    // O cronômetro do hedge dispara depois, mas não pode gerar chamada extra.
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(routerCalls, 0);
+  });
+});
+
+test('fallback sequencial: NVIDIA falha antes do hedge e o OpenRouter responde uma vez', async () => {
+  await withNvidiaRoute(async () => {
+    let routerCalls = 0;
+    const handler = chatHandler({
+      getKey: async () => 'k',
+      hedgeAfterMs: 5000,
+      generateReply: async () => { throw new Error('NVIDIA fora'); },
+      fetchImpl: async () => { routerCalls++; return jsonResponse('{"reply":"router","gesture":"neutral"}'); },
+    });
+
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(JSON.parse(res.body).source, 'openrouter');
+    assert.equal(routerCalls, 1);
+  });
+});
+
+test('hedge: os dois falhando devolvem o 502 do OpenRouter sem repetir a chamada', async () => {
+  await withNvidiaRoute(async () => {
+    let routerCalls = 0;
+    const handler = chatHandler({
+      getKey: async () => 'k',
+      hedgeAfterMs: 5000,
+      generateReply: async () => { throw new Error('NVIDIA fora'); },
+      fetchImpl: async () => { routerCalls++; return { ok: false, status: 503, json: async () => ({}) }; },
+    });
+
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    assert.equal(res.statusCode, 502);
+    assert.match(JSON.parse(res.body).error, /OpenRouter recusou/);
+    assert.equal(routerCalls, 1, 'o fallback já tentado não pode ser repetido no bloco sequencial');
+  });
+});
+
+test('sem chave do OpenRouter não há corrida: NVIDIA falha e cai no modo offline', async () => {
+  await withNvidiaRoute(async () => {
+    const handler = chatHandler({
+      getKey: async () => null,
+      hedgeAfterMs: 10,
+      generateReply: async () => { throw new Error('NVIDIA fora'); },
+      fetchImpl: async () => { throw new Error('não deveria chamar a rede'); },
+    });
+
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(JSON.parse(res.body).source, 'offline');
+  });
+});
