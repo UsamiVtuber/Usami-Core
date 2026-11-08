@@ -11,10 +11,10 @@ export function MicBadge({ phase, size = 19 }) {
   </span>;
 }
 
-// Beacon: orbe que respira com a voz. Na fala por Web Audio o nível vem do
-// AnalyserNode (`getLevel`); a chamada usa `speechSynthesis`, que não passa
-// pelo grafo e não tem espectro, então nesse caso (e ao ouvir) o nível é uma
-// respiração sintética — o orbe nunca finge medir o que não mede.
+// Beacon: orbe que respira com a voz. A fala usa o TTS oficial e passa pelo
+// grafo Web Audio, então o nível vem do AnalyserNode (`getLevel`); sem áudio
+// tocando (ouvindo/pensando ou TTS fora do ar) o nível é uma respiração
+// sintética — o orbe nunca finge medir o que não mede.
 export function VoiceBeacon({ phase, getLevel }) {
   const ref = useRef(null);
   useEffect(() => {

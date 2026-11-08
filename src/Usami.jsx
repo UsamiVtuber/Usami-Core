@@ -791,6 +791,9 @@ export function Usami() {
   const [chat, setChat] = useState(false);
   const [text, setText] = useState('');
   const [message, setMessage] = useState('');
+  // Aviso passageiro no pill de status quando o TTS oficial falha; o texto da
+  // resposta continua nos balões, sem trocar o timbre da personagem.
+  const [voiceNotice, setVoiceNotice] = useState('');
   const [conversation, setConversation] = useState(loadConversation);
   const [quiet, setQuiet] = useState(false);
   const [voiceOff, setVoiceOff] = useState(false);
@@ -864,15 +867,14 @@ export function Usami() {
   const hearingTimer = useRef(0);
   const callActiveRef = useRef(false);
   const callStartRef = useRef(0);
-  const ptVoiceRef = useRef(null);
   const speakingRef = useRef(false);
   const busyRef = useRef(false);
   const hearingRef = useRef(false);
   const quietRef = useRef(false);
   const submitRef = useRef(null);
+  const voiceNoticeTimer = useRef(0);
   const turnId = useRef(latestTurnId(conversation));
   const recognitionSupported = typeof window !== 'undefined' && (typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function');
-  const synthesisSupported = typeof window !== 'undefined' && (typeof window.speechSynthesis === 'object' && typeof window.SpeechSynthesisUtterance === 'function');
 
   // Inatividade (10 min com 2 toques) e Modo Companion para Dormir (30 min)
   const lastUserActivity = useRef(Date.now());
@@ -1035,16 +1037,7 @@ export function Usami() {
     lastIdleActive.current = false;
   }, []);
   useEffect(() => () => { if (source.startsWith('blob:')) URL.revokeObjectURL(source); }, [source]);
-  useEffect(() => {
-    if (!synthesisSupported) return undefined;
-    const pickVoice = () => {
-      const voices = window.speechSynthesis.getVoices() || [];
-      ptVoiceRef.current = voices.find(voice => /^pt[-_]br/i.test(voice.lang || '')) || voices.find(voice => /^pt/i.test(voice.lang || '')) || null;
-    };
-    pickVoice();
-    window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', pickVoice);
-  }, [synthesisSupported]);
+  useEffect(() => () => clearTimeout(voiceNoticeTimer.current), []);
   useEffect(() => {
     if (!call) return undefined;
     const timer = setInterval(() => setCallSeconds(seconds => seconds + 1), 1000);
@@ -1080,14 +1073,18 @@ export function Usami() {
     if (/relax|calm|sleepy|tired|content/.test(expression)) return 'relaxed';
     return 'neutral';
   };
+  const flagVoiceUnavailable = () => {
+    setVoiceNotice('voz indisponível');
+    clearTimeout(voiceNoticeTimer.current);
+    voiceNoticeTimer.current = setTimeout(() => setVoiceNotice(''), 6000);
+  };
   const toggleVoice = () => {
     const next = !voiceOffRef.current;
     voiceOffRef.current = next;
     setVoiceOff(next);
     if (next) {
-      // Muting cuts whatever is playing immediately (server TTS + call synthesis).
+      // Muting cuts whatever is playing immediately.
       ttsAudio.current?.pause();
-      if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     }
   };
   // O rosto acompanha a fala, não um cronômetro fixo: `holdFace` empurra o
@@ -1380,8 +1377,12 @@ export function Usami() {
     if (!played) {
       audioLipSync.current?.clear();
       flushTimedActions();
-      if (alive() && synthesisSupported && !voiceOffRef.current) {
-        await speakSpoken(parts.map(p => p.display).join(' '), timedActions);
+      // A voz oficial falhou (API parada, 429, provedor fora): os balões já
+      // foram exibidos e a resposta continua legível. Não troca o timbre da
+      // Usami pela voz genérica do navegador — a substituição silenciosa
+      // confundia "TTS indisponível" com "a voz da personagem mudou".
+      if (alive() && !voiceOffRef.current) {
+        flagVoiceUnavailable();
       }
     }
   };
@@ -1405,70 +1406,12 @@ export function Usami() {
     if (content.length > 120 || duringCall) gains.companhia = 2;
     return gains;
   };
-  const speakSpoken = (reply, timedActions = []) => new Promise(resolve => {
-    showSpeechBubble(reply);
-    // Mute: skip browser synthesis too — the caller keeps animating the lips.
-    if (!synthesisSupported || voiceOffRef.current) { resolve(); return; }
-    const synthesis = window.speechSynthesis;
-    try { synthesis.cancel(); } catch {}
-    const utterance = new SpeechSynthesisUtterance(String(reply || '').slice(0, 400));
-    utterance.lang = 'pt-BR';
-    const voices = synthesis.getVoices() || [];
-    const voice = ptVoiceRef.current || voices.find(item => /^pt[-_]br/i.test(item.lang || '')) || voices.find(item => /^pt/i.test(item.lang || ''));
-    if (voice) utterance.voice = voice;
-    utterance.rate = quiet ? .8 : .98;
-    utterance.pitch = quiet ? .95 : 1;
-    let settled = false;
-    const safetyTimer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      speakingRef.current = false;
-      setVoiceSpeaking(false);
-      resolve();
-    }, 15000);
-    utterance.onstart = () => {
-      speakingRef.current = true;
-      setVoiceSpeaking(true);
-      // O caminho de fallback (TTS falhou) também anima o corpo: antes ele
-      // herdava o 'talking' que o speakReply ligava cedo demais.
-      if (!quiet && controller.current?.getVrmaName?.() !== 'talking') {
-        controller.current?.playVrma?.('talking', { loop: true, crossfade: 0.35 });
-      }
-      // Frente 2: ações com timing no modo chamada — start executa agora,
-      // delayMs via setTimeout, end via onend da utterance (middle não tem
-      // duração conhecida no speechSynthesis).
-      for (const action of timedActions ?? []) {
-        if (action?.trigger === 'start' || (!action?.trigger && !action?.delayMs)) {
-          director.current?.execute([action]);
-        } else if (action?.delayMs && action.delayMs > 0) {
-          setTimeout(() => director.current?.execute([action]), action.delayMs);
-        }
-      }
-    };
-    const releaseMic = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(safetyTimer);
-      speakingRef.current = false;
-      setVoiceSpeaking(false);
-      resolve();
-    };
-    utterance.onend = () => {
-      for (const action of timedActions ?? []) {
-        if (action?.trigger === 'end') director.current?.execute([action]);
-      }
-      releaseMic();
-    };
-    utterance.onerror = releaseMic;
-    try { synthesis.speak(utterance); } catch { releaseMic(); }
-  });
   const endCall = reason => {
     if (!callActiveRef.current) return;
     callActiveRef.current = false;
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
     try { recognition?.abort(); } catch {}
-    if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch {} }
     if (ttsAudio.current) { try { ttsAudio.current.pause(); } catch {} }
     audioLipSync.current?.clear();
     speakingRef.current = false;
@@ -1666,7 +1609,13 @@ export function Usami() {
       speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), spoken ? 'voice' : 'text'));
       setMessage(fullCleanText + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
     } catch (error) {
-      const errMsg = error.message || 'Não foi possível conversar.';
+      // `fetch` sem servidor lança TypeError com mensagem do navegador
+      // ("Failed to fetch"/"Load failed"): dizer qual API está fora evita
+      // confundir servidor parado com a personagem "não respondendo".
+      const offline = error instanceof TypeError && /fetch|load failed|network/i.test(error.message || '');
+      const errMsg = offline
+        ? 'Sem conexão com a API da Usami — confira se o servidor local está rodando.'
+        : (error.message || 'Não foi possível conversar.');
       setMessage(errMsg);
       showSpeechBubble(errMsg);
     }
@@ -2024,7 +1973,7 @@ export function Usami() {
       </div>
       <span className={'status stage-status' + (call ? ' calling' : '') + (busy ? ' thinking' : '')}>
         <i className="status-dot" />
-        {call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você'}
+        {voiceNotice || (call ? (busy ? 'Usami está pensando' : `sua vez · ${formatCallTime(callSeconds)}`) : busy ? 'pensando' : quiet ? 'modo companion' : 'com você')}
       </span>
       <div className="corner">
         <div className="corner-actions">
