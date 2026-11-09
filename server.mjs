@@ -29,6 +29,7 @@ import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest
 import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
+import { createProactiveStore } from './src/proactive-events.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 import { analyzeMedia } from './src/media-analyzer.js';
 import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
@@ -171,11 +172,26 @@ try {
 const installPersonalityStore = createPersonalityStore({ dataDir: resolveDataDir() });
 installPersonalityStore.load();
 
+// Store persistente de eventos proativos da Usami (<proactive-events.json>).
+const installProactiveStore = createProactiveStore({
+  dataDir: resolveDataDir(),
+  vaultDir: resolveVaultDir(process.env.USAMI_PROACTIVE_VAULT || process.env.USAMI_RAG_VAULT),
+});
+
 // Motor de proatividade da Usami (<开口> / idle triggers).
 export const proactiveEngine = createProactiveEngine({
   affinityProvider: () => (installMemoryStore.getAll()?.affinity?.score ?? 0),
   usernameProvider: () => (installMemoryStore.getAll()?.user?.nickname || 'você'),
   onProactiveSay: (cmd) => {
+    // A1: envia para o store persistente que o desktop consome
+    installProactiveStore.addEvent({
+      type: cmd.type === 'idle_nudge' ? 'idle_nudge' : 'greeting',
+      source: 'api_scheduler',
+      text: cmd.message,
+      emotion: cmd.emotion,
+      gesture: cmd.gesture,
+      dedupeKey: `auto_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    });
     queueAvatarCommand({
       type: 'proactive_say',
       message: cmd.message,
@@ -2350,6 +2366,7 @@ export function createMediaAnalyzeHandler(options = {}) {
 export function createProactiveHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const engine = options.proactiveEngine || proactiveEngine;
+  const store = options.proactiveStore || installProactiveStore;
 
   return async function handleProactive(req, res) {
     const send = (status, data) => {
@@ -2363,16 +2380,70 @@ export function createProactiveHandler(options = {}) {
     }
     if (denyWithoutToken(req, options, send)) return;
 
-    if (req.method === 'POST' && req.url === '/api/proactive/trigger') {
+    const url = new URL(req.url, 'http://127.0.0.1:8787');
+    const path = url.pathname;
+
+    if (req.method === 'GET' && path === '/api/proactive/events') {
+      const activityHeader = req.headers['x-usami-activity'];
+      if (activityHeader === 'active' && typeof engine.markUserActivity === 'function') {
+        engine.markUserActivity();
+      }
+
+      if (typeof store.ingestVaultReminders === 'function') {
+        store.ingestVaultReminders();
+      }
+
+      const events = typeof store.getPendingEvents === 'function' ? store.getPendingEvents() : [];
+      return send(200, {
+        events,
+        serverTime: new Date().toISOString(),
+      });
+    }
+
+    if (req.method === 'POST' && path === '/api/proactive/events/ack') {
+      const read = await readRequestBody(req, { limit: 8 * 1024 });
+      if (!read.ok) return send(413, { error: 'Corpo muito longo.' });
+      let body;
+      try {
+        body = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'JSON inválido.' });
+      }
+      if (!body || !Array.isArray(body.acks)) {
+        return send(400, { error: 'Formato esperado: { acks: [...] }' });
+      }
+      const ackResult = typeof store.ackEvents === 'function' ? store.ackEvents(body.acks) : { acked: 0 };
+      return send(200, { ok: true, acked: ackResult.acked });
+    }
+
+    if (req.method === 'POST' && path === '/api/proactive/events') {
+      const read = await readRequestBody(req, { limit: 8 * 1024 });
+      if (!read.ok) return send(413, { error: 'Corpo muito longo.' });
+      let body;
+      try {
+        body = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'JSON inválido.' });
+      }
+      const addResult = typeof store.addEvent === 'function' ? store.addEvent(body) : { ok: false, error: 'Store indisponível' };
+      if (!addResult.ok) {
+        return send(addResult.status || 400, { error: addResult.error });
+      }
+      return send(201, addResult);
+    }
+
+    if (req.method === 'POST' && path === '/api/proactive/trigger') {
       try {
         return send(200, await engine.checkAndTrigger());
       } catch {
         return send(500, { error: 'Falha ao disparar a proatividade.' });
       }
     }
-    if (req.method === 'GET' && req.url === '/api/proactive/state') {
+    if (req.method === 'GET' && path === '/api/proactive/state') {
       try {
-        return send(200, engine.getState());
+        const engineState = typeof engine.getState === 'function' ? engine.getState() : {};
+        const storeState = typeof store.getState === 'function' ? store.getState() : {};
+        return send(200, { engine: engineState, store: storeState });
       } catch {
         return send(500, { error: 'Falha ao ler o estado da proatividade.' });
       }
@@ -2412,9 +2483,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
     if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
       || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
-    if (req.url === '/api/proactive/trigger' || req.url === '/api/proactive/state') return handleProactive(req, res);
+    if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
+  proactiveEngine.start(60000);
   server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
 }
