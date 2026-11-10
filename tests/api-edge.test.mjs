@@ -28,9 +28,12 @@ function fixture(overrides = {}) {
     checkAndTrigger: async () => { calls.push('trigger'); return { ok: true, triggered: true }; },
     getState: () => { calls.push('state'); return { mood: 'calm', affinity: 50 }; },
   };
+  const store = {
+    getState: () => ({ eventCount: 0 }),
+  };
   return {
     calls,
-    handler: createProactiveHandler({ allowedOrigins: ALLOWED, apiToken: API_TOKEN, proactiveEngine: engine, ...overrides }),
+    handler: createProactiveHandler({ allowedOrigins: ALLOWED, apiToken: API_TOKEN, proactiveEngine: engine, proactiveStore: store, ...overrides }),
   };
 }
 
@@ -62,7 +65,10 @@ test('/api/proactive/*: sem token é 401; com token responde trigger e state', a
   const state = mockRes();
   await handler(mockReq({ method: 'GET', url: '/api/proactive/state' }), state);
   assert.equal(state.statusCode, 200);
-  assert.deepEqual(JSON.parse(state.body), { mood: 'calm', affinity: 50 });
+  assert.deepEqual(JSON.parse(state.body), {
+    engine: { mood: 'calm', affinity: 50 },
+    store: { eventCount: 0 },
+  });
   assert.deepEqual(calls, ['trigger', 'state']);
 });
 
