@@ -32,6 +32,7 @@ import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
 import { createAudioRevive } from './audio-revive';
 import { deriveVoicePhase, createUtteranceDeduper } from './voice-phase';
+import { applyAudioSink, getAudioDeviceId, setAudioDeviceId, listAudioDevices, canPickSpeaker } from './audio-devices';
 import { MicBadge, VoiceBeacon } from './voice-ui';
 import { PersonalityPanel } from './PersonalityPanel';
 import BondPanel from './BondPanel';
@@ -937,6 +938,49 @@ export function Usami() {
   const turnId = useRef(latestTurnId(conversation));
   const recognitionSupported = typeof window !== 'undefined' && (typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function');
 
+  // Dispositivos de áudio (alto-falantes/fones e microfone)
+  const [speakerDevice, setSpeakerDevice] = useState(() => getAudioDeviceId('speaker'));
+  const [micDevice, setMicDevice] = useState(() => getAudioDeviceId('mic'));
+  const [availableSpeakers, setAvailableSpeakers] = useState([]);
+  const [availableMics, setAvailableMics] = useState([]);
+
+  useEffect(() => {
+    let active = true;
+    const refreshDevices = () => {
+      listAudioDevices().then(({ mics, speakers }) => {
+        if (!active) return;
+        setAvailableMics(mics);
+        setAvailableSpeakers(speakers);
+      });
+    };
+    refreshDevices();
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
+      return () => {
+        active = false;
+        navigator.mediaDevices.removeEventListener('devicechange', refreshDevices);
+      };
+    }
+    return () => { active = false; };
+  }, []);
+
+  const handleSpeakerChange = useCallback(async id => {
+    setSpeakerDevice(id);
+    setAudioDeviceId('speaker', id);
+    if (ttsAudio.current) {
+      await applyAudioSink(ttsAudio.current, id);
+    }
+    const tap = audioLipSync.current?.getTap?.();
+    if (tap?.context) {
+      await applyAudioSink(tap.context, id);
+    }
+  }, []);
+
+  const handleMicChange = useCallback(id => {
+    setMicDevice(id);
+    setAudioDeviceId('mic', id);
+  }, []);
+
   // Inatividade (10 min com 2 toques) e Modo Companion para Dormir (30 min)
   const lastUserActivity = useRef(Date.now());
   const prodsCount = useRef(0);
@@ -1184,13 +1228,40 @@ export function Usami() {
   }, [chat, conversation, busy]);
   // F4: o painel de configurações é um diálogo modal (foco inicial, trap,
   // Escape e foco devolvido ao botão de engrenagem).
+  const handleSettingsEscape = useCallback(() => {
+    if (dangerConfirm) {
+      setDangerConfirm(null);
+      return;
+    }
+    closeSettings();
+  }, [dangerConfirm, closeSettings]);
+
   useModalFocus({
     active: panel,
     containerRef: settingsRef,
     initialFocusRef: settingsCloseRef,
     restoreRef: settingsTriggerRef,
-    onEscape: closeSettings,
+    onEscape: handleSettingsEscape,
   });
+
+  // Fecha em camadas popups ou o drawer de chat no Escape quando nenhum modal com foco exclusivo está ativo
+  useEffect(() => {
+    const handleGlobalEscape = event => {
+      if (event.key !== 'Escape') return;
+      if (sceneOpen) {
+        event.preventDefault();
+        setSceneOpen(false);
+      } else if (vrmaOpen) {
+        event.preventDefault();
+        setVrmaOpen(false);
+      } else if (openPanel === 'chat') {
+        event.preventDefault();
+        setOpenPanel(null);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalEscape);
+    return () => window.removeEventListener('keydown', handleGlobalEscape);
+  }, [sceneOpen, vrmaOpen, openPanel]);
   // A confirmação em dois passos (F7) morre junto com o painel: reabrir não
   // mostra um botão já armado.
   useEffect(() => {
@@ -1399,7 +1470,10 @@ export function Usami() {
       flushTimedActions();
       return;
     }
-    if (!ttsAudio.current) ttsAudio.current = new Audio();
+    if (!ttsAudio.current) {
+      ttsAudio.current = new Audio();
+      applyAudioSink(ttsAudio.current, speakerDevice);
+    }
     const audio = ttsAudio.current;
     // Streaming exige o grafo Web Audio da camada de boca: é por ele que o PCM
     // toca e é ele que mede o lábio. Sem AudioContext ou sem visemas, pede o
@@ -1443,6 +1517,7 @@ export function Usami() {
       if (!attached) {
         audioLipSync.current?.attach(audio);
         attached = true;
+        await applyAudioSink(audio, speakerDevice);
         // Frente 2: as timedActions do turno inteiro são agendadas com o áudio
         // da PRIMEIRA parte, uma única vez — se o streaming já cuidou delas,
         // o scheduler não repete.
@@ -1494,6 +1569,7 @@ export function Usami() {
         let outcome = { streamed: false };
         if (tap) {
           try {
+            await applyAudioSink(tap.context, speakerDevice);
             outcome = await playPcmStream({
               response: job.stream,
               audioContext: tap.context,
@@ -2455,6 +2531,40 @@ export function Usami() {
             <p className="settings-hint">Zerar os medidores também limpa o histórico de momentos, mas não apaga a conversa.</p>
           </div>}
           {settingsTab === 'voice' && <div>
+            <h3>Dispositivos de Áudio</h3>
+            <label className="settings-label">
+              Saída de som (Alto-falantes / Fones)
+              <select
+                value={speakerDevice}
+                onChange={e => handleSpeakerChange(e.target.value)}
+                disabled={!canPickSpeaker}
+                aria-label="Dispositivo de saída de som"
+              >
+                <option value="">Padrão do sistema</option>
+                {availableSpeakers.map(item => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            {!canPickSpeaker && (
+              <p className="settings-hint">A seleção direta de alto-falante não é suportada por este navegador (usando o padrão do sistema).</p>
+            )}
+
+            <label className="settings-label">
+              Microfone (Entrada de som)
+              <select
+                value={micDevice}
+                onChange={e => handleMicChange(e.target.value)}
+                aria-label="Dispositivo de entrada do microfone"
+              >
+                <option value="">Padrão do sistema</option>
+                {availableMics.map(item => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <p className="settings-hint">Os dispositivos de áudio selecionados são lembrados para as próximas sessões.</p>
+
             <h3>Voz oficial</h3>
             <p>Gemini 3.8 Flash TTS com a voz desenhada para a Usami. A configuração fica no servidor local, não neste navegador.</p>
             <p>O tom muda por emoção e o texto pode pedir sons curtos como <code>&lt;laugh&gt;</code>, <code>&lt;chuckle&gt;</code>, <code>&lt;sigh&gt;</code> e <code>&lt;short pause&gt;</code>. A tag vira áudio e não aparece no balão.</p>

@@ -63,13 +63,16 @@ function seeded() {
 }
 
 test('rotas de memória exigem token: sem ele 401, errado 401, sem token no servidor 503', async () => {
+  const savedToken = process.env.USAMI_API_TOKEN;
+  delete process.env.USAMI_API_TOKEN;
   const { dir, handler } = seeded();
   try {
     assert.equal((await call(handler, mockReq({ headers: { 'x-usami-token': '' } }))).status, 401);
     assert.equal((await call(handler, mockReq({ headers: { 'x-usami-token': 'outro' } }))).status, 401);
-    const open = createMemoryHandler({ memoryStore: seeded().store });
+    const open = createMemoryHandler({ memoryStore: seeded().store, apiToken: null });
     assert.equal((await call(open, mockReq())).status, 503);
   } finally {
+    if (savedToken !== undefined) process.env.USAMI_API_TOKEN = savedToken;
     rmSync(dir, { recursive: true, force: true });
   }
 });

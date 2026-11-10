@@ -28,6 +28,7 @@ export function useModalFocus({ active = true, containerRef, initialFocusRef, re
 
     const onKeyDown = event => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         event.stopPropagation();
         escapeRef.current?.();
         return;

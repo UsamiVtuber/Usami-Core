@@ -295,7 +295,8 @@ export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_O
 
 // Rotas sensíveis (memória, vault, fila do n8n) exigem também o token.
 function denyWithoutToken(req, options, send) {
-  const denied = checkApiToken(req, options.apiToken ?? readApiToken());
+  const configuredToken = options && 'apiToken' in options ? options.apiToken : readApiToken();
+  const denied = checkApiToken(req, configuredToken);
   if (!denied) return false;
   send(denied.status, { error: denied.error });
   return true;
@@ -1431,12 +1432,18 @@ export async function streamGeminiPcm({
     res.write(segment);
   };
 
+  const onAbort = () => {
+    try { reader.cancel().catch(() => {}); } catch {}
+  };
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener('abort', onAbort, { once: true });
+
   try {
     for (; ;) {
       // Cliente foi embora: sai do loop sem esperar o próximo pedaço (o fetch
       // também foi abortado; o reader pode ficar pendurado até o abort chegar).
       if (signal?.aborted) {
-        try { await reader.cancel(); } catch { }
+        onAbort();
         if (started) {
           try { res.end(); } catch { }
         }
@@ -1467,6 +1474,8 @@ export async function streamGeminiPcm({
     console.warn('tts: streaming interrompido:', error?.message || error);
     if (started) res.end();
     return { ok: false, reason: 'queda-no-meio' };
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
 
   if (!started) return { ok: false, reason: 'sem-audio' };

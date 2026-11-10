@@ -49,12 +49,18 @@ test('play_sequence entra na fila quando a shape é conhecida', async () => {
 });
 
 test('sem token (ou com token errado) a fila do n8n responde 401', async () => {
-  const handler = createN8nCommandHandler();
-  const body = JSON.stringify({ type: 'gesture', name: 'clap' });
-  assert.equal((await call(handler, mockReq({ body, headers: {} }))).statusCode, 401);
-  assert.equal((await call(handler, mockReq({ body, headers: { 'x-usami-token': 'errado' } }))).statusCode, 401);
-  assert.equal((await call(handler, mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }))).statusCode, 401);
-  assert.equal((await call(createHandler({}), mockReq({ body }))).statusCode, 503);
+  const savedToken = process.env.USAMI_API_TOKEN;
+  delete process.env.USAMI_API_TOKEN;
+  try {
+    const handler = createN8nCommandHandler();
+    const body = JSON.stringify({ type: 'gesture', name: 'clap' });
+    assert.equal((await call(handler, mockReq({ body, headers: {} }))).statusCode, 401);
+    assert.equal((await call(handler, mockReq({ body, headers: { 'x-usami-token': 'errado' } }))).statusCode, 401);
+    assert.equal((await call(handler, mockReq({ method: 'GET', url: '/api/n8n/commands', headers: {} }))).statusCode, 401);
+    assert.equal((await call(createHandler({ apiToken: null }), mockReq({ body }))).statusCode, 503);
+  } finally {
+    if (savedToken !== undefined) process.env.USAMI_API_TOKEN = savedToken;
+  }
 });
 
 test('shape inválida ou ausente em play_sequence é 400', async () => {
