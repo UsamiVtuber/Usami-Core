@@ -2,8 +2,10 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { resolve as pathResolve } from 'node:path';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
 import { STYLE_INSTRUCTIONS, resolveGeminiStyleClause } from './src/tts-prosody.js';
+import { createStaticAssetHandler } from './src/avatar-cache.js';
 import { GESTURE_NAMES, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
@@ -218,7 +220,7 @@ function getVaultIndex() {
 
 // Serviços de domínio + FlowExecutor (grafo de nós estilo n8n)
 const emotionEngine = createEmotionEngine({
-  driver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),
+  driver: createExpressionDriver({ setRaw: () => { }, now: () => Date.now() }),
 });
 const gestureLayer = createVrmGestureLayer({ now: () => Date.now() });
 const services = buildServices({
@@ -231,7 +233,7 @@ const services = buildServices({
   memoryStore: installMemoryStore,
   classifyEmotion,
   emotionEngine,
-  expressionDriver: createExpressionDriver({ setRaw: () => {}, now: () => Date.now() }),
+  expressionDriver: createExpressionDriver({ setRaw: () => { }, now: () => Date.now() }),
   gestureLayer,
   transcribeAudio,
 });
@@ -410,7 +412,7 @@ async function raceProviders({ hedgeMs, startPrimary, startFallback, abortPrimar
   const timer = hedgeMs > 0 ? setTimeout(() => startFallbackOnce(true), hedgeMs) : null;
   timer?.unref?.();
 
-  for (;;) {
+  for (; ;) {
     if (settled.primary?.ok) {
       clearTimeout(timer);
       abortFallback?.();
@@ -542,330 +544,330 @@ export function createChatHandler(options = {}) {
     if (activeTurns === 1) proactive?.setBusy(true);
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
-    const mem = memoryStore.getAll();
-    const today = new Date().toISOString().slice(0, 10);
-    const hour = new Date().getHours();
-    const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
-    let system = buildPersona({
-      affinity: mem.affinity.score,
-      sections: memoryStore.getSections(),
-      recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
-      history: memoryStore.getTodayHistory(today),
-      summaries: memoryStore.getSummaries().slice(-3),
-      username: mem.user.nickname || 'você',
-      date: today,
-      timeOfDay,
-      personality: personalityStore.get(),
-    });
-
-    // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
-    // ler só os arquivos mais recentes. O índice é derivado e se reconcilia
-    // com o disco a cada busca; se ele falhar, o leitor antigo continua valendo.
-    let ragContext = null;
-    try {
-      ragContext = await searchVault(parsedBody.message);
-    } catch {
-      ragContext = null;
-    }
-    if (ragContext) {
-      system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
-    }
-
-    if (parsedBody.input?.wakeUpJolt) {
-      system += '\n\n=== REAÇÃO: ACORDANDO NO SUSTO ===\nVocê estava dormindo profundamente e o usuário te acordou de repente! Reaja com um sobressalto e susto tsundere bem vivo e engraçado no início da sua resposta (ex.: "Wah?! Ai, que susto! Você tava aí?! Eu já tava quase sonhando, baka!"). Use o gesto "surprised" ou "tilt" e emoção [casual_surprised].\n';
-    } else if (parsedBody.input?.sleepCompanionActive) {
-      system += '\n\n=== MODO COMPANION PARA DORMIR (INTERRUPÇÃO) ===\nVocê está no Modo Companion de 30 minutos para ajudar o usuário a dormir e ele ACABOU DE INTERROMPER tentando conversar em vez de descansar! Fique brava de forma protetora (tsundere clássica) e dê uma bronca afetuosa nele: mande ele parar de olhar pra tela, fechar os olhos e ir dormir imediatamente (ex.: "Ei! O que eu falei sobre fechar os olhos?! Vai dormir, baka! Não é pra ficar conversando, é pra descansar! Eu tô aqui do seu lado, então fecha esses olhos agora!"). Use gesto "angry" ou "tilt" e tom [casual_frustrated] ou [whisper_caring].\n';
-    }
-    system = withSpokenConciseness(system, {
-      spoken: parsedBody.input?.spoken === true,
-      message: parsedBody.message,
-    });
-
-    let parsed;
-    let classification = null;
-
-    // Surface Reflex: reação preliminar em < 50ms para presença instantânea
-    const surfaceStartedAt = now();
-    const surface = generateLocalSurfaceReflex(parsedBody.message, { username: mem.user.nickname || 'você' });
-    const surfaceMs = now() - surfaceStartedAt;
-
-    // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
-    // otimização vira chute. Um log por turno basta para ver quem manda.
-    // As etapas SOMAM (+=): com o fallback NVIDIA→OpenRouter a tentativa do
-    // NVIDIA (inclusive o tempo gasto até ela falhar) entra em llmMs junto da
-    // chamada que produziu a resposta — o fallback fica visível, nunca escondido.
-    const stageTimes = { context: 0, llm: 0, animation: 0, total: 0 };
-    let stageAt = chatStartedAt;
-    let nvidiaFailed = false;
-    const mark = key => {
-      const at = now();
-      stageTimes[key] += at - stageAt;
-      stageAt = at;
-    };
-    // Mede a chamada ao provedor diretamente (não o vão entre marks): o
-    // `finally` conta também a tentativa que lança — é o custo do fallback.
-    const timeStage = async (key, fn) => {
-      const startedAt = now();
-      try {
-        return await fn();
-      } finally {
-        stageTimes[key] += now() - startedAt;
-        stageAt = now();
-      }
-    };
-    mark('context');
-
-    // Chave do OpenRouter resolvida uma vez por turno: o hedge só dispara se
-    // houver para onde cair, e o fallback sequencial não relê o .env.
-    let routerKey = null;
-    let routerKeyError = null;
-    let routerKeyResolved = false;
-    const resolveRouterKey = async () => {
-      if (!routerKeyResolved) {
-        routerKeyResolved = true;
-        try {
-          routerKey = await getKey();
-        } catch (error) {
-          routerKeyError = error;
-        }
-      }
-      return routerKey;
-    };
-
-    // Uma implementação só do OpenRouter: usada pelo hedge e pelo fallback
-    // sequencial (NVIDIA desligada ou falha sem corrida).
-    let routerUsed = false;
-    const openRouterReply = (key, signal) => {
-      routerUsed = true;
-      return timeStage('llm', async () => {
-        let response;
-        try {
-          response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
-            signal,
-          });
-        } catch (error) {
-          // Aborto por perder a corrida ou por o cliente sair não é falha do
-          // provedor: não vira log nem mensagem de erro.
-          if (signal?.aborted && error?.name !== 'TimeoutError') throw error;
-          if (turn.signal.aborted) throw error;
-          console.warn('OpenRouter falhou:', describeFetchError(error));
-          throw providerError(error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.');
-        }
-        if (!response || !response.ok) {
-          throw providerError('A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').');
-        }
-        let data;
-        try {
-          data = await response.json();
-        } catch {
-          throw providerError('Resposta inválida do provedor.');
-        }
-        const parsedRouter = parseProviderRaw(data?.choices?.[0]?.message?.content);
-        if (!parsedRouter.ok) throw providerError(parsedRouter.error, parsedRouter.status);
-        return { ...parsedRouter, classification, source: 'openrouter' };
+      const mem = memoryStore.getAll();
+      const today = new Date().toISOString().slice(0, 10);
+      const hour = new Date().getHours();
+      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      let system = buildPersona({
+        affinity: mem.affinity.score,
+        sections: memoryStore.getSections(),
+        recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
+        history: memoryStore.getTodayHistory(today),
+        summaries: memoryStore.getSummaries().slice(-3),
+        username: mem.user.nickname || 'você',
+        date: today,
+        timeOfDay,
+        personality: personalityStore.get(),
       });
-    };
 
-    let hedged = false;
-    if (useNvidia()) {
-      // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
+      // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
+      // ler só os arquivos mais recentes. O índice é derivado e se reconcilia
+      // com o disco a cada busca; se ele falhar, o leitor antigo continua valendo.
+      let ragContext = null;
       try {
-        // A classificação só alimenta o webhook do n8n (o cliente deriva a emoção
-        // do texto localmente), então roda no classificador determinístico: não
-        // gasta chamada nem um slot do rate limiter de 40 req/min por turno.
-        const [classified] = await Promise.all([
-          classifyUserMessage(parsedBody.message, { local: true }),
-          resolveRouterKey(),
-        ]);
-        classification = classified;
+        ragContext = await searchVault(parsedBody.message);
+      } catch {
+        ragContext = null;
+      }
+      if (ragContext) {
+        system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+      }
 
-        const nvidiaAbort = new AbortController();
-        const routerAbort = new AbortController();
-        const startNvidia = () => timeStage('llm', () => generateReply(
-          withCapabilities(system, capabilities),
-          parsedBody.message,
-          {
-            temperature: 0.7,
-            signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
-            blurtReply: surface.mode === 'say+think' ? surface.reply : null,
-          },
-        )).then(rawReply => {
-          const parsedReply = parseProviderRaw(rawReply);
-          if (!parsedReply.ok) throw new Error(parsedReply.error);
-          return { ...parsedReply, source: 'nvidia' };
+      if (parsedBody.input?.wakeUpJolt) {
+        system += '\n\n=== REAÇÃO: ACORDANDO NO SUSTO ===\nVocê estava dormindo profundamente e o usuário te acordou de repente! Reaja com um sobressalto e susto tsundere bem vivo e engraçado no início da sua resposta (ex.: "Wah?! Ai, que susto! Você tava aí?! Eu já tava quase sonhando, baka!"). Use o gesto "surprised" ou "tilt" e emoção [casual_surprised].\n';
+      } else if (parsedBody.input?.sleepCompanionActive) {
+        system += '\n\n=== MODO COMPANION PARA DORMIR (INTERRUPÇÃO) ===\nVocê está no Modo Companion de 30 minutos para ajudar o usuário a dormir e ele ACABOU DE INTERROMPER tentando conversar em vez de descansar! Fique brava de forma protetora (tsundere clássica) e dê uma bronca afetuosa nele: mande ele parar de olhar pra tela, fechar os olhos e ir dormir imediatamente (ex.: "Ei! O que eu falei sobre fechar os olhos?! Vai dormir, baka! Não é pra ficar conversando, é pra descansar! Eu tô aqui do seu lado, então fecha esses olhos agora!"). Use gesto "angry" ou "tilt" e tom [casual_frustrated] ou [whisper_caring].\n';
+      }
+      system = withSpokenConciseness(system, {
+        spoken: parsedBody.input?.spoken === true,
+        message: parsedBody.message,
+      });
+
+      let parsed;
+      let classification = null;
+
+      // Surface Reflex: reação preliminar em < 50ms para presença instantânea
+      const surfaceStartedAt = now();
+      const surface = generateLocalSurfaceReflex(parsedBody.message, { username: mem.user.nickname || 'você' });
+      const surfaceMs = now() - surfaceStartedAt;
+
+      // Timeline da resposta: sem isto a latência é uma caixa-preta e qualquer
+      // otimização vira chute. Um log por turno basta para ver quem manda.
+      // As etapas SOMAM (+=): com o fallback NVIDIA→OpenRouter a tentativa do
+      // NVIDIA (inclusive o tempo gasto até ela falhar) entra em llmMs junto da
+      // chamada que produziu a resposta — o fallback fica visível, nunca escondido.
+      const stageTimes = { context: 0, llm: 0, animation: 0, total: 0 };
+      let stageAt = chatStartedAt;
+      let nvidiaFailed = false;
+      const mark = key => {
+        const at = now();
+        stageTimes[key] += at - stageAt;
+        stageAt = at;
+      };
+      // Mede a chamada ao provedor diretamente (não o vão entre marks): o
+      // `finally` conta também a tentativa que lança — é o custo do fallback.
+      const timeStage = async (key, fn) => {
+        const startedAt = now();
+        try {
+          return await fn();
+        } finally {
+          stageTimes[key] += now() - startedAt;
+          stageAt = now();
+        }
+      };
+      mark('context');
+
+      // Chave do OpenRouter resolvida uma vez por turno: o hedge só dispara se
+      // houver para onde cair, e o fallback sequencial não relê o .env.
+      let routerKey = null;
+      let routerKeyError = null;
+      let routerKeyResolved = false;
+      const resolveRouterKey = async () => {
+        if (!routerKeyResolved) {
+          routerKeyResolved = true;
+          try {
+            routerKey = await getKey();
+          } catch (error) {
+            routerKeyError = error;
+          }
+        }
+        return routerKey;
+      };
+
+      // Uma implementação só do OpenRouter: usada pelo hedge e pelo fallback
+      // sequencial (NVIDIA desligada ou falha sem corrida).
+      let routerUsed = false;
+      const openRouterReply = (key, signal) => {
+        routerUsed = true;
+        return timeStage('llm', async () => {
+          let response;
+          try {
+            response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
+              signal,
+            });
+          } catch (error) {
+            // Aborto por perder a corrida ou por o cliente sair não é falha do
+            // provedor: não vira log nem mensagem de erro.
+            if (signal?.aborted && error?.name !== 'TimeoutError') throw error;
+            if (turn.signal.aborted) throw error;
+            console.warn('OpenRouter falhou:', describeFetchError(error));
+            throw providerError(error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.');
+          }
+          if (!response || !response.ok) {
+            throw providerError('A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').');
+          }
+          let data;
+          try {
+            data = await response.json();
+          } catch {
+            throw providerError('Resposta inválida do provedor.');
+          }
+          const parsedRouter = parseProviderRaw(data?.choices?.[0]?.message?.content);
+          if (!parsedRouter.ok) throw providerError(parsedRouter.error, parsedRouter.status);
+          return { ...parsedRouter, classification, source: 'openrouter' };
         });
+      };
 
-        // Sem chave do OpenRouter não há corrida: correr sozinho não acelera.
-        parsed = routerKey
-          ? await raceProviders({
-            hedgeMs: hedgeAfterMs,
-            startPrimary: startNvidia,
-            startFallback: () => openRouterReply(routerKey, AbortSignal.any([
-              turn.signal,
-              routerAbort.signal,
-              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
-            ])),
-            abortPrimary: () => nvidiaAbort.abort(),
-            abortFallback: () => routerAbort.abort(),
-            onHedge: () => { hedged = true; },
-          })
-          : await startNvidia();
-
-        // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
-        // background e o refino chega pela fila de comandos. Nunca bloqueia a
-        // resposta — a fala já está na mão do cliente.
-        if (parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
-          void refineAnimationInBackground(parsed.reply, capabilities, {
-            clientId: normalizeClientId(req.headers['x-usami-client']),
-            queue: n8nQueue,
-          });
-        }
-        mark('animation');
-      } catch (error) {
-        nvidiaFailed = true;
-        if (turn.signal.aborted) return;
-        // O fallback já foi tentado (em paralelo ou depois da falha): repetir
-        // a chamada ao mesmo provedor só gastaria tokens.
-        if (error?.fallbackAttempted) return send(error.httpStatus || 502, { error: error.message });
-        console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
-        // Fallback sequencial abaixo (offline quando não há chave).
-      }
-    }
-
-    // Ninguém esperando a resposta: não há o que salvar nem fallback a pagar.
-    if (turn.signal.aborted) return;
-
-    if (!parsed || !parsed.ok) {
-      // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
-      const key = await resolveRouterKey();
-      if (routerKeyError) {
-        return send(502, { error: 'Não foi possível acessar a configuração.' });
-      }
-      if (!key) {
-        // Sem nenhuma chave: resposta offline simples baseada no classificador local
-        classification = await classifyUserMessage(parsedBody.message);
-        const offlineReplies = {
-          neutral: 'Oi! Estou aqui, mas ainda não configurei uma chave de LLM. Quer conversar mesmo assim?',
-          happy: 'Oi! Estou bem feliz de te ver! 😊',
-          sad: 'Oi... estou um pouco triste hoje. Você quer conversar sobre algo?',
-          angry: 'Oi. Não estou no meu melhor momento, mas estou aqui.',
-          shy: 'O-Oi... *corada*',
-          soft: 'Oi, seja bem-vindo. Estou por aqui.',
-          surprised: 'O-Oi! Não esperava você!',
-          doubtful: 'Oi... você tem certeza que quer conversar comigo?',
-        };
-        const emotion = classification?.emotion || 'neutral';
-        parsed = {
-          ok: true,
-          reply: offlineReplies[emotion] || offlineReplies.neutral,
-          gesture: 'neutral',
-          actions: [],
-          remember: null,
-          classification,
-          source: 'offline',
-        };
-      } else {
+      let hedged = false;
+      if (useNvidia()) {
+        // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
         try {
-          parsed = await openRouterReply(key, AbortSignal.any([
-            turn.signal,
-            AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
-          ]));
+          // A classificação só alimenta o webhook do n8n (o cliente deriva a emoção
+          // do texto localmente), então roda no classificador determinístico: não
+          // gasta chamada nem um slot do rate limiter de 40 req/min por turno.
+          const [classified] = await Promise.all([
+            classifyUserMessage(parsedBody.message, { local: true }),
+            resolveRouterKey(),
+          ]);
+          classification = classified;
+
+          const nvidiaAbort = new AbortController();
+          const routerAbort = new AbortController();
+          const startNvidia = () => timeStage('llm', () => generateReply(
+            withCapabilities(system, capabilities),
+            parsedBody.message,
+            {
+              temperature: 0.7,
+              signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+              blurtReply: surface.mode === 'say+think' ? surface.reply : null,
+            },
+          )).then(rawReply => {
+            const parsedReply = parseProviderRaw(rawReply);
+            if (!parsedReply.ok) throw new Error(parsedReply.error);
+            return { ...parsedReply, source: 'nvidia' };
+          });
+
+          // Sem chave do OpenRouter não há corrida: correr sozinho não acelera.
+          parsed = routerKey
+            ? await raceProviders({
+              hedgeMs: hedgeAfterMs,
+              startPrimary: startNvidia,
+              startFallback: () => openRouterReply(routerKey, AbortSignal.any([
+                turn.signal,
+                routerAbort.signal,
+                AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+              ])),
+              abortPrimary: () => nvidiaAbort.abort(),
+              abortFallback: () => routerAbort.abort(),
+              onHedge: () => { hedged = true; },
+            })
+            : await startNvidia();
+
+          // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
+          // background e o refino chega pela fila de comandos. Nunca bloqueia a
+          // resposta — a fala já está na mão do cliente.
+          if (parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
+            void refineAnimationInBackground(parsed.reply, capabilities, {
+              clientId: normalizeClientId(req.headers['x-usami-client']),
+              queue: n8nQueue,
+            });
+          }
+          mark('animation');
         } catch (error) {
+          nvidiaFailed = true;
           if (turn.signal.aborted) return;
-          return send(error.httpStatus || 502, { error: error.message });
+          // O fallback já foi tentado (em paralelo ou depois da falha): repetir
+          // a chamada ao mesmo provedor só gastaria tokens.
+          if (error?.fallbackAttempted) return send(error.httpStatus || 502, { error: error.message });
+          console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
+          // Fallback sequencial abaixo (offline quando não há chave).
         }
-        // Contribuição da animação no caminho do balão: aqui só o pós-processamento
-        // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
-        // e é medido à parte em refineAnimationInBackground, fora do totalMs.
-        mark('animation');
       }
-    }
 
-    // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
-    // Isolado de propósito — falha de disco nunca derruba a resposta do chat.
-    let affinityPayload = null;
-    try {
-      const remember = parsed.remember;
-      if (remember) {
-        if (DURABLE_FACT.test(remember.fact)) memoryStore.addCoreFact(remember.fact, remember.section);
-        else memoryStore.addRecentFact(remember.fact, 7, remember.section);
+      // Ninguém esperando a resposta: não há o que salvar nem fallback a pagar.
+      if (turn.signal.aborted) return;
+
+      if (!parsed || !parsed.ok) {
+        // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
+        const key = await resolveRouterKey();
+        if (routerKeyError) {
+          return send(502, { error: 'Não foi possível acessar a configuração.' });
+        }
+        if (!key) {
+          // Sem nenhuma chave: resposta offline simples baseada no classificador local
+          classification = await classifyUserMessage(parsedBody.message);
+          const offlineReplies = {
+            neutral: 'Oi! Estou aqui, mas ainda não configurei uma chave de LLM. Quer conversar mesmo assim?',
+            happy: 'Oi! Estou bem feliz de te ver! 😊',
+            sad: 'Oi... estou um pouco triste hoje. Você quer conversar sobre algo?',
+            angry: 'Oi. Não estou no meu melhor momento, mas estou aqui.',
+            shy: 'O-Oi... *corada*',
+            soft: 'Oi, seja bem-vindo. Estou por aqui.',
+            surprised: 'O-Oi! Não esperava você!',
+            doubtful: 'Oi... você tem certeza que quer conversar comigo?',
+          };
+          const emotion = classification?.emotion || 'neutral';
+          parsed = {
+            ok: true,
+            reply: offlineReplies[emotion] || offlineReplies.neutral,
+            gesture: 'neutral',
+            actions: [],
+            remember: null,
+            classification,
+            source: 'offline',
+          };
+        } else {
+          try {
+            parsed = await openRouterReply(key, AbortSignal.any([
+              turn.signal,
+              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+            ]));
+          } catch (error) {
+            if (turn.signal.aborted) return;
+            return send(error.httpStatus || 502, { error: error.message });
+          }
+          // Contribuição da animação no caminho do balão: aqui só o pós-processamento
+          // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
+          // e é medido à parte em refineAnimationInBackground, fora do totalMs.
+          mark('animation');
+        }
       }
-      const turnTimestamp = new Date().toISOString();
-      const historyReply = stripLeakedJson(parsed.reply)
-        .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
-        .replace(/【[^】]{1,30}】/g, ' ')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trim() || parsed.reply;
-      memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
-      memoryStore.appendHistory('assistant', historyReply, turnTimestamp);
-      const current = memoryStore.getAll();
-      const gain = calculateGain({
-        userMessage: parsedBody.message,
-        assistantReply: parsed.reply,
-        rememberFact: remember,
-        currentScore: current.affinity.score,
-        stage: getStage(current.affinity.score),
-        alreadyGainedToday: current.affinity.totalDailyGainToday,
+
+      // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
+      // Isolado de propósito — falha de disco nunca derruba a resposta do chat.
+      let affinityPayload = null;
+      try {
+        const remember = parsed.remember;
+        if (remember) {
+          if (DURABLE_FACT.test(remember.fact)) memoryStore.addCoreFact(remember.fact, remember.section);
+          else memoryStore.addRecentFact(remember.fact, 7, remember.section);
+        }
+        const turnTimestamp = new Date().toISOString();
+        const historyReply = stripLeakedJson(parsed.reply)
+          .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+          .replace(/【[^】]{1,30}】/g, ' ')
+          .replace(/[ \t]{2,}/g, ' ')
+          .trim() || parsed.reply;
+        memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
+        memoryStore.appendHistory('assistant', historyReply, turnTimestamp);
+        const current = memoryStore.getAll();
+        const gain = calculateGain({
+          userMessage: parsedBody.message,
+          assistantReply: parsed.reply,
+          rememberFact: remember,
+          currentScore: current.affinity.score,
+          stage: getStage(current.affinity.score),
+          alreadyGainedToday: current.affinity.totalDailyGainToday,
+        });
+        const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
+        // applyGain já devolve o objeto completo (score + contador diário); grava direto.
+        memoryStore.save({ ...current, affinity: newAff });
+        affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
+      } catch {
+        // sem memória o chat segue stateless; nada a fazer aqui
+      }
+
+      // Continuidade entre dias: fecha os dias anteriores ainda sem resumo, em
+      // background. Fora do caminho crítico — a próxima conversa já lê o
+      // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
+      void summarizePendingDays({
+        store: memoryStore,
+        today,
+        summarize: useNvidia() ? summarizeDay : undefined,
+      }).catch(error => {
+        // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
+        // sem relançar para nunca derrubar o turno que já foi respondido.
+        console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
       });
-      const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
-      // applyGain já devolve o objeto completo (score + contador diário); grava direto.
-      memoryStore.save({ ...current, affinity: newAff });
-      affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
-    } catch {
-      // sem memória o chat segue stateless; nada a fazer aqui
-    }
 
-    // Continuidade entre dias: fecha os dias anteriores ainda sem resumo, em
-    // background. Fora do caminho crítico — a próxima conversa já lê o
-    // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
-    void summarizePendingDays({
-      store: memoryStore,
-      today,
-      summarize: useNvidia() ? summarizeDay : undefined,
-    }).catch(error => {
-      // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
-      // sem relançar para nunca derrubar o turno que já foi respondido.
-      console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
-    });
+      const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
 
-    const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
+      // Dispara evento para o n8n (fire-and-forget): resposta, emoção,
+      // ações de animação e afinidade. Não bloqueia o chat se o n8n estiver
+      // offline. A classificação (local) alimenta só este webhook, nunca o balão.
+      const emitResponse = emotion => void sendToN8nWebhook('usami.response', {
+        userMessage: parsedBody.message,
+        reply: parsed.reply,
+        gesture: parsed.gesture,
+        actions,
+        emotion,
+        affinity: affinityPayload,
+        source: parsed.source,
+      });
+      emitResponse(classification);
 
-    // Dispara evento para o n8n (fire-and-forget): resposta, emoção,
-    // ações de animação e afinidade. Não bloqueia o chat se o n8n estiver
-    // offline. A classificação (local) alimenta só este webhook, nunca o balão.
-    const emitResponse = emotion => void sendToN8nWebhook('usami.response', {
-      userMessage: parsedBody.message,
-      reply: parsed.reply,
-      gesture: parsed.gesture,
-      actions,
-      emotion,
-      affinity: affinityPayload,
-      source: parsed.source,
-    });
-    emitResponse(classification);
+      const totalMs = now() - chatStartedAt;
+      stageTimes.total = totalMs;
+      console.log('[chat] inicio=' + chatStartedAt + ' fim=' + now()
+        + ' llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
+        + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source
+        + (hedged ? ' (hedge: OpenRouter entrou em paralelo)' : '')
+        + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
-    const totalMs = now() - chatStartedAt;
-    stageTimes.total = totalMs;
-    console.log('[chat] inicio=' + chatStartedAt + ' fim=' + now()
-      + ' llm=' + stageTimes.llm + 'ms animacao=' + stageTimes.animation
-      + 'ms contexto=' + stageTimes.context + 'ms total=' + totalMs + 'ms fonte=' + parsed.source
-      + (hedged ? ' (hedge: OpenRouter entrou em paralelo)' : '')
-      + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
-
-    return send(200, {
-      reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
-      surface,
-      ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
-      // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
-      // renomear. contextMs é adição. animationMs é o que a animação custou
-      // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
-      // fire-and-forget e aparece só no log [animacao], fora do totalMs.
-      timing: { surfaceMs, llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
-      ...(affinityPayload || {}),
-    });
+      return send(200, {
+        reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
+        surface,
+        ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
+        // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
+        // renomear. contextMs é adição. animationMs é o que a animação custou
+        // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
+        // fire-and-forget e aparece só no log [animacao], fora do totalMs.
+        timing: { surfaceMs, llmMs: stageTimes.llm, animationMs: stageTimes.animation, contextMs: stageTimes.context, totalMs },
+        ...(affinityPayload || {}),
+      });
     } finally {
       activeTurns = Math.max(0, activeTurns - 1);
       if (activeTurns === 0) proactive?.setBusy(false);
@@ -915,29 +917,29 @@ export function createFlowChatHandler(options = {}) {
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
 
-    try {
-      const result = await flowExecutor.executeChat({
-        userText: parsedBody.message,
-        audioBuffer: null, // STT handled separately via /api/stt
-        capabilities,
-        // O navegador toca o TTS por /api/tts e é quem faz o lip-sync. Evita
-        // uma segunda síntese invisível e mantém uma única fonte de áudio.
-        voiceOff: true,
-      });
+      try {
+        const result = await flowExecutor.executeChat({
+          userText: parsedBody.message,
+          audioBuffer: null, // STT handled separately via /api/stt
+          capabilities,
+          // O navegador toca o TTS por /api/tts e é quem faz o lip-sync. Evita
+          // uma segunda síntese invisível e mantém uma única fonte de áudio.
+          voiceOff: true,
+        });
 
-      const spoken = extractSpeechTags(result.reply);
-      return send(200, {
-        reply: spoken.text,
-        gesture: result.gesture,
-        actions: result.actions,
-        emotion: result.emotion,
-        ...(spoken.tags.length ? { speechTags: spoken.tags } : {}),
-        audioBuffer: result.audioBuffer ? 'base64_placeholder' : null, // actual audio via /api/tts
-        debug: result.debug,
-      });
-    } catch (error) {
-      return send(500, { error: 'Erro interno no flow: ' + error.message });
-    }
+        const spoken = extractSpeechTags(result.reply);
+        return send(200, {
+          reply: spoken.text,
+          gesture: result.gesture,
+          actions: result.actions,
+          emotion: result.emotion,
+          ...(spoken.tags.length ? { speechTags: spoken.tags } : {}),
+          audioBuffer: result.audioBuffer ? 'base64_placeholder' : null, // actual audio via /api/tts
+          debug: result.debug,
+        });
+      } catch (error) {
+        return send(500, { error: 'Erro interno no flow: ' + error.message });
+      }
     } finally {
       proactive?.setBusy(false);
     }
@@ -1430,13 +1432,13 @@ export async function streamGeminiPcm({
   };
 
   try {
-    for (;;) {
+    for (; ;) {
       // Cliente foi embora: sai do loop sem esperar o próximo pedaço (o fetch
       // também foi abortado; o reader pode ficar pendurado até o abort chegar).
       if (signal?.aborted) {
-        try { await reader.cancel(); } catch {}
+        try { await reader.cancel(); } catch { }
         if (started) {
-          try { res.end(); } catch {}
+          try { res.end(); } catch { }
         }
         return { ok: false, reason: 'abortado' };
       }
@@ -1456,7 +1458,7 @@ export async function streamGeminiPcm({
   } catch (error) {
     if (signal?.aborted) {
       if (started) {
-        try { res.end(); } catch {}
+        try { res.end(); } catch { }
       }
       return { ok: false, reason: 'abortado' };
     }
@@ -1778,7 +1780,7 @@ export function parseMultipartAudio(buffer, contentType) {
 function withTimeout(promise, ms, message) {
   let timer;
   const wrapped = Promise.resolve(promise);
-  wrapped.catch(() => {});
+  wrapped.catch(() => { });
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
       const error = new Error(message);
@@ -2469,26 +2471,34 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
-  const server = createServer((req, res) => {
-    if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
-    if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
-    if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
-    if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
-    if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
-    if (req.method === 'GET' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
-    if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
-    if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
-    if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
-    if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
-    if (req.url === '/api/personality') return handlePersonality(req, res);
-    if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
-      || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
-    if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
-      || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
-    if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
-    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-    res.end(JSON.stringify({ error: 'Não encontrado.' }));
-  });
-  proactiveEngine.start(60000);
-  server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
-}
+    const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
+    const server = createServer(async (req, res) => {
+      // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
+      if ((req.method === 'GET' || req.method === 'HEAD') && (
+        req.url.startsWith('/models/') || req.url.startsWith('/animations/') || req.url.startsWith('/live2d/')
+      )) {
+        const served = await handleAvatarStatic(req, res);
+        if (served) return;
+      }
+      if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
+      if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
+      if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
+      if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
+      if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
+      if (req.method === 'GET' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+      if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+      if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
+      if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
+      if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
+      if (req.url === '/api/personality') return handlePersonality(req, res);
+      if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
+        || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
+      if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
+        || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
+      if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify({ error: 'Não encontrado.' }));
+    });
+    proactiveEngine.start(60000);
+    server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
+  }
