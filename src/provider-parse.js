@@ -120,8 +120,11 @@ export function stripLeakedJson(reply) {
     .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
     // Remove fragmentos truncados de arrays/objetos JSON no fim da frase (ex.: ` [{'type':` ou ` {"type":`)
     .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
-    // Remove aspas/vírgulas de fechamento de propriedade JSON vazadas no final (ex.: `!' ,'` ou `!",`)
+    // Remove vazamento de nomes de prefabs/morphs internos do modelo 3D (ex.: `15-prefab_awkward01 0.8, 08-prefab_angry02 0.6],`)
+    .replace(/[\s,'"]*(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
+    // Remove aspas/vírgulas/colchetes de fechamento de propriedade JSON vazadas no final (ex.: `!' ,'` ou `!",` ou `],`)
     .replace(/['"]\s*,\s*['"]?\s*$/, '')
+    .replace(/[\s,'"]*\]\s*,?\s*$/, '')
     .trim();
 }
 

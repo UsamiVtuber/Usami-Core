@@ -207,7 +207,9 @@ export class UsamiStreamingParser {
       // Remove vazamento de campos JSON truncados do LLM
       .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
       .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+      .replace(/[\s,'"]*(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
       .replace(/['"]\s*,\s*['"]?\s*$/, '')
+      .replace(/[\s,'"]*\]\s*,?\s*$/, '')
       // Remove tags de emoção residuais que porventura tenham escapado no meio do texto
       .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
       .replace(/["“”「」『』]/g, '')
@@ -215,7 +217,8 @@ export class UsamiStreamingParser {
       .replace(/[ \t]{2,}/g, ' ')
       .trim();
 
-    if (!display) return;
+    // Se o balão não tiver palavras faladas (apenas símbolos, números ou pontuação), descarta
+    if (!display || !/[a-zA-ZÀ-ÿ\u4e00-\u9fa5]/u.test(display)) return;
 
     let ttsText = display;
     const tags = [...new Set(this.activeSfx)].slice(0, 2);

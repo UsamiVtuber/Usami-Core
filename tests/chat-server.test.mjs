@@ -438,6 +438,11 @@ test('parseProviderRaw: remove vazamento de gesture/actions com aspas simples ou
   assert.equal(res2.ok, true);
   assert.ok(!res2.reply.includes('gesture'), `reply vazou gesture: ${res2.reply}`);
   assert.equal(res2.gesture, 'tilt');
+
+  const rawPrefabLeak = '{"reply":"Q-que?! B-baka! Por que eu iria querer ser sua mãe?! Hmph... você fala cada absurdo...\\n15-prefab_awkward01 0.8, 08-prefab_angry02 0.6],"}';
+  const res3 = parseProviderRaw(rawPrefabLeak);
+  assert.equal(res3.ok, true);
+  assert.equal(res3.reply, 'Q-que?! B-baka! Por que eu iria querer ser sua mãe?! Hmph... você fala cada absurdo...');
 });
 
 test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {

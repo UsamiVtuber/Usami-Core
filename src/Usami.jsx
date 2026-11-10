@@ -465,7 +465,13 @@ function Avatar({ source, sourceType, sourceName, onReport, onProgress, onStageI
         getArmClearanceDeg() { return vrmaManager?.getArmClearanceDeg() ?? 14; },
         setFilterFingers(val) { vrmaManager?.setFilterFingers(val); },
         playClip(name) { const index = animations.findIndex(animation => animation.name === name); if (index >= 0) play(index); },
-        setMorph(name, value) { this.morph(name, value); },
+        setMorph(name, value) {
+          if (expressionDriver) {
+            expressionDriver.set(name, value, { ttlMs: 4000 });
+          } else {
+            this.morph(name, value);
+          }
+        },
         setExpression(name, weight = 1) { if (!vrm?.expressionManager?.setValue) return false; return expressionDriver?.set(name, weight, { ttlMs: 4000 }) ?? false; },
         morph(name, value) { morphList.filter(item => item.name === name).forEach(item => { item.object.morphTargetInfluences[item.index] = value; }); },
         bone(index, axis, value) {
@@ -1362,6 +1368,24 @@ export function Usami() {
     }
   }
 
+  // Interrupção imediata da fala anterior (barge-in): corta o áudio, a fila de balões,
+  // cancela o lip-sync e decai expressões faciais presas.
+  const interruptSpeech = useCallback(() => {
+    ttsQueue.current += 1;
+    if (ttsAudio.current) {
+      try { ttsAudio.current.pause(); } catch {}
+    }
+    audioLipSync.current?.clear();
+    speakingRef.current = false;
+    setVoiceSpeaking(false);
+    if (expressionDriverRef.current) {
+      expressionDriverRef.current.releaseAll();
+    }
+    if (controller.current?.getVrmaName?.() === 'talking') {
+      controller.current?.stopVrma?.();
+    }
+  }, []);
+
   // Fila de áudio da resposta: UMA síntese por vez. O provedor de voz não
   // tolera requisições concorrentes (5 POST /api/tts em paralelo = 5×504; com
   // uma em voo todas voltam 200), então cada parte é sintetizada, exibida e
@@ -1374,6 +1398,10 @@ export function Usami() {
   // para o HIT de cache e para o modo quieto, que desacelera a voz pelo
   // playbackRate — recurso que o PCM cru não tem.
   const speakReply = async (...args) => {
+    // Ao iniciar nova resposta, garante que expressões velhas decaiam
+    if (expressionDriverRef.current) {
+      expressionDriverRef.current.releaseAll();
+    }
     // O orbe e o badge só precisam saber se há fala em curso; o token impede
     // que uma fila abandonada apague o "falando" da fila que a substituiu.
     const mine = ttsQueue.current + 1;
@@ -1496,10 +1524,13 @@ export function Usami() {
       const cleanText = String(text ?? '')
         .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
         .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+        .replace(/[\s,'"]*(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
+        .replace(/['"]\s*,\s*['"]?\s*$/, '')
+        .replace(/[\s,'"]*\]\s*,?\s*$/, '')
         .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
         .replace(/[ \t]{2,}/g, ' ')
         .trim();
-      if (!cleanText) return null;
+      if (!cleanText || !/[a-zA-ZÀ-ÿ\u4e00-\u9fa5]/u.test(cleanText)) return null;
       const first = await requestTtsOnce(cleanText, stream, partStyle);
       if (first || !alive()) return first;
       // Retry único em modo WAV após pausa curta se o provedor oscilou (429/502/503/504)
@@ -1790,6 +1821,7 @@ export function Usami() {
   const submitMessage = async (content, { spoken = false, retry = false } = {}) => {
     const value = String(content || '').trim();
     if (!value || busyRef.current) return;
+    interruptSpeech();
     // No retry o texto da mensagem do usuário já está limpo e no histórico:
     // não reescreve o composer nem duplica o turno dela.
     if (!spoken && !retry) setText('');
@@ -2110,6 +2142,7 @@ export function Usami() {
 
   const submitMediaMessage = async (media, userText) => {
     recordUserActivity();
+    interruptSpeech();
     poke();
     setBusy(true);
     busyRef.current = true;
