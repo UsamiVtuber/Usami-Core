@@ -100,3 +100,12 @@ test('streaming-parser: nunca vaza [intimate_shy] nem cauda JSON truncada com co
   assert.equal(balloons[0].emotionKey, 'casual_frustrated');
   assert.equal(balloons[balloons.length - 1].emotionKey, 'intimate_shy');
 });
+
+test('streaming-parser: inclui pauseAfterMs por emoção e antecipa 1º balão em cláusula longa', () => {
+  const longCompound = '[intimate_shy] Eu estava pensando em falar com você agora mesmo, mas fiquei com um pouquinho de vergonha.';
+  const balloons = parseReplyBalloons(longCompound);
+  assert.ok(balloons.length >= 2);
+  assert.equal(balloons[0].emotionKey, 'intimate_shy');
+  assert.equal(balloons[0].pauseAfterMs, 350);
+  assert.match(balloons[0].display, /agora mesmo,$/);
+});

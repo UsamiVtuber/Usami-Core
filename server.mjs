@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
+import { STYLE_INSTRUCTIONS, resolveGeminiStyleClause } from './src/tts-prosody.js';
 import { GESTURE_NAMES, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
 import { buildPersona, getAffinityStage } from './src/persona.js';
@@ -438,6 +439,16 @@ function withSurfaceReconciliation(system, surface) {
   return system + `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${surface.reply.trim()}"\nO usuário JÁ OUVIU essa frase.\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
 }
 
+export const VOICE_REPLY_NOTE = '=== MODO VOZ (RESPOSTA FALADA CONCISA) ===\nO usuário falou por voz. Responda em cerca de 2 a 4 frases curtas e conversacionais para soar natural na voz, a menos que ele peça uma história ou explicação longa.';
+
+export function withSpokenConciseness(system, { spoken = false, message = '' } = {}) {
+  if (!spoken) return system;
+  if (/\b(hist[óo]ria|conta tudo|explica detalhad|passo a passo|longo|detalhes)\b/i.test(String(message || ''))) {
+    return system;
+  }
+  return system + '\n\n' + VOICE_REPLY_NOTE + '\n';
+}
+
 export function createChatHandler(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
@@ -565,6 +576,10 @@ export function createChatHandler(options = {}) {
     } else if (parsedBody.input?.sleepCompanionActive) {
       system += '\n\n=== MODO COMPANION PARA DORMIR (INTERRUPÇÃO) ===\nVocê está no Modo Companion de 30 minutos para ajudar o usuário a dormir e ele ACABOU DE INTERROMPER tentando conversar em vez de descansar! Fique brava de forma protetora (tsundere clássica) e dê uma bronca afetuosa nele: mande ele parar de olhar pra tela, fechar os olhos e ir dormir imediatamente (ex.: "Ei! O que eu falei sobre fechar os olhos?! Vai dormir, baka! Não é pra ficar conversando, é pra descansar! Eu tô aqui do seu lado, então fecha esses olhos agora!"). Use gesto "angry" ou "tilt" e tom [casual_frustrated] ou [whisper_caring].\n';
     }
+    system = withSpokenConciseness(system, {
+      spoken: parsedBody.input?.spoken === true,
+      message: parsedBody.message,
+    });
 
     let parsed;
     let classification = null;
@@ -1266,33 +1281,20 @@ const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
 // Vozes desenhadas (Voice Design/Replication) têm id com prefixo voice_ e vão em
 // voiceConfig.voice; pré-prontas (Kore, Puck...) permanecem em prebuiltVoiceConfig.
 const CUSTOM_VOICE_PREFIX = 'voice_';
-// Cláusulas de emoção por styleId, fundidas na tag; neutral e rótulos desconhecidos
-// não têm cláusula — caem na tag base (determinístico).
-const STYLE_INSTRUCTIONS = {
-  happy: 'super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy',
-  sad: 'triste e embargada, mais lenta e baixa, com suspiros',
-  angry: 'protesto manhoso e dramatizado, aguda, emburrada, birra fofa sem agressividade',
-  surprised: 'espantada e aguda, salto de pitch, animada',
-  relaxed: 'calma e serena, mais baixa e lenta, sorriso suave',
-  whisper: 'sussurrada bem baixinho e suave, extremamente calma, ritmo lento e reconfortante para ninar',
-  soft: 'doce e apegada, sorriso na voz, tom manhoso e carinhoso',
-  shy: 'baixinha, hesitante e doce, quase sussurrada, com vergonha',
-  doubtful: 'desconfiada e aguda, entonação de hã?, brincalhona',
-  // Aliases do guia de voz: o LLM/cliente pode pedir o modo diretamente.
-  clingy: 'aguda, brilhante e apegada, sorriso na voz, tom manhoso',
-  pout: 'protesto manhoso e dramatizado, agudo, emburrada, birra fofa',
-  hype: 'super energetica, hiperexpressiva, consoantes punchy, aguda e empolgada',
-};
+// Cláusulas de emoção por styleId (12 legadas + 69 V2 `<registro>_<emoção>`),
+// fundidas na tag; neutral, casual_neutral e rótulos desconhecidos não têm cláusula
+// e caem deterministicamente na tag base.
+export { STYLE_INSTRUCTIONS, resolveGeminiStyleClause };
 
 // Monta a tag de estilo a partir da base configurada + cláusula da emoção. Uma base
 // legada em prosa (GEMINI_TTS_INSTRUCTION do .env) é convertida para tag, senão
 // voltaria a ser falada.
-function buildGeminiInstruction(base, styleId) {
+export function buildGeminiInstruction(base, styleId) {
   const inner = String(base || '').trim()
     .replace(/:\s*$/, '')
     .replace(/^\[([\s\S]*)\]\s*$/, '$1')
     .trim();
-  const clause = STYLE_INSTRUCTIONS[styleId];
+  const clause = resolveGeminiStyleClause(styleId);
   const tag = [inner, clause].filter(Boolean).join(', ');
   return tag ? `[${tag}] ` : '';
 }

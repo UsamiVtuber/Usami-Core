@@ -519,6 +519,17 @@ test('gemini: cláusula de timidez suave — sem "envergonhada", que a modelo en
   assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa, baixinha, hesitante e doce, quase sussurrada, com vergonha] hmph');
 });
 
+test('gemini: styleId V2 (<registro>_<emoção>) aplica cláusula combinada de registro e emoção', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => { calls.push({ url, options }); return geminiAudioResponse(); };
+  const handler = createTtsHandler({ fetchImpl, getConfig: async () => ({ provider: 'gemini', apiKey: GEMINI_TEST_KEY }) });
+  const res = mockRes();
+  await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'boa noite...', styleId: 'whisper_sleepy' }) }), res);
+  assert.equal(res.statusCode, 200);
+  const sent = JSON.parse(calls[0].options.body);
+  assert.match(sent.contents[0].parts[0].text, /^\[.*sussurrada bem baixinho.*sonolenta, lenta e macia.*\] boa noite\.\.\.$/);
+});
+
 test('handler: cache local evita nova chamada e separa estilos', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

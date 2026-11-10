@@ -8,7 +8,7 @@ import {
   generateProactiveSpeech,
   createProactiveEngine,
 } from '../src/proactive-engine.js';
-import { queueAvatarCommand } from '../server.mjs';
+import { queueAvatarCommand, withSpokenConciseness, VOICE_REPLY_NOTE } from '../server.mjs';
 
 test('isQuietHours identifica corretamente a janela Não Perturbe (23:30 - 08:30)', () => {
   const atMidnight = new Date('2026-11-06T00:30:00');
@@ -169,4 +169,59 @@ test('queueAvatarCommand aceita comando proactive_say no server', () => {
   assert.ok(entry);
   assert.equal(entry.type, 'proactive_say');
   assert.equal(entry.message, '[casual_playful] Ei, tá por aí?');
+});
+
+test('relógio de silêncio espera a voz parar (markSpeechStarted / markSpeechEnded) e suporta normal / rare / off', async () => {
+  let clock = new Date('2026-11-06T15:00:00').getTime();
+  const engine = createProactiveEngine({
+    affinityProvider: () => 50,
+    usernameProvider: () => 'Amari',
+    idleThresholdMs: 30000, // 30s
+    enforceQuietHours: false,
+    now: () => clock,
+  });
+
+  // Ela começa a falar um turno longo (45s de áudio)
+  engine.markSpeechStarted('t1');
+  clock += 45000;
+  const whileSpeaking = await engine.checkAndTrigger();
+  assert.equal(whileSpeaking.triggered, false);
+  assert.equal(whileSpeaking.reason, 'voice_playing');
+
+  // A voz dela termina: o relógio de silêncio começa AGORA (não 45s atrás)
+  engine.markSpeechEnded('t1');
+  clock += 29000;
+  const before30s = await engine.checkAndTrigger();
+  assert.equal(before30s.triggered, false);
+  assert.equal(before30s.reason, 'not_idle');
+
+  clock += 2000; // 31s após a voz parar
+  const after31s = await engine.checkAndTrigger();
+  assert.equal(after31s.triggered, true);
+
+  // Modo 'rare' exige 3x o intervalo (90s); modo 'off' nunca dispara
+  engine.markUserActivity();
+  assert.equal(engine.setSilenceRemarks('rare'), true);
+  assert.equal(engine.getState().intervalMs, 90000);
+  clock += 60000;
+  assert.equal((await engine.checkAndTrigger()).reason, 'not_idle');
+  clock += 31000;
+  assert.equal((await engine.checkAndTrigger()).triggered, true);
+
+  engine.markUserActivity();
+  assert.equal(engine.setSilenceRemarks('off'), true);
+  assert.equal(engine.getState().intervalMs, null);
+  clock += 3600000;
+  assert.equal((await engine.checkAndTrigger()).reason, 'silence_remarks_off');
+});
+
+test('withSpokenConciseness pede respostas curtas em turnos de voz, salvo quando o usuário pede história/detalhes', () => {
+  const base = 'Você é Usami.';
+  assert.equal(withSpokenConciseness(base, { spoken: false, message: 'Como foi seu dia?' }), base);
+
+  const spokenShort = withSpokenConciseness(base, { spoken: true, message: 'Como foi seu dia?' });
+  assert.ok(spokenShort.includes(VOICE_REPLY_NOTE));
+
+  const spokenStory = withSpokenConciseness(base, { spoken: true, message: 'Me conta uma história longa!' });
+  assert.equal(spokenStory, base);
 });

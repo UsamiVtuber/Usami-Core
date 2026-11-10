@@ -96,3 +96,12 @@ test('opções fora do intervalo caem nos padrões (60 / 5)', () => {
   assert.ok(parts.slice(0, -1).every(part => part.length <= 60));
   assert.equal(keptChars(parts), sourceChars(reply));
 });
+
+test('firstMaxChars permite cortar o 1º balão mais curto para reduzir o TTFA sem perder texto', () => {
+  const reply = 'Oi pai, tudo bem? Eu estava estudando bastante hoje à tarde e queria te contar tudo!';
+  const parts = splitReplyParts(reply, { maxChars: 60, maxParts: 5, firstMaxChars: 25 });
+  assert.ok(parts.length >= 2);
+  assert.equal(parts[0], 'Oi pai, tudo bem?');
+  assert.ok(parts[0].length <= 25);
+  assert.equal(keptChars(parts), sourceChars(reply));
+});

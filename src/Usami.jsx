@@ -25,12 +25,13 @@ import { playPcmStream } from './stream-audio-player';
 import { splitReplyParts } from './reply-parts';
 import { parseReplyBalloons } from './streaming-parser';
 import { applyVrmEmotion, getVrmEmotionConfig } from './vrm-emotion-map';
+import { getEmotionPauseMs } from './tts-pause';
 import { stripSpeechTags } from './speech-tags';
 import { loadConversation, saveConversation, clearStoredConversation, latestTurnId, MAX_STORED_TURNS } from './conversation-storage';
 import { curateExpressions, labelExpression } from './expressions-catalog';
 import { createSpeechScheduler } from './speech-timing';
 import { createAudioRevive } from './audio-revive';
-import { deriveVoicePhase } from './voice-phase';
+import { deriveVoicePhase, createUtteranceDeduper } from './voice-phase';
 import { MicBadge, VoiceBeacon } from './voice-ui';
 import { PersonalityPanel } from './PersonalityPanel';
 import BondPanel from './BondPanel';
@@ -922,6 +923,8 @@ export function Usami() {
   if (!speechScheduler.current) speechScheduler.current = createSpeechScheduler();
   const voiceOffRef = useRef(false);
   const recognitionRef = useRef(null);
+  const utteranceDeduperRef = useRef(null);
+  if (!utteranceDeduperRef.current) utteranceDeduperRef.current = createUtteranceDeduper();
   const hearingTimer = useRef(0);
   const callActiveRef = useRef(false);
   const callStartRef = useRef(0);
@@ -1312,6 +1315,9 @@ export function Usami() {
       if (ttsQueue.current <= mine) {
         setVoiceSpeaking(false);
         speakingRef.current = false;
+        // O relógio de silêncio começa a contar quando a VOZ dela termina de tocar,
+        // nunca enquanto ela ainda está falando (OpenAmika 11c7c4e).
+        lastUserActivity.current = Date.now();
         if (controller.current?.getVrmaName?.() === 'talking') {
           controller.current?.stopVrma?.();
         }
@@ -1460,11 +1466,17 @@ export function Usami() {
     };
     const ensureNextPending = index => {
       if (!pending && index + 1 < parts.length && alive()) {
-        const nextStyle = parts[index + 1].emotionKey ? getVrmEmotionConfig(parts[index + 1].emotionKey).coarse : styleId;
+        const nextStyle = parts[index + 1].emotionKey || styleId;
         pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
       }
     };
-    const firstStyle = parts[0]?.emotionKey ? getVrmEmotionConfig(parts[0].emotionKey).coarse : styleId;
+    const waitInterBalloonPause = async (emotionKey, fallbackStyle) => {
+      const pauseMs = getEmotionPauseMs(emotionKey || fallbackStyle, { quiet: quietRef.current });
+      if (pauseMs > 0 && alive()) {
+        await new Promise(resolve => setTimeout(resolve, pauseMs));
+      }
+    };
+    const firstStyle = parts[0]?.emotionKey || styleId;
     let pending = askTts(parts[0].ttsText, canStream, firstStyle);
     for (let index = 0; index < parts.length; index += 1) {
       let job = await pending;
@@ -1475,7 +1487,7 @@ export function Usami() {
       // `shown` evita o segundo onPart da mesma frase.
       let shown = false;
       const partStartedAt = performance.now();
-      const partStyle = parts[index].emotionKey ? getVrmEmotionConfig(parts[index].emotionKey).coarse : styleId;
+      const partStyle = parts[index].emotionKey || styleId;
       if (job?.stream) {
         const tap = audioLipSync.current?.getTap?.() || null;
         const external = tap ? audioLipSync.current.beginExternal() : false;
@@ -1512,6 +1524,9 @@ export function Usami() {
           ensureNextPending(index);
           learnPace(parts[index].display, performance.now() - partStartedAt);
           runActionsAtSpeechEnd();
+          if (index + 1 < parts.length && alive()) {
+            await waitInterBalloonPause(parts[index].emotionKey, partStyle);
+          }
           if (!alive()) break;
           continue;
         }
@@ -1532,6 +1547,9 @@ export function Usami() {
       holdFace(parts[index].display);
       await playWithElement(job.url);
       learnPace(parts[index].display, performance.now() - partStartedAt);
+      if (index + 1 < parts.length && alive()) {
+        await waitInterBalloonPause(parts[index].emotionKey, partStyle);
+      }
       if (!alive()) break;
     }
     // A última síntese em voo nunca vai tocar (fila terminou ou foi abandonada):
@@ -1616,16 +1634,25 @@ export function Usami() {
       let final = '';
       for (let index = event.resultIndex; index < event.results.length; index++) if (event.results[index].isFinal) final += event.results[index][0].transcript;
       const heard = final.trim();
-      if (heard) submitRef.current?.(heard, { spoken: true });
+      if (heard && utteranceDeduperRef.current?.shouldCommit(heard)) {
+        submitRef.current?.(heard, { spoken: true });
+      }
     };
     recognition.onerror = event => {
-      if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(event.error)) setMicError(true);
+      if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(event.error)) {
+        setMicError(true);
+        setMicListening(false);
+        setMicHearing(false);
+        hearingRef.current = false;
+      }
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') endCall('Não foi possível acessar o microfone. Verifique a permissão do navegador.');
       else if (event.error === 'audio-capture') endCall('Nenhum microfone encontrado.');
       else if (event.error === 'network') endCall('Falha de rede no reconhecimento de voz.');
     };
     recognition.onend = () => {
       setMicListening(false);
+      setMicHearing(false);
+      hearingRef.current = false;
       if (callActiveRef.current) {
         try {
           recognition.start();
@@ -1638,7 +1665,16 @@ export function Usami() {
       }
     };
     recognitionRef.current = recognition;
-    try { recognition.start(); } catch { setMessage('Não foi possível iniciar o microfone.'); return; }
+    utteranceDeduperRef.current?.reset();
+    try {
+      recognition.start();
+    } catch {
+      setMicListening(false);
+      setMicHearing(false);
+      hearingRef.current = false;
+      setMessage('Não foi possível iniciar o microfone.');
+      return;
+    }
     callActiveRef.current = true;
     callStartRef.current = Date.now();
     setCallSeconds(0);
@@ -1728,6 +1764,7 @@ export function Usami() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: value,
+          spoken: Boolean(spoken),
           capabilities: manifest ? summarizeCapabilities(manifest) : undefined,
           wakeUpJolt: wasSleeping && !inSleepCompanion,
           sleepCompanionActive: inSleepCompanion,

@@ -45,3 +45,42 @@ export function smoothLevel(previous, target, deltaSeconds, { attack = 18, relea
   const step = Math.min(1, rate * dt);
   return from + (to - from) * step;
 }
+
+export const DUPLICATE_COMMIT_WINDOW_MS = 5000;
+
+// Normaliza uma fala transcrita (minúsculas, sem pontuação nem espaços) para
+// comparar commits duplicados do VAD / Web Speech API (OpenAmika commit-once).
+export function normalizeUtteranceKey(text) {
+  return String(text ?? '')
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+}
+
+// Filtra commits de voz idênticos dentro da janela (padrão 5 s), evitando que
+// um stop/release logo após o commit automático envie a mesma fala duas vezes.
+export function createUtteranceDeduper({
+  windowMs = DUPLICATE_COMMIT_WINDOW_MS,
+  now = () => Date.now(),
+} = {}) {
+  let lastKey = '';
+  let lastAt = -Infinity;
+
+  return {
+    shouldCommit(text) {
+      const key = normalizeUtteranceKey(text);
+      if (!key) return false;
+      const currentNow = Number(now());
+      if (key === lastKey && currentNow - lastAt < windowMs) {
+        return false;
+      }
+      lastKey = key;
+      lastAt = currentNow;
+      return true;
+    },
+    reset() {
+      lastKey = '';
+      lastAt = -Infinity;
+    },
+  };
+}

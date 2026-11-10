@@ -49,3 +49,18 @@ test('appendSpeechTags só aceita tags canônicas e não duplica', () => {
   assert.equal(appendSpeechTags('Pai!', ['risada', 'laugh']), 'Pai! <laugh>');
   assert.equal(appendSpeechTags('Pai!', ['tag-inventada']), 'Pai!');
 });
+
+test('extrai os 9 SFX canônicos do OpenAmika em colchetes fullwidth 【...】 e normais', () => {
+  assert.deepEqual(
+    extractSpeechTags('Haha! 【Can_t_help_laughing】 Essa foi boa 【Soft_hmph】'),
+    { text: 'Haha! Essa foi boa', tags: ['laugh', 'chuckle'] },
+  );
+  assert.deepEqual(
+    extractSpeechTags('Calma... 【Deep_breath】 agora vai 【Yawn】'),
+    { text: 'Calma... agora vai', tags: ['breath', 'short pause'] },
+  );
+  assert.deepEqual(
+    extractSpeechTags('Cof [light_cough] [throat_clear]'),
+    { text: 'Cof', tags: ['short pause'] },
+  );
+});

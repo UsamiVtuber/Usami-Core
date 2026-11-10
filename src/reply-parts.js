@@ -16,9 +16,12 @@
 
 const SENTENCE_ENDERS = new Set(['.', '!', '?', '…', '\n']);
 
-export function splitReplyParts(reply, { maxChars = 60, maxParts = 5 } = {}) {
+export function splitReplyParts(reply, { maxChars = 60, maxParts = 5, firstMaxChars = null } = {}) {
   const limit = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 60;
   const cap = Number.isFinite(maxParts) && maxParts > 0 ? Math.floor(maxParts) : 5;
+  const firstLimit = Number.isFinite(firstMaxChars) && firstMaxChars > 0
+    ? Math.min(limit, Math.floor(firstMaxChars))
+    : limit;
   const text = String(reply ?? '');
   if (!text.trim()) return [];
 
@@ -36,30 +39,34 @@ export function splitReplyParts(reply, { maxChars = 60, maxParts = 5 } = {}) {
   if (start < text.length) sentences.push(text.slice(start));
 
   // 2. Átomos: frases limpas; as gigantes cortadas em fronteira de palavra.
-  const atoms = [];
+    const atoms = [];
   for (const raw of sentences) {
     const sentence = raw.trim();
     if (!sentence) continue;
-    if (sentence.length <= limit) { atoms.push(sentence); continue; }
+    const targetLimit = atoms.length === 0 ? firstLimit : limit;
+    if (sentence.length <= targetLimit) { atoms.push(sentence); continue; }
     let line = '';
     for (const word of sentence.split(/\s+/)) {
       if (!word) continue;
-      if (line && line.length + 1 + word.length <= limit) { line += ` ${word}`; continue; }
+      const activeLimit = atoms.length === 0 ? firstLimit : limit;
+      if (line && line.length + 1 + word.length <= activeLimit) { line += ` ${word}`; continue; }
       if (line) atoms.push(line);
       // Palavra maior que o limite sem fronteira possível: fatia bruta.
       let rest = word;
-      while (rest.length > limit) { atoms.push(rest.slice(0, limit)); rest = rest.slice(limit); }
+      const sliceLimit = atoms.length === 0 ? firstLimit : limit;
+      while (rest.length > sliceLimit) { atoms.push(rest.slice(0, sliceLimit)); rest = rest.slice(sliceLimit); }
       line = rest;
     }
     if (line) atoms.push(line);
   }
 
-  // 3. Empacotamento greedy até `limit`.
+  // 3. Empacotamento greedy até `limit` (ou `firstLimit` para o 1º balão, para acelerar o TTFA).
   const parts = [];
   let pack = '';
   for (const atom of atoms) {
     if (!pack) { pack = atom; continue; }
-    if (pack.length + 1 + atom.length <= limit) { pack += ` ${atom}`; continue; }
+    const packLimit = parts.length === 0 ? firstLimit : limit;
+    if (pack.length + 1 + atom.length <= packLimit) { pack += ` ${atom}`; continue; }
     parts.push(pack);
     pack = atom;
   }

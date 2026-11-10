@@ -15,6 +15,13 @@ export const IDLE_TRIGGER_DEFAULT_MS = 180 * 1000; // 3 minutos
 export const DND_START_HOUR = 23.5; // 23:30
 export const DND_END_HOUR = 8.5;    // 08:30
 export const MIN_AFFINITY_FOR_PROACTIVE = 20;
+export const VOICE_PENDING_MAX_MS = 180 * 1000; // 3 minutos de teto se speech_done não vier
+export const SILENCE_REMARK_MODES = Object.freeze(['normal', 'rare', 'off']);
+
+export function normalizeSilenceRemarks(mode) {
+  const m = String(mode ?? 'normal').trim().toLowerCase();
+  return SILENCE_REMARK_MODES.includes(m) ? m : 'normal';
+}
 
 /**
  * Verifica se o horário atual cai na janela Não Perturbe (DND).
@@ -55,13 +62,24 @@ export function shouldTriggerProactive({
   unansweredCount = 0,
   affinity = 0,
   isBusy = false,
+  voicePlaying = false,
+  silenceRemarks = 'normal',
   idleThresholdMs = IDLE_TRIGGER_DEFAULT_MS,
   enforceQuietHours = true,
   quietStartHour = DND_START_HOUR,
   quietEndHour = DND_END_HOUR,
 }) {
+  const mode = normalizeSilenceRemarks(silenceRemarks);
+  if (mode === 'off') {
+    return { allowed: false, reason: 'silence_remarks_off' };
+  }
+
   if (isBusy) {
     return { allowed: false, reason: 'busy' };
+  }
+
+  if (voicePlaying) {
+    return { allowed: false, reason: 'voice_playing' };
   }
 
   if (affinity < MIN_AFFINITY_FOR_PROACTIVE) {
@@ -76,12 +94,13 @@ export function shouldTriggerProactive({
     return { allowed: false, reason: 'quiet_hours' };
   }
 
+  const effectiveThresholdMs = mode === 'rare' ? idleThresholdMs * 3 : idleThresholdMs;
   const idleMs = now - (lastUserActivityMs || 0);
-  if (idleMs < idleThresholdMs) {
-    return { allowed: false, reason: 'not_idle', idleMs };
+  if (idleMs < effectiveThresholdMs) {
+    return { allowed: false, reason: 'not_idle', idleMs, effectiveThresholdMs };
   }
 
-  return { allowed: true, idleMs };
+  return { allowed: true, idleMs, effectiveThresholdMs };
 }
 
 /**
@@ -185,43 +204,113 @@ export function createProactiveEngine({
   affinityProvider = () => 0,
   usernameProvider = () => 'você',
   idleThresholdMs = IDLE_TRIGGER_DEFAULT_MS,
+  silenceRemarks: initialSilenceRemarks = 'normal',
   enforceQuietHours = true,
   router = null,
   onProactiveSay = null,
+  now = () => Date.now(),
 } = {}) {
-  let lastUserActivityMs = Date.now();
+  let lastUserActivityMs = now();
   let unansweredCount = 0;
   let isBusy = false;
+  let silenceRemarks = normalizeSilenceRemarks(initialSilenceRemarks);
+  // Turnos cuja voz ainda está tocando (turnId -> startedAtMs). O relógio de
+  // silêncio só começa a contar quando a voz termina (`markSpeechEnded`).
+  const voicePending = new Map();
   let intervalTimer = null;
 
+  function pruneExpiredVoice(currentNow = now()) {
+    for (const [id, startedAt] of voicePending.entries()) {
+      if (currentNow - startedAt > VOICE_PENDING_MAX_MS) {
+        voicePending.delete(id);
+      }
+    }
+  }
+
   function markUserActivity() {
-    lastUserActivityMs = Date.now();
+    const currentNow = now();
+    lastUserActivityMs = currentNow;
     unansweredCount = 0;
+    // Se o usuário falou por cima ou depois dela, encerra o marcador de voz pendente
+    voicePending.clear();
+  }
+
+  function markSpeechStarted(turnId = 'default') {
+    const currentNow = now();
+    pruneExpiredVoice(currentNow);
+    voicePending.set(String(turnId || 'default'), currentNow);
+  }
+
+  function markSpeechEnded(turnId = null) {
+    const currentNow = now();
+    pruneExpiredVoice(currentNow);
+    if (turnId === null || turnId === undefined) {
+      voicePending.clear();
+    } else {
+      const key = String(turnId);
+      // Remove este turno e quaisquer turnos anteriores (preservando um posterior na fila)
+      for (const existingKey of [...voicePending.keys()]) {
+        voicePending.delete(existingKey);
+        if (existingKey === key) break;
+      }
+    }
+    // O relógio de silêncio começa quando a VOZ para de tocar (sem zerar unansweredCount)
+    lastUserActivityMs = currentNow;
+  }
+
+  function markSpeechDropped(turnId = 'default') {
+    voicePending.delete(String(turnId || 'default'));
   }
 
   function setBusy(busy) {
     isBusy = Boolean(busy);
   }
 
+  function setSilenceRemarks(mode) {
+    if (!SILENCE_REMARK_MODES.includes(String(mode ?? '').trim().toLowerCase())) {
+      return false;
+    }
+    silenceRemarks = normalizeSilenceRemarks(mode);
+    return true;
+  }
+
+  function getSilenceRemarks() {
+    return silenceRemarks;
+  }
+
   function getState() {
+    const currentNow = now();
+    pruneExpiredVoice(currentNow);
+    const effectiveIntervalMs = silenceRemarks === 'off'
+      ? null
+      : silenceRemarks === 'rare'
+        ? idleThresholdMs * 3
+        : idleThresholdMs;
     return {
       lastUserActivityMs,
       unansweredCount,
       isBusy,
-      idleMs: Date.now() - lastUserActivityMs,
+      voicePlaying: voicePending.size > 0,
+      silenceRemarks,
+      intervalMs: effectiveIntervalMs,
+      idleMs: currentNow - lastUserActivityMs,
     };
   }
 
   async function checkAndTrigger() {
+    const currentNow = now();
+    pruneExpiredVoice(currentNow);
     const affinity = typeof affinityProvider === 'function' ? affinityProvider() : Number(affinityProvider) || 0;
     const username = typeof usernameProvider === 'function' ? usernameProvider() : String(usernameProvider || 'você');
 
     const check = shouldTriggerProactive({
       lastUserActivityMs,
-      now: Date.now(),
+      now: currentNow,
       unansweredCount,
       affinity,
       isBusy,
+      voicePlaying: voicePending.size > 0,
+      silenceRemarks,
       idleThresholdMs,
       enforceQuietHours,
     });
@@ -277,7 +366,12 @@ export function createProactiveEngine({
 
   return {
     markUserActivity,
+    markSpeechStarted,
+    markSpeechEnded,
+    markSpeechDropped,
     setBusy,
+    setSilenceRemarks,
+    getSilenceRemarks,
     getState,
     checkAndTrigger,
     start,

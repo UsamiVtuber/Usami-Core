@@ -11,8 +11,10 @@
 // Módulo puro: funciona no Node.js e no browser sem dependências.
 
 import { resolveEmotion, DEFAULT_EMOTION } from './emotion-resolver.js';
+import { getEmotionPauseMs } from './tts-pause.js';
 
 const SENTENCE_ENDERS = new Set(['.', '!', '?', '…', '\n']);
+const CLAUSE_ENDERS = new Set([',', ';', ':', '—']);
 
 // Mapeamento canônico dos 9 SFX do OpenAmika + aliases em pt-BR para tags Gemini TTS.
 const SFX_TO_GEMINI = Object.freeze({
@@ -53,11 +55,13 @@ export class UsamiStreamingParser {
     maxBalloonChars = 60,
     maxBalloons = 5,
     firstBalloonMinChars = 12,
+    firstClauseMinChars = 28,
     onBalloonReady = null,
   } = {}) {
     this.maxBalloonChars = Number.isFinite(maxBalloonChars) && maxBalloonChars > 0 ? Math.floor(maxBalloonChars) : 60;
     this.maxBalloons = Number.isFinite(maxBalloons) && maxBalloons > 0 ? Math.floor(maxBalloons) : 5;
     this.firstBalloonMinChars = Number.isFinite(firstBalloonMinChars) ? Math.floor(firstBalloonMinChars) : 12;
+    this.firstClauseMinChars = Number.isFinite(firstClauseMinChars) && firstClauseMinChars > 0 ? Math.floor(firstClauseMinChars) : 28;
     this.onBalloonReady = typeof onBalloonReady === 'function' ? onBalloonReady : null;
 
     this.buffer = '';
@@ -126,8 +130,8 @@ export class UsamiStreamingParser {
         continue;
       }
 
-      // 3. Procura o próximo caractere especial (início de tag ou pontuação)
-      const specialIdx = this.buffer.search(/[\[【.!?…\n]/);
+      // 3. Procura o próximo caractere especial (início de tag, fim de frase ou pausa de cláusula seguida de espaço)
+      const specialIdx = this.buffer.search(/[\[【.!?…\n]|[,;:—](?=\s)/);
       if (specialIdx === -1) {
         if (isFinal) {
           this._consumeText(this.buffer);
@@ -151,6 +155,10 @@ export class UsamiStreamingParser {
           this.buffer = this.buffer.slice(specialIdx);
           if (textBefore) this._consumeText(textBefore);
         }
+      } else if (CLAUSE_ENDERS.has(matchChar)) {
+        const textWithClause = this.buffer.slice(0, specialIdx + 1);
+        this.buffer = this.buffer.slice(specialIdx + 1);
+        this._consumeText(textWithClause);
       } else {
         // Pontuação: inclui repetidos ("...", "?!") na mesma fatia
         let endIdx = specialIdx;
@@ -180,10 +188,13 @@ export class UsamiStreamingParser {
     const isFirst = this.balloons.length === 0;
     const minThreshold = isFirst ? this.firstBalloonMinChars : 40;
     const hasPunctEnd = /[.!?…\n]$/.test(trimmed);
+    const hasClauseEnd = isFirst && /[,;:—]$/.test(trimmed) && trimmed.length >= this.firstClauseMinChars;
 
-    // Corta balão se terminou em pontuação com tamanho razoável OU se estourou o limite máximo
+    // Corta balão se terminou em pontuação com tamanho razoável, cláusula no 1º balão (TTFA rápido),
+    // OU se estourou o limite máximo
     if (
       (hasPunctEnd && trimmed.length >= minThreshold) ||
+      hasClauseEnd ||
       trimmed.length >= this.maxBalloonChars
     ) {
       this._emitBalloon(trimmed, false);
@@ -219,6 +230,7 @@ export class UsamiStreamingParser {
       display,
       ttsText,
       emotionKey: this.currentEmotion,
+      pauseAfterMs: getEmotionPauseMs(this.currentEmotion),
       speechTags: tags,
       isFinal: Boolean(isFinal),
     };
