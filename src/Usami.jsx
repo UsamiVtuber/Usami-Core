@@ -2332,10 +2332,11 @@ export function Usami() {
         title="Clique para dispensar"
       >
         <div className="who">
-          <span className="who-name">Usami</span>
+          <span className="who-badge">★ Usami ♡</span>
           {bubble.emotion && <span className="who-emo">· {bubble.emotion}</span>}
         </div>
         <div className="text">{bubble.text}</div>
+        <span className="vn-dialogue-prompt" aria-hidden="true">▼</span>
       </div>
     )}
     <header>
@@ -2528,7 +2529,18 @@ export function Usami() {
         <button className={'round '+(sleepCompanion ? 'selected' : quiet ? 'on' : '')} onClick={toggleSleepCompanion} aria-label="Alternar modo companion para dormir" aria-pressed={sleepCompanion || quiet} title={sleepCompanion ? `Modo Dormir (${sleepCompanionMinutesLeft}m)` : 'Modo Companion para Dormir'}><Moon size={19}/></button>
       </div>}
     </div>
-    {bondOpen && <BondPanel intimacy={intimacy} log={bondLog} onClose={closeBond} restoreRef={bondTriggerRef}/>}
+    {bondOpen && (
+      <BondPanel
+        intimacy={intimacy}
+        log={bondLog}
+        onClose={closeBond}
+        restoreRef={bondTriggerRef}
+        onOpenSettings={() => {
+          closeBond();
+          setOpenPanel('settings');
+        }}
+      />
+    )}
     {panel && <div className="scrim" onClick={closeSettings}>
       <aside
         ref={settingsRef}
