@@ -1279,7 +1279,7 @@ const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
 // anunciava o próprio prompt. A tag entre colchetes muda a prosódia e nunca é lida.
 // A base abaixo acompanha a voz desenhada `voice_ess199w2ioks` (take "d"): o
 // timbre adulto da Kore/da voz anterior vinha de ressonância, não só de pitch.
-const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa] ';
+const DEFAULT_GEMINI_TTS_INSTRUCTION = '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida] ';
 const DEFAULT_GEMINI_TTS_SAMPLE_RATE = 24000;
 // Vozes desenhadas (Voice Design/Replication) têm id com prefixo voice_ e vão em
 // voiceConfig.voice; pré-prontas (Kore, Puck...) permanecem em prebuiltVoiceConfig.
@@ -1293,11 +1293,23 @@ export { STYLE_INSTRUCTIONS, resolveGeminiStyleClause };
 // legada em prosa (GEMINI_TTS_INSTRUCTION do .env) é convertida para tag, senão
 // voltaria a ser falada.
 export function buildGeminiInstruction(base, styleId) {
-  const inner = String(base || '').trim()
+  let inner = String(base || '').trim()
     .replace(/:\s*$/, '')
     .replace(/^\[([\s\S]*)\]\s*$/, '$1')
     .trim();
   const clause = resolveGeminiStyleClause(styleId);
+  const lowerStyle = String(styleId || '').toLowerCase();
+  // Se o estilo for tímido, envergonhado, bravo ou triste, suprime menções a sorriso/travessa
+  // da instrução base para evitar que o modelo de áudio Gemini alucine risos incontroláveis
+  if (/(shy|blush|embarrassed|tsundere|angry|pout|sad|crying|serious|mumbling|frustrated)/i.test(lowerStyle)) {
+    inner = inner
+      .replace(/sorriso na voz/gi, '')
+      .replace(/travessa/gi, '')
+      .replace(/saltitante/gi, '')
+      .replace(/,\s*,/g, ',')
+      .replace(/[,\s]+$/, '')
+      .trim();
+  }
   const tag = [inner, clause].filter(Boolean).join(', ');
   return tag ? `[${tag}] ` : '';
 }

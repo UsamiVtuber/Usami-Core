@@ -98,6 +98,7 @@ export async function playPcmStream({
     let nextStart = Number(audioContext.currentTime) || 0;
     let lastSource = null;
     let firstSignaled = false;
+    const scheduledNodes = [];
 
     const schedule = bytes => {
       const samples = pcm16LEToFloat32(bytes);
@@ -117,6 +118,7 @@ export async function playPcmStream({
       result.buffers += 1;
       result.seconds += buffer.duration;
       lastSource = node;
+      scheduledNodes.push(node);
     };
 
     let cancelled = false;
@@ -148,9 +150,12 @@ export async function playPcmStream({
 
     if (cancelled) {
       try { if (typeof reader.cancel === 'function') await reader.cancel(); } catch {}
+      for (const node of scheduledNodes) {
+        try { node.stop?.(); node.disconnect?.(); } catch {}
+      }
       result.streamed = result.buffers > 0;
       result.cancelled = true;
-      // Áudio já agendado é curto (no máximo o último quantum) e o chamador
+      // Áudio já agendado é parado imediatamente e o chamador
       // mandou parar: resolver na hora para a fila não ficar presa esperando.
       return result;
     }

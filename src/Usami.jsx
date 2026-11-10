@@ -846,6 +846,13 @@ export function Usami() {
   const chat = openPanel === 'chat';
   const panel = openPanel === 'settings';
   const [text, setText] = useState('');
+  const composerTextareaRef = useRef(null);
+  const clearComposer = () => {
+    setText('');
+    if (composerTextareaRef.current) {
+      composerTextareaRef.current.style.height = 'auto';
+    }
+  };
   const [message, setMessage] = useState('');
   // Aviso passageiro no pill de status quando o TTS oficial falha; o texto da
   // resposta continua nos balões, sem trocar o timbre da personagem.
@@ -1121,7 +1128,8 @@ export function Usami() {
       .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
       .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
       .replace(/['"]\s*,\s*['"]?\s*$/, '')
-      .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
+      .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+      .replace(/【[^】]{1,30}】/g, ' ')
       .replace(/\*\*|__/g, '')
       .replace(/[ \t]{2,}/g, ' ')
       .trim();
@@ -1824,7 +1832,7 @@ export function Usami() {
     interruptSpeech();
     // No retry o texto da mensagem do usuário já está limpo e no histórico:
     // não reescreve o composer nem duplica o turno dela.
-    if (!spoken && !retry) setText('');
+    if (!spoken && !retry) clearComposer();
     busyRef.current = true;
     setBusy(true);
 
@@ -1911,9 +1919,14 @@ export function Usami() {
 
 
       const parsedBalloons = parseReplyBalloons(effectiveReply);
+      const fallbackClean = String(effectiveReply ?? '')
+        .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+        .replace(/【[^】]{1,30}】/g, ' ')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
       const balloons = parsedBalloons.length
         ? parsedBalloons
-        : [{ display: String(effectiveReply).trim(), ttsText: String(effectiveReply).trim(), emotionKey: null, speechTags: [] }];
+        : [{ display: fallbackClean, ttsText: fallbackClean, emotionKey: null, speechTags: [] }];
       // Se houver speechTags vindas no payload do servidor (legado), anexa ao último balão
       const speechTags = Array.isArray(data.speechTags) ? data.speechTags : [];
       if (speechTags.length > 0) {
@@ -1939,7 +1952,7 @@ export function Usami() {
       setBusy(false);
       // Limpa mesmo quando a resposta falha: o texto enviado não fica preso no
       // composer esperando um novo clique. No modo voz o campo é outro fluxo.
-      if (!spoken && !retry) setText('');
+      if (!spoken && !retry) clearComposer();
     }
   };
   useEffect(() => { submitRef.current = submitMessage; });
@@ -1975,9 +1988,14 @@ export function Usami() {
                   director.current?.execute(immediateActions);
                 }
                 const parsedBalloons = parseReplyBalloons(effectiveReply);
+                const fallbackClean = String(effectiveReply ?? '')
+                  .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+                  .replace(/【[^】]{1,30}】/g, ' ')
+                  .replace(/[ \t]{2,}/g, ' ')
+                  .trim();
                 const balloons = parsedBalloons.length
                   ? parsedBalloons
-                  : [{ display: effectiveReply, ttsText: effectiveReply, emotionKey: null, speechTags: [] }];
+                  : [{ display: fallbackClean, ttsText: fallbackClean, emotionKey: null, speechTags: [] }];
                 const fullCleanText = balloons.map(b => b.display).join(' ');
                 const defaultStyle = cmd.emotion || (balloons[0]?.emotionKey ? getVrmEmotionConfig(balloons[0].emotionKey)?.styleId : 'casual');
                 holdFace(effectiveReply);
@@ -2249,7 +2267,7 @@ export function Usami() {
     if (selectedMedia) {
       const mediaToSend = selectedMedia;
       const userText = text.trim();
-      setText('');
+      clearComposer();
       setSelectedMedia(null);
       await submitMediaMessage(mediaToSend, userText);
       return;
@@ -2257,7 +2275,7 @@ export function Usami() {
 
     const toSend = text.trim();
     if (!toSend) return;
-    setText('');
+    clearComposer();
     submitMessage(toSend);
   };
   const meshList = report?.meshList || [];
@@ -2475,9 +2493,24 @@ export function Usami() {
         >
           <ImagePlus size={18}/>
         </button>
-        <input
+        <textarea
+          ref={composerTextareaRef}
           value={text}
-          onChange={event => setText(event.target.value)}
+          rows={1}
+          onChange={event => {
+            setText(event.target.value);
+            const el = event.target;
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              if (!busy && (text.trim() || selectedMedia)) {
+                sendMessage(event);
+              }
+            }
+          }}
           placeholder={selectedMedia ? (selectedMedia.isVideo ? 'Diga algo sobre o vídeo (ou envie direto)...' : 'Diga algo sobre a imagem (ou envie direto)...') : call ? 'Escreva enquanto fala...' : 'Diga alguma coisa...'}
           aria-label="Mensagem"
           maxLength={2000}

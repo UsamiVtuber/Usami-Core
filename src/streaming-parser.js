@@ -23,8 +23,8 @@ const SFX_TO_GEMINI = Object.freeze({
   can_t_help_laughing: 'laugh',
   cant_help_laughing: 'laugh',
   chuckle: 'chuckle',
-  soft_hmph: 'chuckle',
-  hmph: 'chuckle',
+  soft_hmph: 'short pause',
+  hmph: 'short pause',
   giggle: 'giggle',
   risada: 'laugh',
   risinho: 'chuckle',
@@ -211,7 +211,8 @@ export class UsamiStreamingParser {
       .replace(/['"]\s*,\s*['"]?\s*$/, '')
       .replace(/[\s,'"]*\]\s*,?\s*$/, '')
       // Remove tags de emoção residuais que porventura tenham escapado no meio do texto
-      .replace(/\[[a-zA-Z_\-]{3,40}\]/g, ' ')
+      .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+      .replace(/【[^】]{1,30}】/g, ' ')
       .replace(/["“”「」『』]/g, '')
       .replace(/\*+[^*]*\*+/g, '') // remove direções de palco (*ação*)
       .replace(/[ \t]{2,}/g, ' ')
@@ -221,8 +222,15 @@ export class UsamiStreamingParser {
     if (!display || !/[a-zA-ZÀ-ÿ\u4e00-\u9fa5]/u.test(display)) return;
 
     let ttsText = display;
-    const tags = [...new Set(this.activeSfx)].slice(0, 2);
+    let tags = [...new Set(this.activeSfx)].slice(0, 2);
     this.activeSfx = [];
+
+    // Se o tom for tímido, envergonhado, bravo ou tsundere, suprime tags de riso descontrolado
+    const isEmbarrassedOrAngry = /(shy|blush|embarrassed|angry|tsundere|pout|frustrated)/i.test(this.currentEmotion)
+      || /(baka|hmph|vergonha|absurdo|fofa|fofo)/i.test(display);
+    if (isEmbarrassedOrAngry) {
+      tags = tags.filter(t => t !== 'laugh' && t !== 'chuckle' && t !== 'giggle');
+    }
 
     if (tags.length > 0) {
       ttsText = `${display} ${tags.map(t => `<${t}>`).join(' ')}`;

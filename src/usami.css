@@ -1076,17 +1076,17 @@ header > * {
 
 .composer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 6px;
   width: 100%;
   padding: 6px 8px 6px 12px;
   background: rgba(11, 19, 43, 0.72);
   border: 1px solid var(--line-strong);
-  border-radius: 28px;
+  border-radius: 26px;
   box-shadow: 0 16px 45px rgba(0, 0, 0, 0.45), 0 0 16px rgba(255, 166, 201, 0.08);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  transition: border-color .2s, box-shadow .2s, background .2s;
+  transition: border-color .2s, box-shadow .2s, background .2s, border-radius .2s;
 }
 
 /* F14/F15/D3: o idle esconde só os controles interativos. O crédito fica
@@ -1124,7 +1124,8 @@ header > * {
   box-shadow: 0 16px 45px rgba(0, 0, 0, 0.6), 0 0 20px rgba(255, 166, 201, 0.2);
 }
 
-.composer input {
+.composer input,
+.composer textarea {
   flex: 1;
   min-width: 0;
   border: 0;
@@ -1134,13 +1135,30 @@ header > * {
   padding: 8px 6px;
   font-family: var(--font-body);
   font-size: 14.5px;
+  line-height: 1.45;
+  resize: none;
+  overflow-y: auto;
+  max-height: 120px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 166, 201, 0.35) transparent;
 }
 
-.composer input::placeholder {
+.composer textarea::-webkit-scrollbar {
+  width: 4px;
+}
+.composer textarea::-webkit-scrollbar-thumb {
+  background: rgba(255, 166, 201, 0.35);
+  border-radius: 4px;
+}
+
+.composer input::placeholder,
+.composer textarea::placeholder {
   color: var(--faint);
 }
 
 .composer button {
+  flex-shrink: 0;
+  margin-bottom: 2px;
   border: 0;
   border-radius: 50%;
   width: 38px;
