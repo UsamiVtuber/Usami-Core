@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from '
 import { join } from 'node:path';
 import {
   BOND_LOG_LIMIT,
+  MAX_BOND_XP,
   METER_KEYS,
   clampMeters,
   sanitizeBondLog,

@@ -14,6 +14,7 @@ import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { createBondStore } from './src/bond-store.js';
+import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
 import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-classifier.js';
@@ -183,6 +184,15 @@ try {
   installBondStore.load();
 } catch {
   console.error('Aviso: vínculo local indisponível — os medidores do VN ficam zerados.');
+}
+
+// Conquistas (data/achievements.json): só os desbloqueios; o catálogo é puro
+// (achievements.js) e as condições olham o estado real do vínculo acima.
+const installAchievementsStore = createAchievementsStore({ dataDir: resolveDataDir() });
+try {
+  installAchievementsStore.load();
+} catch {
+  console.error('Aviso: conquistas locais indisponíveis — a lista volta vazia.');
 }
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1287,6 +1297,17 @@ export function createMemoryHandler(options = {}) {
 export function createBondHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const store = options.bondStore || installBondStore;
+  // Reavaliação pós-evento: o desbloqueio nasce da atividade do vínculo, mas
+  // nunca derruba a resposta do bond se a gravação das conquistas falhar.
+  const achievements = 'achievementsStore' in options ? options.achievementsStore : installAchievementsStore;
+  const reevaluateAchievements = () => {
+    if (!achievements) return;
+    try {
+      achievements.reevaluate(store.getAll());
+    } catch (error) {
+      console.error('Aviso: reavaliação de conquistas falhou:', error?.message || error);
+    }
+  };
 
   return async function handleBond(req, res) {
     const send = (status, data) => {
@@ -1335,17 +1356,23 @@ export function createBondHandler(options = {}) {
         if (!Number.isFinite(minutes) || minutes < 1) {
           return send(400, { error: 'Minutos inválidos.' });
         }
-        return send(200, { ok: true, bond: store.awardCall(minutes) });
+        const called = store.awardCall(minutes);
+        if (called.changed) reevaluateAchievements();
+        return send(200, { ok: true, bond: called });
       }
       if (typeof payload.content !== 'string' || !payload.content.trim()) {
         return send(400, { error: 'Conteúdo ausente.' });
       }
       const spoken = payload.spoken === true;
-      return send(200, { ok: true, bond: store.awardChat(payload.content, { spoken }) });
+      const awarded = store.awardChat(payload.content, { spoken });
+      if (awarded.changed) reevaluateAchievements();
+      return send(200, { ok: true, bond: awarded });
     }
 
     if (route === '/api/bond/import') {
-      return send(200, { ok: true, bond: store.importState({ intimacy: payload.intimacy, log: payload.log }) });
+      const imported = store.importState({ intimacy: payload.intimacy, log: payload.log });
+      if (imported.imported) reevaluateAchievements();
+      return send(200, { ok: true, bond: imported });
     }
 
     if (route === '/api/bond/reset') {
@@ -1360,6 +1387,43 @@ export function createBondHandler(options = {}) {
   };
 }
 
+// Conquistas (data/achievements.json): leitura para a aba "Conquistas" do
+// desktop. Mesma borda das rotas do vínculo (origem + token) e mesmo estilo de
+// erro; antes de responder, reavalia o catálogo contra o vínculo para recuperar
+// desbloqueios que um crash entre gravações possa ter perdido.
+export function createAchievementsHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.achievementsStore || installAchievementsStore;
+  const bondStore = options.bondStore || installBondStore;
+
+  return async function handleAchievements(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const route = new URL(req.url || '/api/achievements', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/achievements') {
+      try {
+        store.reevaluate(bondStore.getAll());
+      } catch (error) {
+        console.error('Aviso: reavaliação de conquistas falhou:', error?.message || error);
+      }
+      return send(200, { ok: true, achievements: store.list() });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
+  };
+}
 const DEFAULT_GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 const DEFAULT_GEMINI_TTS_VOICE = 'Kore';
 // Direção de estilo em TAG entre colchetes, não em frase: transcrevendo o áudio
@@ -2578,6 +2642,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
+  const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
@@ -2602,6 +2667,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
       if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
       if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
+      if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
       if (req.url === '/api/personality') return handlePersonality(req, res);
       if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
         || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
