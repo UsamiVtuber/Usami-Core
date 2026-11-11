@@ -91,6 +91,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Ação de nível 4 é negada até a confirmação e passa depois; revogar volta a negar.",
       "scopeNotes": "Reutiliza a borda `x-usami-token` e a confirmação escrita já usada na memória; não usa `confirm()` do navegador.",
+      "status": "done",
       "blockedBy": ["S4"],
       "techGuidance": "A confirmação é um segundo fator de autorização, não um segredo novo em arquivo. Toda rota nova passa por `isAllowedRequest`."
     },
