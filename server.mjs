@@ -21,6 +21,7 @@ import { createToolExecutor, EXECUTIONS_DEFAULT_LIST, EXECUTIONS_LIMIT } from '.
 import { createMemorySearchTool } from './src/memory-search-tool.js';
 import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.js';
 import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseBriefingThreshold } from './src/task-planner.js';
+import { createSkillCatalog } from './src/skill-catalog.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -239,6 +240,19 @@ try {
   installTaskPlanner.load();
 } catch (error) {
   console.error('Aviso: planner de tarefas indisponível:', error?.message || error);
+}
+
+// Catálogo de Skills (data/skills/<id>/skill.json): descoberta somente leitura.
+// A ativação é derivada do estado do manifesto, do registry e das dependências;
+// o código da skill nunca é importado.
+const installSkillCatalog = createSkillCatalog({
+  dataDir: resolveDataDir(),
+  registry: toolRegistry,
+});
+try {
+  installSkillCatalog.load();
+} catch (error) {
+  console.error('Aviso: catálogo de skills indisponível:', error?.message || error);
 }
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1835,6 +1849,49 @@ export function createPlansHandler(options = {}) {
   };
 }
 
+// Catálogo de Skills (/api/agent/skills): descoberta somente leitura de
+// `data/skills/<id>/skill.json`. Recarrega a cada consulta para refletir
+// diretórios novos sem reiniciar; manifesto inválido aparece na própria
+// listagem (`valid:false`) em vez de derrubar a rota.
+const AGENT_SKILL_PATH_RE = /^\/api\/agent\/skills\/([a-z][a-z0-9-]{2,39})$/;
+
+export function createSkillsHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const catalog = options.catalog || installSkillCatalog;
+
+  return function handleSkills(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+    if (req.method !== 'GET') return send(404, { error: 'Não encontrado.' });
+
+    let snapshot;
+    try {
+      snapshot = catalog.load();
+    } catch (error) {
+      console.error('Aviso: não foi possível ler o catálogo de skills:', error?.message || error);
+      return send(500, { error: 'Catálogo de skills indisponível.' });
+    }
+
+    const path = new URL(req.url || '/api/agent/skills', 'http://127.0.0.1:8787').pathname;
+    if (path === '/api/agent/skills') {
+      return send(200, { ok: true, skills: snapshot.skills, count: snapshot.skills.length });
+    }
+    const match = path.match(AGENT_SKILL_PATH_RE);
+    if (!match) return send(404, { error: 'Não encontrado.' });
+    const found = catalog.get(match[1]);
+    if (!found.ok) return send(404, { error: 'Skill não encontrada.' });
+    return send(200, { ok: true, skill: found.skill });
+  };
+}
+
 // Conquistas (data/achievements.json): leitura para a aba "Conquistas" do
 // desktop. Mesma borda das rotas do vínculo (origem + token) e mesmo estilo de
 // erro; antes de responder, reavalia o catálogo contra o vínculo para recuperar
@@ -3093,6 +3150,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleOperationalMemory = createOperationalMemoryHandler();
   const handleTools = createToolHandler({ gate: installToolGate });
   const handlePlans = createPlansHandler();
+  const handleSkills = createSkillsHandler();
   const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
@@ -3130,6 +3188,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         || req.url === '/api/agent/permissions' || req.url.startsWith('/api/agent/permissions?')
         || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
       if (req.url === '/api/agent/plans' || req.url.startsWith('/api/agent/plans/') || req.url.startsWith('/api/agent/plans?')) return handlePlans(req, res);
+      if (req.url === '/api/agent/skills' || req.url.startsWith('/api/agent/skills/') || req.url.startsWith('/api/agent/skills?')) return handleSkills(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

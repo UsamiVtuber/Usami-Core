@@ -90,8 +90,9 @@ O USAMI 2.0 adiciona um domínio operacional **ao lado** do caminho ativo, em
 `src/agent-*.js` e no namespace `/api/agent/*`. Os contratos puros vivem em
 `src/agent-contracts.js` (Intent, Plan/PlanStep, ToolSpec, SkillManifest,
 PermissionLevel 1–4 e ExecutionRecord). As rotas publicadas hoje são as da
-memória operacional, das ferramentas, das permissões e dos planos de tarefas;
-skills e confirmações de UI ainda não estão publicadas.
+memória operacional, das ferramentas, das permissões, dos planos de tarefas e
+do catálogo de skills; instalação de skills e confirmações de UI ainda não
+estão publicadas.
 
 `/api/plan` continua sendo o planner de **animação**; plano de tarefas mora em
 `/api/agent/plans` (S6). O caminho de produção (`createChatHandler`) e o
@@ -136,6 +137,19 @@ progresso edita a corrente. `POST/GET /api/agent/plans`,
 `GET /api/agent/plans/:id` e `PATCH /api/agent/plans/:id` exigem
 `x-usami-token`; planejamento não entra no caminho crítico do chat. Arquivo de
 plano inválido deixa só aquele plano indisponível, sem derrubar os demais.
+
+O catálogo de Skills fica em `src/skill-catalog.js` e é somente leitura. Cada
+skill é um diretório `data/skills/<id>/` com `skill.json` validado por
+`validateSkillManifest`; o diretório ausente começa vazio e nunca é criado pelo
+loader. O código da skill não é importado — só o manifesto é lido, com teto de
+64 KiB. Ativação é derivada, não persistida: exige `state: installed`, todas as
+ferramentas declaradas no `tool-registry` e todas as dependências presentes,
+válidas e instaladas (sem ativação recursiva). Manifesto inválido, id divergente
+do diretório ou arquivo ausente aparecem na listagem com `valid:false` e os
+erros, sem afetar as demais skills. `GET /api/agent/skills` e
+`GET /api/agent/skills/:id` exigem `x-usami-token` e recarregam o diretório a
+cada consulta; a resposta traz `activation.canActivate`, os motivos e o que
+falta (`missing.tools`/`missing.dependencies`).
 
 ## Módulos extraídos na auditoria de 2026-11-08
 
@@ -201,7 +215,7 @@ Nenhum deles é publicado nem ativado sem autorização explícita.
 ## Segurança de borda da API local
 
 - `Host` e `Origin` passam por allowlist fechada (`src/api-security.js`): `127.0.0.1:8787`, `localhost:8787`, os hosts das origens do front e `USAMI_ALLOWED_HOSTS`. A regra antiga "Origin == Host" foi removida (DNS rebinding). Origens extras (LAN, `terminal.local`): `USAMI_ALLOWED_ORIGINS` e `USAMI_ALLOWED_HOSTS`, separadas por vírgula.
-- Exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto): `/api/memory*`, `/api/agent/memory*`, `/api/agent/executions`, `POST /api/agent/tools/*/execute`, `/api/agent/confirmations`, `/api/agent/permissions`, `/api/agent/plans*`, `/api/personality`, `/api/rag/context`; toda escrita sensível de `/api/technique` (inclui `note` e status ≠ `proposta`), `/api/plan`, `POST /api/learning/verdict`, `/api/stt`, `/api/media/analyze`, `/api/proactive/*` e `/api/n8n/command(s)` + `/ack`. Sem o token no servidor a resposta é 503 (fail-closed); token errado/ausente é 401. O proxy do Vite injeta o header em todo `/api` do navegador, então o token não chega ao bundle; o n8n precisa enviá-lo quando chamar rota tokenizada.
+- Exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto): `/api/memory*`, `/api/agent/memory*`, `/api/agent/executions`, `POST /api/agent/tools/*/execute`, `/api/agent/confirmations`, `/api/agent/permissions`, `/api/agent/plans*`, `/api/agent/skills*`, `/api/personality`, `/api/rag/context`; toda escrita sensível de `/api/technique` (inclui `note` e status ≠ `proposta`), `/api/plan`, `POST /api/learning/verdict`, `/api/stt`, `/api/media/analyze`, `/api/proactive/*` e `/api/n8n/command(s)` + `/ack`. Sem o token no servidor a resposta é 503 (fail-closed); token errado/ausente é 401. O proxy do Vite injeta o header em todo `/api` do navegador, então o token não chega ao bundle; o n8n precisa enviá-lo quando chamar rota tokenizada.
 - Ficam só com a borda de Host/Origin (sem token): GETs de leitura usados pelo n8n (`/api/techniques`, `/api/technique?id`) e `GET /api/learning` — token neles exigiria credencial no Nyarch. O poll `GET /api/n8n/commands` **continua tokenizado** (é o frontend/proxy que o chama).
 - O `.env` é `USAMI_KEYS_FILE` ou `../.env` relativo ao projeto; não há mais caminhos fixos de `A:\` nem fallback para outro projeto.
 - Webhook para o n8n: com `N8N_WEBHOOK_SECRET` sai com `X-Usami-Timestamp` e `X-Usami-Signature` (`sha256=` + HMAC-SHA256 de `<timestamp>.<corpo>`); `N8N_WEBHOOK_OMIT_TEXT=true` remove `userMessage` e `reply`.
