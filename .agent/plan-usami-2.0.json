@@ -73,6 +73,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Executar `memory.search` retorna `ok: true` com linha no histórico; verificação falsa retorna `failed`.",
       "scopeNotes": "Nenhuma ferramenta de escrita nesta story. O executor não decide permissão — isso é S5.",
+      "status": "done",
       "blockedBy": ["S2"],
       "techGuidance": "Contrato de ferramenta vem de S2. Reaproveitar os índices existentes em vez de criar outro banco; não duplicar `technique-store`."
     },
