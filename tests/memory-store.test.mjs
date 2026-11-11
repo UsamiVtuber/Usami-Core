@@ -324,3 +324,42 @@ test('setAffinity faz clamp 0–100 e reseta o contador diário na virada do dia
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('espelho do vínculo: guarda intimacy, deriva níveis/progresso e sobrevive ao reload', () => {
+  const dir = tempDir();
+  try {
+    const clock = { iso: '2026-10-24T12:00:00.000Z' };
+    const store = makeStore(dir, clock);
+    store.load();
+    assert.equal(store.getBondMirror(), null);
+
+    store.setBondMirror({
+      intimacy: { carinho: 31, humor: 0, companhia: 26 },
+      updatedAt: '2026-10-24T11:00:00.000Z',
+    });
+    const mirror = store.getBondMirror();
+    assert.deepEqual(mirror.intimacy, { carinho: 31, humor: 0, companhia: 26 });
+    assert.equal(mirror.meters.carinho.level, 2); // 31 >= 25
+    assert.ok(Math.abs(mirror.meters.carinho.progress - (31 - 25) / (60 - 25)) < 1e-9);
+    assert.equal(mirror.meters.humor.level, 1);
+    assert.equal(mirror.summary.level, 2);
+    assert.equal(mirror.updatedAt, '2026-10-24T11:00:00.000Z');
+
+    // o disco guarda só o essencial; níveis e progresso são derivados na leitura
+    const onDisk = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+    assert.deepEqual(onDisk.bond, {
+      intimacy: { carinho: 31, humor: 0, companhia: 26 },
+      updatedAt: '2026-10-24T11:00:00.000Z',
+    });
+    const reloaded = makeStore(dir, clock).load();
+    assert.equal(reloaded.bond.intimacy.carinho, 31);
+
+    // fora da faixa é clampado; snapshot inválido não apaga o espelho atual
+    store.setBondMirror({ intimacy: { carinho: 9999, humor: -3, companhia: 12 } });
+    assert.deepEqual(store.getBondMirror().intimacy, { carinho: 999, humor: 0, companhia: 12 });
+    store.setBondMirror({});
+    assert.equal(store.getBondMirror().intimacy.carinho, 999);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

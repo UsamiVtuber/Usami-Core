@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMemoryStore } from '../src/memory-store.js';
+import { createBondStore } from '../src/bond-store.js';
 
 // O server.mjs cria o depósito padrão na avaliação do módulo; o diretório é
 // trocado ANTES do import para nenhum teste encostar em data/.
@@ -59,7 +60,12 @@ function seeded() {
   store.upsertSummary('2026-10-23', 'conversamos sobre gatos');
   store.appendHistory('user', 'oi', '2026-10-24T12:00:00.000Z');
   store.setAffinity(42, '2026-10-24');
-  return { dir, store, handler: createMemoryHandler({ memoryStore: store, apiToken: TEST_TOKEN }) };
+  // Vínculo real em diretório próprio: o espelho na memória sai do bond.json.
+  const bondStore = createBondStore({ dataDir: dir });
+  bondStore.load();
+  bondStore.importState({ intimacy: { carinho: 31, companhia: 26 }, log: [] });
+  store.setBondMirror(bondStore.getAll());
+  return { dir, store, bondStore, handler: createMemoryHandler({ memoryStore: store, bondStore, apiToken: TEST_TOKEN }) };
 }
 
 test('rotas de memória exigem token: sem ele 401, errado 401, sem token no servidor 503', async () => {
@@ -101,6 +107,11 @@ test('GET /api/memory devolve seções, recentes, resumos e dias — sem o texto
     assert.equal(data.memory.history.length, 1);
     assert.equal(data.memory.history[0].count, 1);
     assert.equal(data.memory.affinity.score, 42);
+    // espelho do vínculo: mesmos números do /api/bond, com nível derivado
+    assert.equal(data.memory.bond.intimacy.carinho, 31);
+    assert.equal(data.memory.bond.intimacy.companhia, 26);
+    assert.equal(data.memory.bond.meters.carinho.level, 2);
+    assert.equal(data.memory.bond.summary.level, 2);
     assert.ok(!JSON.stringify(data).includes('"oi"'), 'conteúdo da conversa não vaza no snapshot');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -152,6 +163,9 @@ test('forget granular: fato, recente, seção, resumo, histórico — cada um co
     assert.equal(all.status, 200);
     assert.equal(all.data.memory.affinity.score, 0);
     assert.equal(all.data.memory.sections.user.length, 0);
+    // os medidores vivem no bond.json: limpar a memória não apaga o vínculo,
+    // então o espelho volta na resposta em vez de sumir.
+    assert.equal(all.data.memory.bond.intimacy.carinho, 31);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

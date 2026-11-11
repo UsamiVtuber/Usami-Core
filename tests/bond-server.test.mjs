@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBondStore } from '../src/bond-store.js';
+import { createMemoryStore } from '../src/memory-store.js';
 
 // O server.mjs cria os depósitos padrão na avaliação do módulo; o diretório é
 // trocado ANTES do import para nenhum teste encostar em data/.
@@ -145,6 +146,25 @@ test('POST /api/bond/reset exige confirmação escrita e zera o estado', async (
     assert.deepEqual(reset.data.bond.log, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eventos do vínculo espelham os medidores no memory.json', async () => {
+  const { dir, store } = seeded();
+  const memoryDir = mkdtempSync(join(tmpdir(), 'usami-bond-mirror-'));
+  const memoryStore = createMemoryStore({ dataDir: memoryDir });
+  memoryStore.load();
+  try {
+    const handler = createBondHandler({ bondStore: store, memoryStore, apiToken: TEST_TOKEN });
+    await call(handler, jsonReq('/api/bond/event', { content: 'oi', spoken: true }));
+    assert.deepEqual(memoryStore.getBondMirror().intimacy, { carinho: 1, humor: 0, companhia: 2 });
+
+    // reset também atualiza o espelho, em vez de deixar o valor antigo
+    await call(handler, jsonReq('/api/bond/reset', { confirm: 'APAGAR' }));
+    assert.deepEqual(memoryStore.getBondMirror().intimacy, { carinho: 0, humor: 0, companhia: 0 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(memoryDir, { recursive: true, force: true });
   }
 });
 

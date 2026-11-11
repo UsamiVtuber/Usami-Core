@@ -11,6 +11,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { METER_KEYS, bondSummary, clampMeters, levelFor, meterProgress } from './bond-core.js';
 
 const MEMORY_FILE = 'memory.json';
 const MEMORY_VERSION = 2;
@@ -50,6 +51,18 @@ function isDateString(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+// Espelho dos medidores do vínculo. A fonte continua sendo `bond.json`; a
+// memória guarda uma cópia para a aba Memória conseguir mostrar o vínculo sem
+// depender de uma segunda rota. Níveis e progresso são derivados na leitura,
+// então o disco guarda só o essencial e um arquivo editado à mão não mente.
+function normalizeBondMirror(value) {
+  if (!isPlainObject(value) || !isPlainObject(value.intimacy)) return null;
+  return {
+    intimacy: clampMeters(value.intimacy),
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : null,
+  };
+}
+
 // Soma dias a uma data "YYYY-MM-DD" sem depender de fuso local.
 function addDays(dateStr, days) {
   const date = new Date(dateStr + 'T00:00:00.000Z');
@@ -76,6 +89,7 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
     dailyHistory: {},
     summaries: [],
     affinity: { score: 0, lastDailyGainDate: null, totalDailyGainToday: 0 },
+    bond: null,
   });
 
   // Rebuilda qualquer entrada (disco, default, payload de save) sobre a forma
@@ -183,6 +197,7 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
         lastDailyGainDate: typeof affinity.lastDailyGainDate === 'string' ? affinity.lastDailyGainDate : null,
         totalDailyGainToday: Number.isFinite(affinity.totalDailyGainToday) ? affinity.totalDailyGainToday : 0,
       },
+      bond: normalizeBondMirror(input.bond),
     };
   }
 
@@ -441,6 +456,35 @@ export function createMemoryStore({ dataDir, now = () => new Date().toISOString(
         data.affinity.lastDailyGainDate = day;
         data.affinity.totalDailyGainToday = 0;
       }
+      return persist();
+    },
+
+    /** Medidores espelhados, com níveis e progresso derivados do XP salvo. */
+    getBondMirror() {
+      if (!data.bond) return null;
+      const intimacy = { ...data.bond.intimacy };
+      return {
+        intimacy,
+        meters: Object.fromEntries(METER_KEYS.map(key => [key, {
+          xp: intimacy[key],
+          level: levelFor(intimacy[key]),
+          progress: meterProgress(intimacy[key]),
+        }])),
+        summary: bondSummary(intimacy),
+        updatedAt: data.bond.updatedAt,
+      };
+    },
+
+    /** Grava o espelho a partir do snapshot de /api/bond; sem mudança, não reescreve. */
+    setBondMirror(snapshot) {
+      const next = normalizeBondMirror(snapshot);
+      if (!next) return data;
+      const current = data.bond;
+      const unchanged = current
+        && current.updatedAt === next.updatedAt
+        && METER_KEYS.every(key => current.intimacy[key] === next.intimacy[key]);
+      if (unchanged) return data;
+      data.bond = next;
       return persist();
     },
 

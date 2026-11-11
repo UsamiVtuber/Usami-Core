@@ -193,6 +193,13 @@ try {
 } catch {
   console.error('Aviso: vínculo local indisponível — os medidores do VN ficam zerados.');
 }
+// Espelho inicial em memory.json: instalações que já tinham medidores passam a
+// mostrá-los na aba Memória sem esperar um novo evento de vínculo.
+try {
+  installMemoryStore.setBondMirror(installBondStore.getAll());
+} catch (error) {
+  console.error('Aviso: espelho do vínculo na memória indisponível:', error?.message || error);
+}
 
 // Conquistas (data/achievements.json): só os desbloqueios; o catálogo é puro
 // (achievements.js) e as condições olham o estado real do vínculo acima.
@@ -1201,6 +1208,9 @@ function memorySnapshot(store, nowIso = new Date().toISOString()) {
       .map(([date, messages]) => ({ date, count: messages.length }))
       .sort((a, b) => (a.date < b.date ? -1 : 1)),
     affinity: store.getAffinity(),
+    // Cópia dos medidores do vínculo guardada no memory.json; a fonte segue
+    // sendo o bond.json, exposta em /api/bond.
+    bond: store.getBondMirror(),
   };
 }
 
@@ -1261,6 +1271,9 @@ export function createPersonalityHandler(options = {}) {
 export function createMemoryHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const store = options.memoryStore || installMemoryStore;
+  // Usado só depois do "apagar tudo": os medidores vivem no bond.json, então o
+  // espelho volta em seguida em vez de sumir junto com os fatos.
+  const bond = 'bondStore' in options ? options.bondStore : installBondStore;
 
   return async function handleMemory(req, res) {
     const send = (status, data) => {
@@ -1343,6 +1356,13 @@ export function createMemoryHandler(options = {}) {
       }
       case 'all': {
         store.reset();
+        if (bond) {
+          try {
+            store.setBondMirror(bond.getAll());
+          } catch (error) {
+            console.error('Aviso: espelho do vínculo falhou após limpar a memória:', error?.message || error);
+          }
+        }
         break;
       }
     }
@@ -1357,6 +1377,18 @@ export function createMemoryHandler(options = {}) {
 export function createBondHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const store = options.bondStore || installBondStore;
+  // Espelho em memory.json: a aba Memória lê os mesmos medidores por
+  // /api/memory, sem precisar consultar duas rotas. Falha aqui nunca derruba a
+  // resposta do vínculo — o bond.json continua sendo a fonte.
+  const memory = 'memoryStore' in options ? options.memoryStore : installMemoryStore;
+  const mirrorBond = (snapshot) => {
+    if (!memory || typeof memory.setBondMirror !== 'function') return;
+    try {
+      memory.setBondMirror(snapshot);
+    } catch (error) {
+      console.error('Aviso: espelho do vínculo na memória falhou:', error?.message || error);
+    }
+  };
   // Reavaliação pós-evento: o desbloqueio nasce da atividade do vínculo, mas
   // nunca derruba a resposta do bond se a gravação das conquistas falhar.
   const achievements = 'achievementsStore' in options ? options.achievementsStore : installAchievementsStore;
@@ -1417,7 +1449,10 @@ export function createBondHandler(options = {}) {
           return send(400, { error: 'Minutos inválidos.' });
         }
         const called = store.awardCall(minutes);
-        if (called.changed) reevaluateAchievements();
+        if (called.changed) {
+          reevaluateAchievements();
+          mirrorBond(called);
+        }
         return send(200, { ok: true, bond: called });
       }
       if (typeof payload.content !== 'string' || !payload.content.trim()) {
@@ -1425,13 +1460,19 @@ export function createBondHandler(options = {}) {
       }
       const spoken = payload.spoken === true;
       const awarded = store.awardChat(payload.content, { spoken });
-      if (awarded.changed) reevaluateAchievements();
+      if (awarded.changed) {
+        reevaluateAchievements();
+        mirrorBond(awarded);
+      }
       return send(200, { ok: true, bond: awarded });
     }
 
     if (route === '/api/bond/import') {
       const imported = store.importState({ intimacy: payload.intimacy, log: payload.log });
-      if (imported.imported) reevaluateAchievements();
+      if (imported.imported) {
+        reevaluateAchievements();
+        mirrorBond(imported);
+      }
       return send(200, { ok: true, bond: imported });
     }
 
@@ -1440,7 +1481,9 @@ export function createBondHandler(options = {}) {
       if (String(payload.confirm ?? '').trim().toUpperCase() !== FORGET_CONFIRMATION) {
         return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
       }
-      return send(200, { ok: true, bond: store.reset() });
+      const reset = store.reset();
+      mirrorBond(reset);
+      return send(200, { ok: true, bond: reset });
     }
 
     return send(404, { error: 'Não encontrado.' });

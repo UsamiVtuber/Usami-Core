@@ -762,6 +762,9 @@ function MemoryPanel() {
       {totalFacts} fato(s) durável(is) · {memory.recentFacts.length} recente(s) · {memory.summaries.length} resumo(s) · afinidade {memory.affinity.score}/100.
       Tudo fica no <code>memory.json</code> do servidor local.
     </p>
+    {memory.bond ? <p className="settings-hint">
+      Vínculo guardado junto da memória: carinho {memory.bond.intimacy.carinho} XP · humor {memory.bond.intimacy.humor} XP · companhia {memory.bond.intimacy.companhia} XP · nível {memory.bond.summary.level}.
+    </p> : null}
 
     <label className="settings-label">Digite APAGAR para liberar as exclusões
       <input
