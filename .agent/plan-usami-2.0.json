@@ -109,6 +109,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Um objetivo recebido via API devolve plano com etapas e briefing persistido.",
       "scopeNotes": "Distinto de `/api/plan` (planner de animação). Núcleo determinístico; LLM apenas por adapter injetável.",
+      "status": "done",
       "blockedBy": ["S2", "S3"],
       "techGuidance": "`generatePlan` injetável para testes sem rede. Não usar o orçamento do turno de chat para planejamento longo."
     },
