@@ -151,5 +151,5 @@ export function createSkillCatalog({
     return { ok: true, skill: record.valid ? { ...skill, manifest: { ...record.manifest } } : skill };
   }
 
-  return { load, list, get };
+  return { load, list, get, skillsDir };
 }

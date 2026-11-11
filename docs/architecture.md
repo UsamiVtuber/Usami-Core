@@ -151,6 +151,21 @@ erros, sem afetar as demais skills. `GET /api/agent/skills` e
 cada consulta; a resposta traz `activation.canActivate`, os motivos e o que
 falta (`missing.tools`/`missing.dependencies`).
 
+O ciclo de instalação e ativação (S8) fica em `src/skill-manager.js`, usando
+apenas pacotes já validados pelo dev em `data/skills/<id>/` (sem código enviado
+pelo modelo): `POST /api/agent/skills/proposals` registra benefício, riscos,
+dependências e permissões em `data/skill-proposals.json` e coloca a skill em
+`pending`; `POST /api/agent/confirmations` (com `skill` e `confirm: CONFIRMAR`)
+emite o token de uso único no `permission-gate`; e `POST /api/agent/skills/:id/install`
+consome o token e roda `node --test` em diretório temporário isolado (`cwd`
+temporário, `--permission` sem acesso a `data/` real nem segredos, timeout e
+rede bloqueada). Teste aprovado promove `pending` → `installed`; falha ou timeout
+mantém a skill `disabled` sem apagar arquivos. `POST /api/agent/skills/:id/disable`
+e `POST /api/agent/skills/:id/enable` alternam `installed`/`disabled` preservando
+os arquivos, exigindo autorização prévia e novo passe do teste isolado ao
+reativar. `GET /api/agent/skills/proposals` e `GET /api/agent/skills/proposals/:id`
+listam e consultam propostas, todos sob `x-usami-token`.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor

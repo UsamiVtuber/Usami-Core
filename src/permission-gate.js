@@ -25,6 +25,7 @@ const REVOCATION_LIMIT = 200;
 const REASON_MAX = 200;
 const EXACT_TOOL_RE = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)+$/;
 const WILDCARD_TOOL_RE = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)*\.\*$/;
+const SKILL_ID_RE = /^[a-z][a-z0-9-]{2,39}$/;
 
 export const CONFIRMATION_WORD = 'CONFIRMAR';
 export const DEFAULT_CONFIRMATION_TTL_MS = 120_000;
@@ -174,7 +175,8 @@ export function createPermissionGate({
     if (!entry) return { ok: false, reason: 'confirmação de uso único ausente, inválida ou já usada' };
     confirmations.delete(token);
     if (entry.expiresAtMs <= now()) return { ok: false, reason: 'confirmação expirada; peça uma nova' };
-    if (entry.tool !== tool.name) return { ok: false, reason: `confirmação emitida para outra ferramenta (${entry.tool})` };
+    if (entry.kind !== 'tool') return { ok: false, reason: 'confirmação emitida para outro tipo de operação' };
+    if (entry.target !== tool.name) return { ok: false, reason: `confirmação emitida para outra ferramenta (${entry.target})` };
     return { ok: true };
   }
 
@@ -192,7 +194,8 @@ export function createPermissionGate({
     const token = randomBytes(16).toString('hex');
     const expiresAtMs = now() + ttlMs;
     confirmations.set(token, {
-      tool: tool.name,
+      kind: 'tool',
+      target: tool.name,
       permissionLevel: tool.permissionLevel,
       createdAt: iso(now()),
       expiresAtMs,
@@ -206,6 +209,51 @@ export function createPermissionGate({
         expiresAt: iso(expiresAtMs),
       },
     };
+  }
+
+  /** Emite token de uso único para instalar uma skill proposta (S8). */
+  function createSkillConfirmation(skillId) {
+    const cleanId = typeof skillId === 'string' ? skillId.trim() : '';
+    if (!SKILL_ID_RE.test(cleanId)) {
+      return { ok: false, invalid: true, errors: ['skill: id de skill inválido'] };
+    }
+    const checked = check({ name: `skill.${cleanId}` });
+    if (!checked.ok) return { ok: false, denied: true, errors: [checked.reason] };
+
+    purgeExpired();
+    const token = randomBytes(16).toString('hex');
+    const expiresAtMs = now() + ttlMs;
+    confirmations.set(token, {
+      kind: 'skill',
+      target: cleanId,
+      createdAt: iso(now()),
+      expiresAtMs,
+    });
+    return {
+      ok: true,
+      confirmation: {
+        token,
+        skill: cleanId,
+        expiresAt: iso(expiresAtMs),
+      },
+    };
+  }
+
+  /** Autoriza e consome a confirmação de uso único para instalar uma skill. */
+  function authorizeSkill(skillId, confirmation) {
+    const cleanId = typeof skillId === 'string' ? skillId.trim() : '';
+    if (!SKILL_ID_RE.test(cleanId)) return { ok: false, reason: 'id de skill inválido' };
+    const checked = check({ name: `skill.${cleanId}` });
+    if (!checked.ok) return checked;
+
+    const token = typeof confirmation === 'string' ? confirmation.trim() : '';
+    const entry = token ? confirmations.get(token) : null;
+    if (!entry) return { ok: false, reason: 'confirmação de uso único ausente, inválida ou já usada' };
+    confirmations.delete(token);
+    if (entry.expiresAtMs <= now()) return { ok: false, reason: 'confirmação expirada; peça uma nova' };
+    if (entry.kind !== 'skill') return { ok: false, reason: 'confirmação emitida para ferramenta, não para skill' };
+    if (entry.target !== cleanId) return { ok: false, reason: `confirmação emitida para outra skill (${entry.target})` };
+    return { ok: true };
   }
 
   /** Revoga ferramenta exata ou integração (`namespace.*`); idempotente. */
@@ -239,6 +287,8 @@ export function createPermissionGate({
     check,
     authorize,
     createConfirmation,
+    createSkillConfirmation,
+    authorizeSkill,
     revoke,
     restore,
     list: snapshot,

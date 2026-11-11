@@ -22,6 +22,7 @@ import { createMemorySearchTool } from './src/memory-search-tool.js';
 import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.js';
 import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseBriefingThreshold } from './src/task-planner.js';
 import { createSkillCatalog } from './src/skill-catalog.js';
+import { createSkillManager } from './src/skill-manager.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -256,10 +257,15 @@ const installSkillCatalog = createSkillCatalog({
   dataDir: resolveDataDir(),
   registry: toolRegistry,
 });
+const installSkillManager = createSkillManager({
+  catalog: installSkillCatalog,
+  gate: installToolGate,
+  dataDir: resolveDataDir(),
+});
 try {
-  installSkillCatalog.load();
+  installSkillManager.load();
 } catch (error) {
-  console.error('Aviso: catálogo de skills indisponível:', error?.message || error);
+  console.error('Aviso: gerenciador de skills indisponível:', error?.message || error);
 }
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1633,6 +1639,7 @@ export function createToolHandler(options = {}) {
   const registry = options.registry || toolRegistry;
   const executor = options.executor || installToolExecutor;
   const gate = options.gate || null;
+  const skillCatalog = options.skillCatalog || null;
 
   return async function handleTools(req, res) {
     const send = (status, data) => {
@@ -1709,12 +1716,34 @@ export function createToolHandler(options = {}) {
       if (!gate) return send(500, { error: 'Permissões indisponíveis.' });
       const payload = await readJsonPayload(4096);
       if (!payload) return;
-      if (rejectUnknownKeys(payload, ['tool', 'confirm'])) return;
+      if (rejectUnknownKeys(payload, ['tool', 'skill', 'confirm'])) return;
       // Confirmação escrita, como no forget da memória: o token de uso único só
       // nasce com a palavra exata no corpo.
       if (String(payload.confirm ?? '').trim().toUpperCase() !== CONFIRMATION_WORD) {
         return send(403, { error: `Confirmação escrita necessária: envie confirm: "${CONFIRMATION_WORD}".` });
       }
+      const hasTool = payload.tool !== undefined;
+      const hasSkill = payload.skill !== undefined;
+      if (hasTool === hasSkill) return send(400, { error: 'Informe tool ou skill para confirmar.' });
+
+      if (hasSkill) {
+        if (typeof payload.skill !== 'string' || !payload.skill.trim()) return send(400, { error: 'Skill inválida.' });
+        const skillId = payload.skill.trim();
+        if (skillCatalog) {
+          skillCatalog.load();
+          const found = skillCatalog.get(skillId);
+          if (!found.ok) return send(404, { error: 'Skill não encontrada.' });
+          if (!found.skill.valid) return send(400, { error: 'Manifesto da skill inválido.' });
+          if (found.skill.state !== 'pending') {
+            return send(409, { error: 'Skill precisa estar no estado pending para confirmar instalação.' });
+          }
+        }
+        const created = gate.createSkillConfirmation(skillId);
+        if (created.invalid) return send(400, { error: created.errors[0] });
+        if (created.denied) return send(403, { error: created.errors[0] });
+        return send(201, { ok: true, confirmation: created.confirmation });
+      }
+
       if (typeof payload.tool !== 'string' || !payload.tool.trim()) return send(400, { error: 'Ferramenta inválida.' });
       const created = gate.createConfirmation(payload.tool.trim());
       if (created.notFound) return send(404, { error: 'Ferramenta não encontrada.' });
@@ -1892,17 +1921,19 @@ export function createPlansHandler(options = {}) {
   };
 }
 
-// Catálogo de Skills (/api/agent/skills): descoberta somente leitura de
-// `data/skills/<id>/skill.json`. Recarrega a cada consulta para refletir
-// diretórios novos sem reiniciar; manifesto inválido aparece na própria
-// listagem (`valid:false`) em vez de derrubar a rota.
+// Catálogo e Ciclo de Vida de Skills (/api/agent/skills): descoberta somente
+// leitura em S7 e fluxo de proposta, confirmação (S5), teste isolado e
+// ativar/desativar em S8.
 const AGENT_SKILL_PATH_RE = /^\/api\/agent\/skills\/([a-z][a-z0-9-]{2,39})$/;
+const AGENT_SKILL_PROPOSAL_PATH_RE = /^\/api\/agent\/skills\/proposals\/(sp-[0-9a-f]{12})$/;
+const AGENT_SKILL_ACTION_RE = /^\/api\/agent\/skills\/([a-z][a-z0-9-]{2,39})\/(install|enable|disable)$/;
 
 export function createSkillsHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const catalog = options.catalog || installSkillCatalog;
+  const manager = options.manager || (options.catalog ? null : installSkillManager);
 
-  return function handleSkills(req, res) {
+  return async function handleSkills(req, res) {
     const send = (status, data) => {
       if (res.headersSent) return;
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -1913,25 +1944,127 @@ export function createSkillsHandler(options = {}) {
       return send(403, { error: 'Origem não autorizada.' });
     }
     if (denyWithoutToken(req, options, send)) return;
-    if (req.method !== 'GET') return send(404, { error: 'Não encontrado.' });
-
-    let snapshot;
-    try {
-      snapshot = catalog.load();
-    } catch (error) {
-      console.error('Aviso: não foi possível ler o catálogo de skills:', error?.message || error);
-      return send(500, { error: 'Catálogo de skills indisponível.' });
-    }
 
     const path = new URL(req.url || '/api/agent/skills', 'http://127.0.0.1:8787').pathname;
-    if (path === '/api/agent/skills') {
-      return send(200, { ok: true, skills: snapshot.skills, count: snapshot.skills.length });
+
+    if (req.method === 'GET') {
+      if (path === '/api/agent/skills/proposals') {
+        if (!manager) return send(500, { error: 'Gerenciador de skills indisponível.' });
+        const proposals = manager.listProposals();
+        return send(200, { ok: true, proposals, count: proposals.length });
+      }
+      const proposalMatch = path.match(AGENT_SKILL_PROPOSAL_PATH_RE);
+      if (proposalMatch) {
+        if (!manager) return send(500, { error: 'Gerenciador de skills indisponível.' });
+        const found = manager.getProposal(proposalMatch[1]);
+        if (!found.ok) return send(404, { error: 'Proposta não encontrada.' });
+        return send(200, { ok: true, proposal: found.proposal });
+      }
+
+      let snapshot;
+      try {
+        snapshot = catalog.load();
+      } catch (error) {
+        console.error('Aviso: não foi possível ler o catálogo de skills:', error?.message || error);
+        return send(500, { error: 'Catálogo de skills indisponível.' });
+      }
+
+      if (path === '/api/agent/skills') {
+        return send(200, { ok: true, skills: snapshot.skills, count: snapshot.skills.length });
+      }
+      const match = path.match(AGENT_SKILL_PATH_RE);
+      if (!match) return send(404, { error: 'Não encontrado.' });
+      const found = catalog.get(match[1]);
+      if (!found.ok) return send(404, { error: 'Skill não encontrada.' });
+      return send(200, { ok: true, skill: found.skill });
     }
-    const match = path.match(AGENT_SKILL_PATH_RE);
-    if (!match) return send(404, { error: 'Não encontrado.' });
-    const found = catalog.get(match[1]);
-    if (!found.ok) return send(404, { error: 'Skill não encontrada.' });
-    return send(200, { ok: true, skill: found.skill });
+
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+    const isProposalPost = path === '/api/agent/skills/proposals';
+    const actionMatch = isProposalPost ? null : path.match(AGENT_SKILL_ACTION_RE);
+    if (!isProposalPost && !actionMatch) return send(404, { error: 'Não encontrado.' });
+    if (!manager) return send(500, { error: 'Gerenciador de skills indisponível.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+    const read = await readRequestBody(req, { limit: isProposalPost ? 16384 : 4096 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    const rejectUnknownKeys = (allowed) => {
+      const unknown = Object.keys(payload).filter(key => !allowed.includes(key));
+      if (!unknown.length) return false;
+      send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+      return true;
+    };
+
+    if (isProposalPost) {
+      if (rejectUnknownKeys(['skillId', 'benefit', 'risks', 'dependencies', 'permissions'])) return;
+      let result;
+      try {
+        result = manager.propose(payload);
+      } catch (error) {
+        console.error('Aviso: não foi possível registrar proposta de skill:', error?.message || error);
+        return send(500, { error: 'Não foi possível salvar a proposta.' });
+      }
+      if (result.notFound) return send(404, { error: 'Skill não encontrada.' });
+      if (result.forbiddenOrigin) return send(403, { error: result.error });
+      if (result.conflict) return send(409, { error: result.error });
+      if (!result.ok) return send(400, { error: 'Proposta inválida.', details: result.errors });
+      return send(201, { ok: true, proposal: result.proposal, skill: result.skill });
+    }
+
+    const [, skillId, action] = actionMatch;
+    if (action === 'install') {
+      if (rejectUnknownKeys(['confirmation'])) return;
+      if (payload.confirmation !== undefined && (typeof payload.confirmation !== 'string' || payload.confirmation.length > 128)) {
+        return send(400, { error: 'confirmation: deve ser texto de até 128 caracteres.' });
+      }
+    } else if (rejectUnknownKeys([])) {
+      return;
+    }
+
+    let result;
+    try {
+      if (action === 'install') result = await manager.install(skillId, { confirmation: payload.confirmation });
+      else if (action === 'enable') result = await manager.enable(skillId);
+      else result = manager.disable(skillId);
+    } catch (error) {
+      console.error('Aviso: falha ao atualizar skill:', error?.message || error);
+      return send(500, { error: 'Não foi possível atualizar a skill.' });
+    }
+
+    if (result.notFound) return send(404, { error: 'Skill não encontrada.' });
+    if (result.invalidManifest) return send(400, { error: 'Manifesto da skill inválido.', details: result.errors });
+    if (result.denied) return send(403, { ok: false, error: result.error });
+    if (result.wrongState) return send(409, { error: result.error });
+    if (result.testFailed) {
+      return send(422, {
+        ok: false,
+        installed: false,
+        error: result.error,
+        skill: result.skill,
+        testResult: result.testResult,
+        ...(result.proposal ? { proposal: result.proposal } : {}),
+      });
+    }
+    return send(200, {
+      ok: true,
+      ...(result.installed !== undefined ? { installed: result.installed } : {}),
+      ...(result.unchanged !== undefined ? { unchanged: result.unchanged } : {}),
+      skill: result.skill,
+      ...(result.testResult ? { testResult: result.testResult } : {}),
+      ...(result.proposal ? { proposal: result.proposal } : {}),
+    });
   };
 }
 
@@ -3191,7 +3324,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
-  const handleTools = createToolHandler({ gate: installToolGate });
+  const handleTools = createToolHandler({ gate: installToolGate, skillCatalog: installSkillCatalog });
   const handlePlans = createPlansHandler();
   const handleSkills = createSkillsHandler();
   const handleAchievements = createAchievementsHandler();
