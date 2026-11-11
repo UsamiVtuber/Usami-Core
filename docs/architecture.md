@@ -84,6 +84,18 @@ cobertos por testes, mas continuam experimentais até terem a mesma paridade
 operacional do handler ativo. Não trocar a rota de produção por ele apenas
 porque os testes unitários passam.
 
+## Domínio agêntico (em construção)
+
+O USAMI 2.0 adiciona um domínio operacional **ao lado** do caminho ativo, em
+`src/agent-*.js` e no namespace `/api/agent/*`. Os contratos puros vivem em
+`src/agent-contracts.js` (Intent, Plan/PlanStep, ToolSpec, SkillManifest,
+PermissionLevel 1–4 e ExecutionRecord); nenhuma rota desse namespace está
+publicada ainda.
+
+`/api/plan` continua sendo o planner de **animação**; plano de tarefas mora em
+`/api/agent/plans` (S6). O caminho de produção (`createChatHandler`) e o
+contrato do chat não mudam.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
