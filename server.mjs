@@ -14,6 +14,8 @@ import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { createBondStore } from './src/bond-store.js';
+import { createOperationalMemoryStore, OPERATIONAL_DEFAULT_LIMIT, OPERATIONAL_MAX_LIMIT } from './src/operational-memory-store.js';
+import { OPERATIONAL_KINDS, OPERATIONAL_STATUSES } from './src/agent-contracts.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -193,6 +195,16 @@ try {
   installAchievementsStore.load();
 } catch {
   console.error('Aviso: conquistas locais indisponíveis — a lista volta vazia.');
+}
+
+// Memória operacional do domínio agêntico (data/operational-memory.json):
+// projetos, tarefas e compromissos. Separada de memory.json; rotas em
+// /api/agent/memory com a mesma borda Host/Origin + token.
+const installOperationalStore = createOperationalMemoryStore({ dataDir: resolveDataDir() });
+try {
+  installOperationalStore.load();
+} catch (error) {
+  console.error('Aviso: memória operacional indisponível:', error?.message || error);
 }
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1384,6 +1396,139 @@ export function createBondHandler(options = {}) {
     }
 
     return send(404, { error: 'Não encontrado.' });
+  };
+}
+
+// Memória operacional: projetos, tarefas e compromissos. É a camada que o
+// Memory Engine não tinha; `/api/memory` continua sendo fatos semânticos.
+// Consulta por status/projeto/tipo/janela de dueAt e trilha append-only.
+const OPERATIONAL_RECORD_PATH_RE = /^\/api\/agent\/memory\/(op-[0-9a-f]{12})$/;
+
+function parseOperationalQuery(searchParams, { forList }) {
+  const limitValue = searchParams.get('limit');
+  let limit = forList ? OPERATIONAL_DEFAULT_LIMIT : 100;
+  if (limitValue !== null) {
+    const parsed = Number(limitValue);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > OPERATIONAL_MAX_LIMIT) {
+      return { ok: false, error: `limit inválido (inteiro entre 1 e ${OPERATIONAL_MAX_LIMIT}).` };
+    }
+    limit = parsed;
+  }
+  if (!forList) return { ok: true, limit };
+
+  const filters = { limit };
+  const status = searchParams.get('status');
+  if (status !== null) {
+    if (!OPERATIONAL_STATUSES.includes(status)) {
+      return { ok: false, error: `status inválido (use ${OPERATIONAL_STATUSES.join('|')}).` };
+    }
+    filters.status = status;
+  }
+  const kind = searchParams.get('kind');
+  if (kind !== null) {
+    if (!OPERATIONAL_KINDS.includes(kind)) {
+      return { ok: false, error: `kind inválido (use ${OPERATIONAL_KINDS.join('|')}).` };
+    }
+    filters.kind = kind;
+  }
+  const projectId = searchParams.get('projectId');
+  if (projectId !== null) {
+    if (!/^op-[0-9a-f]{12}$/.test(projectId)) return { ok: false, error: 'projectId inválido.' };
+    filters.projectId = projectId;
+  }
+  for (const key of ['from', 'to']) {
+    const value = searchParams.get(key);
+    if (value === null) continue;
+    if (Number.isNaN(Date.parse(value))) return { ok: false, error: `${key} inválido (data ISO-8601).` };
+    filters[key] = value;
+  }
+  return { ok: true, filters };
+}
+
+export function createOperationalMemoryHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.operationalStore || installOperationalStore;
+
+  return async function handleOperationalMemory(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/memory', 'http://127.0.0.1:8787');
+    const path = url.pathname;
+
+    if (req.method === 'GET') {
+      if (path === '/api/agent/memory/trail') {
+        const query = parseOperationalQuery(url.searchParams, { forList: false });
+        if (!query.ok) return send(400, { error: query.error });
+        const trail = store.trail({ limit: query.limit });
+        return send(200, { ok: true, trail, count: trail.length });
+      }
+      if (path === '/api/agent/memory') {
+        const query = parseOperationalQuery(url.searchParams, { forList: true });
+        if (!query.ok) return send(400, { error: query.error });
+        const records = store.list(query.filters);
+        return send(200, { ok: true, records, count: records.length });
+      }
+      const match = path.match(OPERATIONAL_RECORD_PATH_RE);
+      if (!match) return send(404, { error: 'Não encontrado.' });
+      const record = store.get(match[1]);
+      if (!record) return send(404, { error: 'Registro não encontrado.' });
+      return send(200, { ok: true, record });
+    }
+
+    if (req.method !== 'POST' && req.method !== 'PATCH') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+
+    const read = await readRequestBody(req, { limit: 16384 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    if (req.method === 'POST') {
+      if (path !== '/api/agent/memory') return send(404, { error: 'Não encontrado.' });
+      let created;
+      try {
+        created = store.create({ ...payload, origin: payload.origin ?? 'user' });
+      } catch {
+        return send(500, { error: 'Não foi possível salvar o registro.' });
+      }
+      if (!created.ok) return send(400, { error: 'Registro inválido.', details: created.errors });
+      return send(201, { ok: true, record: created.record });
+    }
+
+    const match = path.match(OPERATIONAL_RECORD_PATH_RE);
+    if (!match) return send(404, { error: 'Não encontrado.' });
+    let updated;
+    try {
+      updated = store.update(match[1], payload);
+    } catch {
+      return send(500, { error: 'Não foi possível atualizar o registro.' });
+    }
+    if (!updated.ok) {
+      if (updated.notFound) return send(404, { error: 'Registro não encontrado.' });
+      return send(400, { error: 'Atualização inválida.', details: updated.errors });
+    }
+    return send(200, { ok: true, record: updated.record, changed: updated.changed });
   };
 }
 
@@ -2642,6 +2787,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
+  const handleOperationalMemory = createOperationalMemoryHandler();
   const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
@@ -2673,6 +2819,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
       if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
         || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
+      if (req.url === '/api/agent/memory' || req.url.startsWith('/api/agent/memory/') || req.url.startsWith('/api/agent/memory?')) return handleOperationalMemory(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

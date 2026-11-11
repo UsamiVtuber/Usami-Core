@@ -89,6 +89,21 @@
  */
 
 /**
+ * @typedef {Object} OperationalRecord
+ * @property {string} schema
+ * @property {string} id `op-<12 hex>`
+ * @property {'project'|'task'|'commitment'} kind
+ * @property {string} title
+ * @property {'open'|'in_progress'|'done'|'cancelled'|'blocked'} status
+ * @property {string} [dueAt] ISO-8601 (com fuso) ou data YYYY-MM-DD
+ * @property {string} [projectId] `op-<12 hex>` do projeto
+ * @property {'user'|'agent'|'planner'|'suggestion'} origin
+ * @property {number} relevance 0..1
+ * @property {string} createdAt
+ * @property {string} updatedAt
+ */
+
+/**
  * @typedef {Object} ExecutionRecord
  * @property {string} schema
  * @property {string} id `ex-<12 hex>`
@@ -114,6 +129,7 @@ export const AGENT_SCHEMAS = Object.freeze({
   tool: 'usami.agent.tool.v1',
   skill: 'usami.agent.skill.v1',
   execution: 'usami.agent.execution.v1',
+  operational: 'usami.agent.operational.v1',
 });
 
 export const AGENT_LIMITS = Object.freeze({
@@ -136,6 +152,7 @@ export const AGENT_LIMITS = Object.freeze({
   maxReasonChars: 500,
   maxInputSummaryChars: 200,
   maxDurationMs: 3600000,
+  maxOperationalTitleChars: 200,
 });
 
 export const INTENT_KINDS = Object.freeze(['conversation', 'operational', 'complex']);
@@ -148,6 +165,9 @@ export const SKILL_STATES = Object.freeze(['installed', 'available', 'pending', 
 export const SKILL_ORIGINS = Object.freeze(['dev', 'imported', 'model']);
 export const EXECUTION_STATUSES = Object.freeze(['ok', 'failed', 'denied', 'timeout']);
 export const EXECUTION_ORIGINS = Object.freeze(['user', 'agent', 'planner', 'suggestion']);
+export const OPERATIONAL_KINDS = Object.freeze(['project', 'task', 'commitment']);
+export const OPERATIONAL_STATUSES = Object.freeze(['open', 'in_progress', 'done', 'cancelled', 'blocked']);
+export const OPERATIONAL_ORIGINS = Object.freeze(['user', 'agent', 'planner', 'suggestion']);
 export const PARAMETER_TYPES = Object.freeze(['string', 'number', 'boolean', 'object', 'array']);
 export const EFFORTS = Object.freeze(['low', 'medium', 'high']);
 
@@ -165,13 +185,15 @@ const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const TOOL_NAME_RE = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)+$/;
 const SKILL_ID_RE = /^[a-z][a-z0-9-]{2,39}$/;
 const PARAM_NAME_RE = /^[a-z][a-zA-Z0-9]{0,39}$/;
+const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2}))?$/;
 const ID_RES = Object.freeze({
   intent: /^int-[0-9a-f]{12}$/,
   plan: /^pl-[0-9a-f]{12}$/,
   step: /^st-[0-9a-f]{12}$/,
   execution: /^ex-[0-9a-f]{12}$/,
+  operational: /^op-[0-9a-f]{12}$/,
 });
-const ID_PREFIXES = Object.freeze({ intent: 'int', plan: 'pl', step: 'st', execution: 'ex' });
+const ID_PREFIXES = Object.freeze({ intent: 'int', plan: 'pl', step: 'st', execution: 'ex', operational: 'op' });
 
 const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const isIsoDate = value => typeof value === 'string' && ISO_RE.test(value) && !Number.isNaN(Date.parse(value));
@@ -676,6 +698,54 @@ export function validateExecutionRecord(input) {
   if (input.stepId !== undefined) value.stepId = requireId(input.stepId, 'step', 'stepId', errors);
   if (input.inputSummary !== undefined) {
     value.inputSummary = requireText(input.inputSummary, { max: AGENT_LIMITS.maxInputSummaryChars }, 'inputSummary', errors);
+  }
+  if (errors.length) return { ok: false, errors, value: null };
+  return { ok: true, errors: [], value };
+}
+
+// --- OperationalRecord -----------------------------------------------------
+
+export function validateOperationalRecord(input) {
+  const errors = [];
+  if (!isObject(input)) return { ok: false, errors: ['record: deve ser um objeto JSON'], value: null };
+  if (input.schema !== AGENT_SCHEMAS.operational) errors.push(`schema: deve ser ${AGENT_SCHEMAS.operational}`);
+  const id = requireId(input.id, 'operational', 'id', errors);
+  const kind = requireEnum(input.kind, OPERATIONAL_KINDS, 'kind', errors);
+  const title = requireText(input.title, { min: 3, max: AGENT_LIMITS.maxOperationalTitleChars }, 'title', errors);
+  const status = requireEnum(input.status, OPERATIONAL_STATUSES, 'status', errors);
+  const origin = requireEnum(input.origin, OPERATIONAL_ORIGINS, 'origin', errors);
+  if (typeof input.relevance !== 'number' || !Number.isFinite(input.relevance) || input.relevance < 0 || input.relevance > 1) {
+    errors.push('relevance: deve ser número entre 0 e 1');
+  }
+  const createdAt = requireIsoDate(input.createdAt, 'createdAt', errors);
+  const updatedAt = requireIsoDate(input.updatedAt, 'updatedAt', errors);
+  if (isIsoDate(createdAt) && isIsoDate(updatedAt) && Date.parse(updatedAt) < Date.parse(createdAt)) {
+    errors.push('updatedAt: não pode ser anterior a createdAt');
+  }
+  const value = {
+    schema: AGENT_SCHEMAS.operational,
+    id,
+    kind,
+    title,
+    status,
+    origin,
+    relevance: input.relevance,
+    createdAt,
+    updatedAt,
+  };
+  if (input.dueAt !== undefined) {
+    if (typeof input.dueAt !== 'string' || !DUE_DATE_RE.test(input.dueAt) || Number.isNaN(Date.parse(input.dueAt))) {
+      errors.push('dueAt: deve ser data ISO-8601 (com fuso) ou YYYY-MM-DD');
+    } else {
+      value.dueAt = input.dueAt;
+    }
+  }
+  if (input.projectId !== undefined) {
+    if (typeof input.projectId !== 'string' || !ID_RES.operational.test(input.projectId)) {
+      errors.push('projectId: formato esperado op-<12 hex>');
+    } else {
+      value.projectId = input.projectId;
+    }
   }
   if (errors.length) return { ok: false, errors, value: null };
   return { ok: true, errors: [], value };
