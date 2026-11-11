@@ -2181,7 +2181,7 @@ export function Usami() {
     const isVideo = media.isVideo;
     const mediaPrompt = userText || (isVideo ? 'Dá uma olhada nesse vídeo que eu compartilhei!' : 'Dá uma olhada nessa imagem que eu compartilhei!');
 
-    addTurn('user', `[${isVideo ? 'Vídeo 🎬' : 'Imagem 🖼️'}: ${media.name}] ${userText}`.trim(), 'text');
+    addTurn('user', `[${isVideo ? 'Vídeo' : 'Imagem'}: ${media.name}] ${userText}`.trim(), 'text');
 
     // 1. Fala reativa imediata da Usami enquanto processa ("Assistindo / olhando...")
     const immediatePhrases = isVideo
@@ -2249,10 +2249,10 @@ export function Usami() {
 
       let detailSummary = '';
       if (Array.isArray(data.ocr) && data.ocr.length) {
-        detailSummary += `\n[🔍 OCR detectado: ${data.ocr.join(' | ')}]`;
+        detailSummary += `\n[OCR detectado: ${data.ocr.join(' | ')}]`;
       }
       if (data.transcript) {
-        detailSummary += `\n[🎙️ Áudio: ${data.transcript}]`;
+        detailSummary += `\n[Áudio: ${data.transcript}]`;
       }
 
       const fullCleanText = balloons.map(b => b.display).join(' ');
@@ -2370,7 +2370,7 @@ export function Usami() {
           {vrmaOpen && (
             <div className="vrma-tester-panel" onClick={e => e.stopPropagation()}>
               <div className="vrma-tester-header">
-                <span className="vrma-tester-title">🎬 Animações VRMA</span>
+                <span className="vrma-tester-title">Animações VRMA</span>
                 <span className="vrma-current-badge">{currentVrma ? `▶ ${currentVrma}` : 'Idle Natural'}</span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -2401,7 +2401,7 @@ export function Usami() {
                   }}
                   style={{ gridColumn: 'span 2', fontWeight: 600, background: sleepCompanion ? 'rgba(255, 94, 126, 0.4)' : undefined }}
                 >
-                  {sleepCompanion ? `🌙 Encerrar Companion de Sono (${sleepCompanionMinutesLeft}m restantes)` : '🌙 Iniciar Companion p/ Dormir (30 min sussurrado)'}
+                  {sleepCompanion ? `Encerrar Companion de Sono (${sleepCompanionMinutesLeft}m restantes)` : 'Iniciar Companion p/ Dormir (30 min sussurrado)'}
                 </button>
                 <button
                   className={'vrma-btn' + (quiet && !sleepCompanion ? ' active' : '')}
@@ -2415,7 +2415,7 @@ export function Usami() {
                   }}
                   style={{ gridColumn: 'span 2', fontSize: '11px', opacity: 0.85 }}
                 >
-                  {quiet && !sleepCompanion ? '💤 Acordar Avatar (Voltar ao Idle)' : '💤 Dormir Agora (Zen Instantâneo)'}
+                  {quiet && !sleepCompanion ? 'Acordar Avatar (Voltar ao Idle)' : 'Dormir Agora (Zen Instantâneo)'}
                 </button>
                 {[
                   ['talking', 'Falando (Conversa)', true],

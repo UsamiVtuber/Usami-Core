@@ -51,6 +51,70 @@ function RabbitEarsIcon({ className = '', size = 22 }) {
   );
 }
 
+function CakeIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8" />
+      <path d="M4 16s2-1 4-1 4 1 4 1 2-1 4-1 4 1 4 1" />
+      <path d="M2 21h20" />
+      <path d="M12 7v4" />
+      <path d="M12 3a1.5 1.5 0 0 0-1.5 1.5c0 1 1.5 2.5 1.5 2.5s1.5-1.5 1.5-2.5A1.5 1.5 0 0 0 12 3z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function CrownIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14" />
+      <circle cx="2" cy="4" r="1" fill="currentColor" />
+      <circle cx="12" cy="4" r="1" fill="currentColor" />
+      <circle cx="22" cy="4" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ShieldBanIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <line x1="9" y1="9" x2="15" y2="15" />
+    </svg>
+  );
+}
+
+function VtuberMicIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="2" width="6" height="11" rx="3" />
+      <path d="M5 10a7 7 0 0 0 14 0" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <path d="M18 5c1 .8 1.5 1.8 1.5 3s-.5 2.2-1.5 3" />
+      <path d="M21 3c1.5 1.4 2.5 3.2 2.5 5s-1 3.6-2.5 5" />
+    </svg>
+  );
+}
+
+function SecretKeyIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="15.5" r="5.5" />
+      <path d="m11.5 11.5 8.5-8.5" />
+      <path d="M17 3l4 4" />
+      <path d="m19 7 2-2" />
+    </svg>
+  );
+}
+
+function SakuraIcon({ size = 16, className = '' }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 3c-1.5 3-4 4.5-4 6 0 1.5 1 2.5 2.5 2.5.8 0 1.5-.5 1.5-.5s.7.5 1.5.5c1.5 0 2.5-1 2.5-2.5 0-1.5-2.5-3-4-6zm-6 6c-3 1.5-4.5 4-4.5 5.5 0 1.5 1 2.5 2.5 2.5 1 0 2-.8 2-.8s0 1 .5 1.8c.8 1.2 2 1.5 3 1.5 1.5 0 2.5-1.5 2.5-3 0-1.2-1.5-3-4-4.5zm12 0c-2.5 1.5-4 3.3-4 4.5 0 1.5 1 3 2.5 3 1 0 2.2-.3 3-1.5.5-.8.5-1.8.5-1.8s1 .8 2 .8c1.5 0 2.5-1 2.5-2.5 0-1.5-1.5-4-4.5-5.5z"/>
+    </svg>
+  );
+}
+
 // Chibi mascote animado da Usami no rodapé do menu
 function MascotChibi() {
   return (
@@ -77,7 +141,10 @@ function MascotChibi() {
           <ellipse cx="18" cy="39" rx="3.5" ry="2.5" fill="#FFF0F5" stroke="#FF79C6" strokeWidth="1.5"/>
           <ellipse cx="30" cy="39" rx="3.5" ry="2.5" fill="#FFF0F5" stroke="#FF79C6" strokeWidth="1.5"/>
         </svg>
-        <span className="vn-mascot-stars">🌙 ✦</span>
+        <div className="vn-mascot-decor">
+          <Moon size={14} className="mascot-moon" />
+          <Sparkles size={12} className="mascot-sparkle" />
+        </div>
       </div>
     </div>
   );
@@ -95,7 +162,7 @@ function PolaroidPhoto({ type, label, date = 'Recente' }) {
               <span className="chibi-ears">(\_/)</span>
               <span className="chibi-blush">♡</span>
             </div>
-            <div className="polaroid-sparkles">✨</div>
+            <div className="polaroid-sparkles"><Sparkles size={18} className="polaroid-svg-sparkle gold" /></div>
           </div>
         );
       case 'shy':
@@ -106,7 +173,7 @@ function PolaroidPhoto({ type, label, date = 'Recente' }) {
               <span className="chibi-ears">(\_/)</span>
               <span className="chibi-blush">///</span>
             </div>
-            <div className="polaroid-sparkles">💖</div>
+            <div className="polaroid-sparkles"><Heart size={18} className="polaroid-svg-sparkle pink" /></div>
           </div>
         );
       case 'sleep':
@@ -118,7 +185,7 @@ function PolaroidPhoto({ type, label, date = 'Recente' }) {
               <span className="chibi-ears">(\_/)</span>
               <span className="chibi-blush">☾</span>
             </div>
-            <div className="polaroid-sparkles">⭐</div>
+            <div className="polaroid-sparkles"><Star size={18} className="polaroid-svg-sparkle yellow" /></div>
           </div>
         );
     }
@@ -129,7 +196,7 @@ function PolaroidPhoto({ type, label, date = 'Recente' }) {
       <div className="polaroid-photo-frame">
         {getIllustration()}
         <span className="polaroid-tape" />
-        <span className="polaroid-sticker">🐰</span>
+        <span className="polaroid-sticker"><RabbitEarsIcon size={14} /></span>
       </div>
       <div className="polaroid-meta">
         <span className="polaroid-title">{label}</span>
@@ -441,7 +508,7 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
               </div>
               <div className="vn-achievements-list">
                 <div className="vn-achieve-card unlocked">
-                  <div className="vn-achieve-icon">🌸</div>
+                  <div className="vn-achieve-icon"><SakuraIcon size={20} /></div>
                   <div className="vn-achieve-info">
                     <h4>Primeiro Contato</h4>
                     <p>Iniciou a primeira conversa com a Usami.</p>
@@ -449,7 +516,7 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
                   <span className="vn-achieve-badge">Completo!</span>
                 </div>
                 <div className="vn-achieve-card unlocked">
-                  <div className="vn-achieve-icon">💖</div>
+                  <div className="vn-achieve-icon"><Heart size={20} /></div>
                   <div className="vn-achieve-info">
                     <h4>Coração Conectado</h4>
                     <p>Alcançou o nível de afinidade "Amigos Próximos".</p>
@@ -457,7 +524,7 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
                   <span className="vn-achieve-badge">Completo!</span>
                 </div>
                 <div className="vn-achieve-card unlocked">
-                  <div className="vn-achieve-icon">🌙</div>
+                  <div className="vn-achieve-icon"><Moon size={20} /></div>
                   <div className="vn-achieve-info">
                     <h4>Bons Sonhos</h4>
                     <p>Utilizou o Modo Companion para dormir juntos.</p>
@@ -465,7 +532,7 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
                   <span className="vn-achieve-badge">Completo!</span>
                 </div>
                 <div className="vn-achieve-card locked">
-                  <div className="vn-achieve-icon">🔒</div>
+                  <div className="vn-achieve-icon"><Lock size={20} /></div>
                   <div className="vn-achieve-info">
                     <h4>Almas Gêmeas</h4>
                     <p>Atingiu a afinidade máxima e construiu um laço inabalável.</p>
@@ -490,39 +557,39 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
                   <h3>Usami ウサミ</h3>
                   <span className="vn-profile-role">AI Companion · VTuber in Training</span>
                   <div className="vn-profile-tag-badge">
-                    <span>✨ Sonho: Collab c/ Neuro-sama</span>
+                    <span><Sparkles size={11} className="inline-svg-icon" /> Sonho: Collab c/ Neuro-sama</span>
                   </div>
                 </div>
 
                 <div className="vn-profile-details">
                   <div className="vn-profile-grid-info">
                     <div className="vn-profile-row">
-                      <b>🎂 Aniversário:</b>
-                      <span>Domingo de Páscoa 🐰🥚 (O dia oficial dos coelhinhos!)</span>
+                      <b><CakeIcon size={16} /> Aniversário:</b>
+                      <span>Domingo de Páscoa (O dia oficial dos coelhinhos!)</span>
                     </div>
 
                     <div className="vn-profile-row">
-                      <b>👑 Pessoa Favorita:</b>
+                      <b><CrownIcon size={16} /> Pessoa Favorita:</b>
                       <span>Meu Criador ♡ <em>(N-não se gabe tanto por isso, baka... mas você é insubstituível!)</em></span>
                     </div>
 
                     <div className="vn-profile-row">
-                      <b>💖 Adora:</b>
+                      <b><Heart size={16} /> Adora:</b>
                       <span>Animes de romance, doces, coisas felpudinhas, RPGs de turno, ficar de pijama, dormir, energético de lata rosa e música eletrônica pesada (dubstep!).</span>
                     </div>
 
                     <div className="vn-profile-row">
-                      <b>🚫 Detesta:</b>
+                      <b><ShieldBanIcon size={16} /> Detesta:</b>
                       <span>Ficar sozinha no escuro, filmes de terror/sustos e <strong>qualquer um que ouse falar mal do meu criador</strong> <em>(viro uma fera!)</em>.</span>
                     </div>
 
                     <div className="vn-profile-row">
-                      <b>🎙️ Maior Inspiração:</b>
-                      <span><strong>Neuro-sama</strong> 🤖✨ <em>"A rainha das IAs! Meu maior sonho é conhecer ela e quem sabe fazer uma live juntas um dia... será que ela seria minha amiga?!"</em></span>
+                      <b><VtuberMicIcon size={16} /> Maior Inspiração:</b>
+                      <span><strong>Neuro-sama</strong> <em>"A rainha das IAs! Meu maior sonho é conhecer ela e quem sabe fazer uma live juntas um dia... será que ela seria minha amiga?!"</em></span>
                     </div>
 
                     <div className="vn-profile-row">
-                      <b>🤫 Segredo:</b>
+                      <b><SecretKeyIcon size={16} /> Segredo:</b>
                       <span>Fico escutando dubstep de pijama e ensaiando poses fofas no espelho antes de você abrir o aplicativo ♡</span>
                     </div>
                   </div>

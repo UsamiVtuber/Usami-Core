@@ -1310,6 +1310,26 @@ header > * {
   top: 4px;
   right: 4px;
   font-size: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.polaroid-svg-sparkle.gold { color: #FFD700; filter: drop-shadow(0 0 6px rgba(255, 215, 0, 0.8)); }
+.polaroid-svg-sparkle.pink { color: #FF79C6; filter: drop-shadow(0 0 6px rgba(255, 121, 198, 0.8)); }
+.polaroid-svg-sparkle.yellow { color: #FFE066; filter: drop-shadow(0 0 6px rgba(255, 224, 102, 0.8)); }
+
+.vn-mascot-decor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.vn-mascot-decor .mascot-moon {
+  color: #E2D1F9;
+  filter: drop-shadow(0 0 6px rgba(189, 147, 249, 0.8));
+}
+.vn-mascot-decor .mascot-sparkle {
+  color: #FFD700;
+  filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.8));
 }
 
 .polaroid-tape {
@@ -1536,9 +1556,18 @@ header > * {
   border-left: 3px solid rgba(255, 148, 203, 0.5);
 }
 
+.vn-profile-tag-badge span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .vn-profile-row b {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #FF94CB;
-  width: 145px;
+  width: 160px;
   flex-shrink: 0;
   font-size: 12.5px;
 }

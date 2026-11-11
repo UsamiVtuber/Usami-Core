@@ -752,7 +752,7 @@ export function createChatHandler(options = {}) {
           classification = await classifyUserMessage(parsedBody.message);
           const offlineReplies = {
             neutral: 'Oi! Estou aqui, mas ainda não configurei uma chave de LLM. Quer conversar mesmo assim?',
-            happy: 'Oi! Estou bem feliz de te ver! 😊',
+            happy: 'Oi! Estou bem feliz de te ver!',
             sad: 'Oi... estou um pouco triste hoje. Você quer conversar sobre algo?',
             angry: 'Oi. Não estou no meu melhor momento, mas estou aqui.',
             shy: 'O-Oi... *corada*',
