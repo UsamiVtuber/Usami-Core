@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const API = 'https://api.plane.so/api/v1';
 const args = parseArgs(process.argv.slice(2));
@@ -99,26 +99,48 @@ function buildDescription(story) {
 }
 
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
-const projects = await listAll(`/workspaces/${workspace}/projects/`);
-let project = projects.find(item => item.name === projectName) || projects.find(item => item.identifier === identifier);
+const configPath = resolve(args.config || join(dirname(planPath), 'plane.json'));
+let config = null;
+try {
+  config = JSON.parse(readFileSync(configPath, 'utf8'));
+} catch {
+  config = null;
+}
 
-if (!project) {
-  if (dryRun) {
-    console.log(`[dry-run] criaria projeto "${projectName}" (${identifier})`);
-    project = { id: 'dry-run', name: projectName, identifier };
-  } else {
-    project = await api(`/workspaces/${workspace}/projects/`, {
-      method: 'POST',
-      body: {
-        name: projectName,
-        identifier,
-        description: 'Roadmap e execucao do MVP do USAMI 2.0. Fonte da verdade: usami/.agent/plan-usami-2.0.json.',
-      },
-    });
-    console.log(`projeto criado: ${project.name} (${project.identifier}) ${project.id}`);
-  }
+let project = null;
+const configuredId = args['project-id'] || config?.projectId;
+if (configuredId) {
+  project = await api(`/workspaces/${workspace}/projects/${configuredId}/`);
+  console.log(`projeto: ${project.name} (${project.identifier}) ${project.id}`);
 } else {
-  console.log(`projeto existente: ${project.name} (${project.identifier}) ${project.id}`);
+  const projects = await listAll(`/workspaces/${workspace}/projects/`);
+  project = projects.find(item => item.name === projectName) || projects.find(item => item.identifier === identifier);
+
+  if (!project) {
+    if (dryRun) {
+      console.log(`[dry-run] criaria projeto "${projectName}" (${identifier})`);
+      project = { id: 'dry-run', name: projectName, identifier };
+    } else {
+      project = await api(`/workspaces/${workspace}/projects/`, {
+        method: 'POST',
+        body: {
+          name: projectName,
+          identifier,
+          description: 'Roadmap e execucao do MVP do USAMI 2.0. Fonte da verdade: usami/.agent/plan-usami-2.0.json.',
+        },
+      });
+      console.log(`projeto criado: ${project.name} (${project.identifier}) ${project.id}`);
+    }
+  } else {
+    console.log(`projeto existente: ${project.name} (${project.identifier}) ${project.id}`);
+  }
+}
+
+if (!dryRun && project.id !== 'dry-run') {
+  const nextConfig = { workspace, projectId: project.id, projectName: project.name };
+  if (!config || config.projectId !== project.id || config.workspace !== workspace) {
+    writeFileSync(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`);
+  }
 }
 
 const states = dryRun ? [] : await listAll(`/workspaces/${workspace}/projects/${project.id}/states/`);
@@ -144,8 +166,6 @@ for (const story of plan.stories) {
     external_id: externalId,
     external_source: 'usami-plan',
   };
-  const stateId = story.blockedBy.length ? backlogState : todoState;
-  if (stateId) payload.state = stateId;
 
   const existing = byExternalId.get(externalId) || byStoryPrefix.get(story.id);
   if (existing) {
@@ -154,10 +174,13 @@ for (const story of plan.stories) {
     }
     console.log(`${dryRun ? '[dry-run] atualizaria' : 'atualizado'} ${story.id} #${existing.sequence_id}`);
   } else {
+    const createPayload = { ...payload };
+    const stateId = story.blockedBy.length ? backlogState : todoState;
+    if (stateId) createPayload.state = stateId;
     if (dryRun) {
       console.log(`[dry-run] criaria ${name}`);
     } else {
-      const issue = await api(`/workspaces/${workspace}/projects/${project.id}/issues/`, { method: 'POST', body: payload });
+      const issue = await api(`/workspaces/${workspace}/projects/${project.id}/issues/`, { method: 'POST', body: createPayload });
       created.push(issue);
       console.log(`criado ${story.id} #${issue.sequence_id}`);
     }

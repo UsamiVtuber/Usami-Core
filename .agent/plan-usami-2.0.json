@@ -12,7 +12,7 @@
         "Classificar o que já existe para Core, Planner, Memory, Tool Executor, Skill Manager e Self-Introspection.",
         "Registrar contratos a preservar: `createChatHandler`, `/api/plan` (animação), `api-security`, `data-paths`, fila n8n e proxy do Vite.",
         "Comparar arquitetura atual e proposta; listar riscos, dependências e colisões de nome.",
-        "Classificar as nove skills priorizadas do §5 por viabilidade (local vs integração externa) e atribuir waves.",
+        "Classificar as dez skills priorizadas do §5 por viabilidade (local vs integração externa) e atribuir waves.",
         "Escrever `docs/usami-2.0-architecture-map.md` com a ordem de implementação e critérios de aceite por componente."
       ],
       "executionFit": "fits-one-run",
