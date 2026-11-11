@@ -23,6 +23,7 @@ import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.j
 import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseBriefingThreshold } from './src/task-planner.js';
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
+import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -267,6 +268,13 @@ try {
 } catch (error) {
   console.error('Aviso: gerenciador de skills indisponível:', error?.message || error);
 }
+
+const installAgentCore = createAgentCore({
+  registry: toolRegistry,
+  executor: installToolExecutor,
+  planner: installTaskPlanner,
+  turnDeadlineMs: TURN_DEADLINE_MS,
+});
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
 const installProactiveStore = createProactiveStore({
@@ -568,6 +576,7 @@ export function createChatHandler(options = {}) {
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
   const proactive = options.proactiveEngine || proactiveEngine;
+  const agentCore = options.agentCore ?? null;
   // Fila de comandos do refino: o comando do chat vai para a MESMA aba que
   // pediu o turno (x-usami-client), não para a primeira que pollar.
   const n8nQueue = options.n8nQueue || sharedN8nQueue;
@@ -951,10 +960,13 @@ export function createChatHandler(options = {}) {
         + (hedged ? ' (hedge: OpenRouter entrou em paralelo)' : '')
         + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
+      const agentTurn = agentCore ? agentCore.dispatchAsync(parsedBody.message) : null;
+
       return send(200, {
         reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
         surface,
         ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
+        ...(agentTurn ? { agentTurn } : {}),
         // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
         // renomear. contextMs é adição. animationMs é o que a animação custou
         // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
@@ -2065,6 +2077,99 @@ export function createSkillsHandler(options = {}) {
       ...(result.testResult ? { testResult: result.testResult } : {}),
       ...(result.proposal ? { proposal: result.proposal } : {}),
     });
+  };
+}
+
+// Orquestração de turno do Usami Core (/api/agent/turn e /api/agent/turns):
+// classifica a mensagem e roteia para conversa, Tool Registry ou Planner,
+// mantendo a mesma borda Host/Origin + x-usami-token.
+const AGENT_TURN_ID_RE = /^\/api\/agent\/turns\/(trn-[0-9a-f]{12})$/;
+
+export function createAgentTurnHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const agentCore = options.agentCore || installAgentCore;
+
+  return async function handleAgentTurn(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/turn', 'http://127.0.0.1:8787');
+    const path = url.pathname;
+
+    if (req.method === 'GET') {
+      if (path === '/api/agent/turns') {
+        const rawLimit = url.searchParams.get('limit');
+        let limit = 20;
+        if (rawLimit !== null) {
+          const parsed = Number(rawLimit);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
+            return send(400, { error: 'limit inválido (inteiro entre 1 e 50).' });
+          }
+          limit = parsed;
+        }
+        const turns = agentCore.listTurns({ limit });
+        return send(200, { ok: true, turns, count: turns.length });
+      }
+      const match = path.match(AGENT_TURN_ID_RE);
+      if (!match) return send(404, { error: 'Não encontrado.' });
+      const found = agentCore.getTurn(match[1]);
+      if (!found.ok) return send(404, { error: 'Turno não encontrado.' });
+      return send(200, { ok: true, turn: found.turn });
+    }
+
+    if (req.method !== 'POST' || path !== '/api/agent/turn') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+    const read = await readRequestBody(req, { limit: 16384 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+    const unknown = Object.keys(payload).filter(key => !['message', 'confirmation', 'origin'].includes(key));
+    if (unknown.length) {
+      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+    }
+    if (typeof payload.message !== 'string') {
+      return send(400, { error: 'message: deve ser texto.' });
+    }
+    const origin = payload.origin ?? 'agent';
+    if (!EXECUTION_ORIGINS.includes(origin)) {
+      return send(400, { error: `origin inválido (use ${EXECUTION_ORIGINS.join('|')}).` });
+    }
+    if (payload.confirmation !== undefined && (typeof payload.confirmation !== 'string' || payload.confirmation.length > 128)) {
+      return send(400, { error: 'confirmation: deve ser texto de até 128 caracteres.' });
+    }
+
+    let result;
+    try {
+      result = await agentCore.processTurn(payload.message, {
+        confirmation: payload.confirmation,
+        origin,
+      });
+    } catch (error) {
+      console.error('Aviso: falha ao processar turno agêntico:', error?.message || error);
+      return send(500, { error: 'Não foi possível processar o turno.' });
+    }
+    if (result.invalidInput) return send(400, { error: result.error });
+    return send(200, { ok: true, turn: result.turn });
   };
 }
 
@@ -3315,7 +3420,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
   // finalizada, sem trocar comportamento real por um pipeline parcial.
-  const handleChat = createChatHandler();
+  const handleChat = createChatHandler({ agentCore: installAgentCore });
+  const handleAgentTurn = createAgentTurnHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
   const handleMediaAnalyze = createMediaAnalyzeHandler();
@@ -3365,6 +3471,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
       if (req.url === '/api/agent/plans' || req.url.startsWith('/api/agent/plans/') || req.url.startsWith('/api/agent/plans?')) return handlePlans(req, res);
       if (req.url === '/api/agent/skills' || req.url.startsWith('/api/agent/skills/') || req.url.startsWith('/api/agent/skills?')) return handleSkills(req, res);
+      if (req.url === '/api/agent/turn' || req.url === '/api/agent/turns'
+        || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

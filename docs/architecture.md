@@ -166,6 +166,18 @@ os arquivos, exigindo autorização prévia e novo passe do teste isolado ao
 reativar. `GET /api/agent/skills/proposals` e `GET /api/agent/skills/proposals/:id`
 listam e consultam propostas, todos sob `x-usami-token`.
 
+O roteamento de intenção e orquestração do Usami Core (S9) fica em
+`src/agent-core.js`. O classificador determinístico roda primeiro (`conversation`,
+`operational` ou `complex`) e aceita `classifyWithLlm` injetável apenas para
+casos ambíguos, respeitando `USAMI_TURN_DEADLINE_MS` e caindo em `conversation`
+se falhar. Pedidos operacionais vão para o `tool-executor` (ou retornam
+`no_matching_tool` sem inventar ferramenta) e tarefas complexas vão para o
+`task-planner` com briefing. `POST /api/agent/turn`, `GET /api/agent/turns` e
+`GET /api/agent/turns/:id` exigem `x-usami-token`; no `/api/chat`, `createChatHandler`
+permanece intacto (persona, hedge e latência do balão preservados): conversas
+normais saem idênticas, enquanto pedidos operacionais/complexos disparam em
+fire-and-forget pós-resposta e devolvem o campo opcional `agentTurn`.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
