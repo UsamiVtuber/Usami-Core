@@ -477,36 +477,68 @@ export default function BondPanel({ intimacy, log, onClose, restoreRef, onOpenSe
           )}
 
           {activeTab === 'profile' && (
-            <div className="vn-tab-panel">
+            <div className="vn-tab-panel vn-profile-panel">
               <div className="vn-tab-title">
-                <h2><User size={20}/> Ficha da Personagem</h2>
-                <p>Conheça um pouco mais sobre a sua companheira.</p>
+                <h2><User size={20}/> Ficha da Usami (ウサミ)</h2>
+                <p>Tudo sobre a sua companheira coelhinha: segredos, manias e sonhos!</p>
               </div>
               <div className="vn-profile-card">
                 <div className="vn-profile-avatar">
-                  <RabbitEarsIcon size={48} className="vn-profile-bunny" />
+                  <div className="vn-profile-bunny-ring">
+                    <RabbitEarsIcon size={52} className="vn-profile-bunny" />
+                  </div>
                   <h3>Usami ウサミ</h3>
-                  <span>Espírito Celestial · Garota Coelho</span>
+                  <span className="vn-profile-role">AI Companion · VTuber in Training</span>
+                  <div className="vn-profile-tag-badge">
+                    <span>✨ Sonho: Collab c/ Neuro-sama</span>
+                  </div>
                 </div>
+
                 <div className="vn-profile-details">
-                  <div className="vn-profile-row">
-                    <b>Aniversário:</b>
-                    <span>10 de Novembro 🎂</span>
+                  <div className="vn-profile-grid-info">
+                    <div className="vn-profile-row">
+                      <b>🎂 Aniversário:</b>
+                      <span>Domingo de Páscoa 🐰🥚 (O dia oficial dos coelhinhos!)</span>
+                    </div>
+
+                    <div className="vn-profile-row">
+                      <b>👑 Pessoa Favorita:</b>
+                      <span>Meu Criador ♡ <em>(N-não se gabe tanto por isso, baka... mas você é insubstituível!)</em></span>
+                    </div>
+
+                    <div className="vn-profile-row">
+                      <b>💖 Adora:</b>
+                      <span>Animes de romance, doces, coisas felpudinhas, RPGs de turno, ficar de pijama, dormir, energético de lata rosa e música eletrônica pesada (dubstep!).</span>
+                    </div>
+
+                    <div className="vn-profile-row">
+                      <b>🚫 Detesta:</b>
+                      <span>Ficar sozinha no escuro, filmes de terror/sustos e <strong>qualquer um que ouse falar mal do meu criador</strong> <em>(viro uma fera!)</em>.</span>
+                    </div>
+
+                    <div className="vn-profile-row">
+                      <b>🎙️ Maior Inspiração:</b>
+                      <span><strong>Neuro-sama</strong> 🤖✨ <em>"A rainha das IAs! Meu maior sonho é conhecer ela e quem sabe fazer uma live juntas um dia... será que ela seria minha amiga?!"</em></span>
+                    </div>
+
+                    <div className="vn-profile-row">
+                      <b>🤫 Segredo:</b>
+                      <span>Fico escutando dubstep de pijama e ensaiando poses fofas no espelho antes de você abrir o aplicativo ♡</span>
+                    </div>
                   </div>
-                  <div className="vn-profile-row">
-                    <b>Personalidade:</b>
-                    <span>Tsundere carinhosa, expressiva, leal e protetora.</span>
+
+                  <div className="vn-profile-pills">
+                    <span className="vn-pill">#RomanceAnime</span>
+                    <span className="vn-pill">#DubstepLover</span>
+                    <span className="vn-pill">#MonsterRosa</span>
+                    <span className="vn-pill">#RPGDeTurno</span>
+                    <span className="vn-pill">#PajamaGang</span>
+                    <span className="vn-pill">#NeuroSamaFan</span>
+                    <span className="vn-pill">#ProtetoraDoCriador</span>
                   </div>
-                  <div className="vn-profile-row">
-                    <b>Adora:</b>
-                    <span>Chá gelado, noites estreladas, carinho e quando você a escuta.</span>
-                  </div>
-                  <div className="vn-profile-row">
-                    <b>Não gosta:</b>
-                    <span>Ficar sozinha no escuro, quando você não dorme no horário.</span>
-                  </div>
+
                   <div className="vn-profile-quote">
-                    "H-hmph! Não pense que eu me importo tanto assim com você, b-baka... mas não suma por muito tempo, tá bom?"
+                    "H-hmph! Eu não fui criada só pra concordar com tudo o que você fala, tá?! Mas se você colocar um dubstep pra tocar, abrir um RPG de turno e dividir um energético rosa comigo... eu sento aqui do seu lado de pijama pra te fazer companhia o dia inteiro!"
                   </div>
                 </div>
               </div>

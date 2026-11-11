@@ -97,8 +97,8 @@ export class UsamiStreamingParser {
 
   _drain(isFinal) {
     while (this.buffer.length > 0) {
-      // 1. Tag de emoção no início: `[casual_happy]`
-      const emoMatch = this.buffer.match(/^\[([a-zA-Z0-9_\-\s]{2,40})\]/);
+      // 1. Tag de emoção no início: `[casual_happy]` (ignora espaços antes do colchete)
+      const emoMatch = this.buffer.match(/^\s*\[([a-zA-Z0-9_\-\s]{2,40})\]/);
       if (emoMatch) {
         const raw = emoMatch[1].trim();
         const lower = raw.toLowerCase().replace(/[-\s]+/g, '_');
@@ -118,8 +118,8 @@ export class UsamiStreamingParser {
         continue;
       }
 
-      // 2. Tag de efeito sonoro no início: `【Laugh】`
-      const sfxMatch = this.buffer.match(/^【([a-zA-Z0-9_\-\s\u4e00-\u9fa5]{1,30})】/);
+      // 2. Tag de efeito sonoro no início: `【Laugh】` (ignora espaços antes)
+      const sfxMatch = this.buffer.match(/^\s*【([a-zA-Z0-9_\-\s\u4e00-\u9fa5]{1,30})】/);
       if (sfxMatch) {
         const raw = sfxMatch[1].trim();
         const lower = raw.toLowerCase().replace(/[-\s]+/g, '_');
@@ -207,7 +207,7 @@ export class UsamiStreamingParser {
       // Remove vazamento de campos JSON truncados do LLM
       .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
       .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
-      .replace(/[\s,'"]*(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
+      .replace(/(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
       .replace(/['"]\s*,\s*['"]?\s*$/, '')
       .replace(/[\s,'"]*\]\s*,?\s*$/, '')
       // Remove tags de emoção residuais que porventura tenham escapado no meio do texto
@@ -218,8 +218,7 @@ export class UsamiStreamingParser {
       .replace(/[ \t]{2,}/g, ' ')
       .trim();
 
-    // Se o balão não tiver palavras faladas (apenas símbolos, números ou pontuação), descarta
-    if (!display || !/[a-zA-ZÀ-ÿ\u4e00-\u9fa5]/u.test(display)) return;
+    if (!display) return;
 
     let ttsText = display;
     let tags = [...new Set(this.activeSfx)].slice(0, 2);

@@ -258,7 +258,7 @@ test('gemini: 200 devolve WAV (RIFF) e envia x-goog-api-key com responseModaliti
   assert.equal(calls[0].options.headers['x-goog-api-key'], GEMINI_TEST_KEY);
   const sent = JSON.parse(calls[0].options.body);
   // a direcao de estilo vai em TAG: em prosa o modelo lia a instrucao em voz alta
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa] oi');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida] oi');
   assert.deepEqual(sent.generationConfig.responseModalities, ['AUDIO']);
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
   // WAV: header RIFF de 44 bytes + PCM; a key não aparece na resposta
@@ -405,7 +405,7 @@ test('gemini: styleId happy insere a cláusula da emoção e mantém o voiceConf
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 1);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa, super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy] que bom te ver');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida, super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy] que bom te ver');
   // a cláusula não altera a voz enviada ao Google
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, undefined);
@@ -419,7 +419,7 @@ test('gemini: styleId neutral mantém a instrução base exata', async () => {
   await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'tudo certo', styleId: 'neutral' }) }), res);
   assert.equal(res.statusCode, 200);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa] tudo certo');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida] tudo certo');
 });
 
 test('gemini: styleId desconhecido cai na instrução base (fallback determinístico)', async () => {
@@ -430,7 +430,7 @@ test('gemini: styleId desconhecido cai na instrução base (fallback determinís
   await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'estranho isso', styleId: 'estranho-x' }) }), res);
   assert.equal(res.statusCode, 200);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa] estranho isso');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida] estranho isso');
 });
 
 test('gemini: WAV completo do provedor passa intacto — sem segundo header nem estouro no fim', async () => {
@@ -516,7 +516,7 @@ test('gemini: cláusula de timidez suave — sem "envergonhada", que a modelo en
   await handler(mockReq({ headers: JSON_HEADERS, body: JSON.stringify({ text: 'hmph', styleId: 'shy' }) }), res);
   assert.equal(res.statusCode, 200);
   const sent = JSON.parse(calls[0].options.body);
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa, baixinha, hesitante e doce, quase sussurrada, com vergonha] hmph');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida, baixinha, hesitante e doce, quase sussurrada, com vergonha] hmph');
 });
 
 test('gemini: styleId V2 (<registro>_<emoção>) aplica cláusula combinada de registro e emoção', async () => {
@@ -625,7 +625,7 @@ test('gemini stream: responde PCM cru chunk por chunk com X-TTS-Stream', async (
   const sent = JSON.parse(calls[0].options.body);
   assert.deepEqual(sent.generationConfig.responseModalities, ['AUDIO']);
   assert.equal(sent.generationConfig.speechConfig.voiceConfig.voice, 'voice_cewhmedkmma9');
-  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e saltitante, sorriso na voz, dicção rápida, expressiva e travessa, super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy] oi');
+  assert.equal(sent.contents[0].parts[0].text, '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida, super animada e hiperexpressiva, aguda e saltitante, sorriso na voz, consoantes punchy] oi');
 });
 
 test('gemini stream: SSE picotado no meio do base64 ainda sai áudio inteiro', async () => {

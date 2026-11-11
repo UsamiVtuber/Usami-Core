@@ -1127,9 +1127,13 @@ export function Usami() {
     const clean = String(content || '')
       .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
       .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
+      .replace(/(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
       .replace(/['"]\s*,\s*['"]?\s*$/, '')
+      .replace(/[\s,'"]*\]\s*,?\s*$/, '')
+      .replace(/[,\s]+$/, '')
       .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
       .replace(/【[^】]{1,30}】/g, ' ')
+      .replace(/["“”「」『』]/g, '')
       .replace(/\*\*|__/g, '')
       .replace(/[ \t]{2,}/g, ' ')
       .trim();
@@ -1920,6 +1924,10 @@ export function Usami() {
 
       const parsedBalloons = parseReplyBalloons(effectiveReply);
       const fallbackClean = String(effectiveReply ?? '')
+        .replace(/(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
+        .replace(/['"]\s*,\s*['"]?\s*$/, '')
+        .replace(/[\s,'"]*\]\s*,?\s*$/, '')
+        .replace(/[,\s]+$/, '')
         .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
         .replace(/【[^】]{1,30}】/g, ' ')
         .replace(/[ \t]{2,}/g, ' ')
@@ -1989,6 +1997,10 @@ export function Usami() {
                 }
                 const parsedBalloons = parseReplyBalloons(effectiveReply);
                 const fallbackClean = String(effectiveReply ?? '')
+                  .replace(/(?:\[\s*)?\d{1,2}-prefab_[a-zA-Z0-9_]+[\s\S]*$/i, '')
+                  .replace(/['"]\s*,\s*['"]?\s*$/, '')
+                  .replace(/[\s,'"]*\]\s*,?\s*$/, '')
+                  .replace(/[,\s]+$/, '')
                   .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
                   .replace(/【[^】]{1,30}】/g, ' ')
                   .replace(/[ \t]{2,}/g, ' ')
