@@ -127,6 +127,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "O catálogo lista a skill piloto por estado e explica por que uma skill inválida não pode ativar.",
       "scopeNotes": "Apenas descoberta e leitura; instalação fica em S8.",
+      "status": "done",
       "blockedBy": ["S2"],
       "techGuidance": "Carregar manifestos como JSON validado por S2; nunca importar código da skill só para ler o manifesto."
     },
@@ -144,6 +145,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Uma proposta só entra no catálogo ativo após autorização e teste isolado aprovado.",
       "scopeNotes": "Nesta versão a implementação da skill é do dev; o runtime instala apenas pacotes validados. Sem execução arbitrária de código do modelo.",
+      "status": "done",
       "blockedBy": ["S7", "S5"],
       "techGuidance": "Isolamento = cwd temporário, timeout e sem acesso a `data/` real. Falha de teste nunca promove a skill."
     },
