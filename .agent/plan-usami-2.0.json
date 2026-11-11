@@ -1,0 +1,264 @@
+{
+  "feature": "USAMI 2.0 — Companion Agêntica (MVP)",
+  "source": "C:/Users/amari/.qoder/tmp/A--Usami-Project/attachments/a8e69d92-ddd9-4abc-9476-f65577cfc403/f6021583-27be-40ef-9dc0-935bbc7f924b.txt",
+  "codebase": "A:/Usami Project/usami",
+  "stories": [
+    {
+      "id": "S1",
+      "title": "Auditar o runtime atual e fixar o mapa arquitetural do USAMI 2.0",
+      "covers": ["§11", "§9"],
+      "tasks": [
+        "Mapear rotas e handlers de `server.mjs`, módulos de `src/`, stores de `data/` e suítes de `tests/`.",
+        "Classificar o que já existe para Core, Planner, Memory, Tool Executor, Skill Manager e Self-Introspection.",
+        "Registrar contratos a preservar: `createChatHandler`, `/api/plan` (animação), `api-security`, `data-paths`, fila n8n e proxy do Vite.",
+        "Comparar arquitetura atual e proposta; listar riscos, dependências e colisões de nome.",
+        "Classificar as nove skills priorizadas do §5 por viabilidade (local vs integração externa) e atribuir waves.",
+        "Escrever `docs/usami-2.0-architecture-map.md` com a ordem de implementação e critérios de aceite por componente."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Documento revisado com mapa atual × proposta, waves das skills e ordem aprovada, sem mudança de código.",
+      "scopeNotes": "Requisito §11. Somente leitura: nenhum arquivo de runtime é alterado. Complementa a auditoria de 2026-11-08 com o recorte do USAMI 2.0; não a repete.",
+      "blockedBy": [],
+      "techGuidance": "Confirmar cada afirmação no código atual; `docs/architecture.md` e `AGENTS.md` são ponto de partida, não prova. Não assumir integrações (agenda, e-mail, finanças) que não existem no repositório."
+    },
+    {
+      "id": "S2",
+      "title": "Definir contratos puros do domínio agêntico",
+      "covers": ["§2.1", "§2.2", "§2.4", "§2.5", "§7"],
+      "tasks": [
+        "Criar `src/agent-contracts.js` com validadores para Intent, Plan/PlanStep, ToolSpec, SkillManifest, PermissionLevel (1–4) e ExecutionRecord.",
+        "Definir o namespace `/api/agent/*` e documentar que `/api/plan` continua sendo o planner de animação.",
+        "Padronizar formato de erro e campos obrigatórios (origem, data, versão, estado) no estilo de `src/technique-schema.js`.",
+        "Exportar JSDoc dos tipos para os módulos seguintes.",
+        "Cobrir validação e rejeição em `tests/agent-contracts.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Schemas validam manifesto/plano válidos e rejeitam entradas inválidas nos testes.",
+      "scopeNotes": "Somente contratos puros; sem persistência, rota ou LLM.",
+      "blockedBy": ["S1"],
+      "techGuidance": "ESM + `node:test`, sem dependências novas. Nomes de campo em inglês no código e textos de UI em pt-BR, como o restante do runtime."
+    },
+    {
+      "id": "S3",
+      "title": "Persistir memória operacional de projetos, tarefas e compromissos",
+      "covers": ["§2.3", "§10.10", "§10.11"],
+      "tasks": [
+        "Criar `src/operational-memory-store.js` com registros `{id, kind, title, status, dueAt, projectId, origin, relevance, createdAt, updatedAt}`.",
+        "Persistir em `data/operational-memory.json` via `src/data-paths.js`, com escrita atômica e validação de contrato.",
+        "Implementar consulta por status, projeto e janela de datas, com trilha append-only de alterações.",
+        "Expor `GET/POST/PATCH /api/agent/memory/*` exigindo `x-usami-token`.",
+        "Injetar o store no handler e testar com `USAMI_DATA_DIR` + `mkdtemp` em `tests/operational-memory-*.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Uma tarefa e um projeto criados via API podem ser consultados e atualizados; a suíte não toca em `data/` real.",
+      "scopeNotes": "Operacional é a camada ausente do Memory Engine; curto prazo, episódica e semântica existentes não são reescritas. Nada sensível sem flag explícita.",
+      "blockedBy": ["S2"],
+      "techGuidance": "Seguir o padrão `createBondHandler({bondStore})`: handler recebe o store e o depósito é redirecionável. Nunca importar o caminho padrão de `data/` em teste."
+    },
+    {
+      "id": "S4",
+      "title": "Registrar e executar ferramentas com resultado verificado",
+      "covers": ["§2.4", "§10.3", "§10.8", "§10.9"],
+      "tasks": [
+        "Criar `src/tool-registry.js` para registrar ToolSpec, descobrir por nome e validar parâmetros.",
+        "Criar `src/tool-executor.js` com timeout, captura de erro e `ExecutionRecord` append-only em `data/executions.json` com teto.",
+        "Exigir `verify(result)` por ferramenta: sucesso só é reportado se a verificação passar.",
+        "Implementar a primeira ferramenta somente-leitura (`memory.search`) reutilizando `vault-index`/`memory-store`.",
+        "Expor `POST /api/agent/tools/:name/execute` e `GET /api/agent/executions` com token.",
+        "Testar parâmetro inválido, timeout, verificação falsa e log em `tests/tool-executor.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Executar `memory.search` retorna `ok: true` com linha no histórico; verificação falsa retorna `failed`.",
+      "scopeNotes": "Nenhuma ferramenta de escrita nesta story. O executor não decide permissão — isso é S5.",
+      "blockedBy": ["S2"],
+      "techGuidance": "Contrato de ferramenta vem de S2. Reaproveitar os índices existentes em vez de criar outro banco; não duplicar `technique-store`."
+    },
+    {
+      "id": "S5",
+      "title": "Aplicar níveis de permissão e confirmação humana",
+      "covers": ["§7", "§10.7"],
+      "tasks": [
+        "Criar `src/permission-gate.js` mapeando níveis 1–4 e negando nível 4 sem confirmação explícita.",
+        "Criar fluxo `POST /api/agent/confirmations` com token de uso único e TTL; execução só aceita token válido.",
+        "Persistir revogações por ferramenta/integração em `data/permissions.json`.",
+        "Registrar allow/deny com motivo no histórico de execuções.",
+        "Testar nível 4 sem confirmação, token expirado e integração revogada em `tests/permission-gate.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Ação de nível 4 é negada até a confirmação e passa depois; revogar volta a negar.",
+      "scopeNotes": "Reutiliza a borda `x-usami-token` e a confirmação escrita já usada na memória; não usa `confirm()` do navegador.",
+      "blockedBy": ["S4"],
+      "techGuidance": "A confirmação é um segundo fator de autorização, não um segredo novo em arquivo. Toda rota nova passa por `isAllowedRequest`."
+    },
+    {
+      "id": "S6",
+      "title": "Implementar o Planner Engine de tarefas",
+      "covers": ["§2.2", "§10.1", "§10.2"],
+      "tasks": [
+        "Criar `src/task-planner.js` que decompõe objetivo em passos com dependências, esforço, prioridade e informações ausentes.",
+        "Gerar briefing pré-execução quando o plano exceder o limiar configurável.",
+        "Persistir versões em `data/plans/*.json`; replanejamento preserva o histórico.",
+        "Expor `POST/GET /api/agent/plans` e `PATCH` de progresso com token.",
+        "Testar dependência circular, plano vazio, progresso e replanejamento em `tests/task-planner.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Um objetivo recebido via API devolve plano com etapas e briefing persistido.",
+      "scopeNotes": "Distinto de `/api/plan` (planner de animação). Núcleo determinístico; LLM apenas por adapter injetável.",
+      "blockedBy": ["S2", "S3"],
+      "techGuidance": "`generatePlan` injetável para testes sem rede. Não usar o orçamento do turno de chat para planejamento longo."
+    },
+    {
+      "id": "S7",
+      "title": "Criar catálogo de Skills com manifesto e estados",
+      "covers": ["§4", "§2.5", "§10.5"],
+      "tasks": [
+        "Implementar schema do manifesto (id, nome, versão, ferramentas, permissões, dependências, parâmetros, instruções, testes, estado).",
+        "Criar loader de `data/skills/` com estados `installed | available | pending | disabled`.",
+        "Detectar lacunas: ferramenta ou dependência declarada ausente impede ativação.",
+        "Expor `GET /api/agent/skills` e `GET /api/agent/skills/:id` com token.",
+        "Testar manifesto inválido, dependência faltando e skill desativada em `tests/skill-catalog.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "O catálogo lista a skill piloto por estado e explica por que uma skill inválida não pode ativar.",
+      "scopeNotes": "Apenas descoberta e leitura; instalação fica em S8.",
+      "blockedBy": ["S2"],
+      "techGuidance": "Carregar manifestos como JSON validado por S2; nunca importar código da skill só para ler o manifesto."
+    },
+    {
+      "id": "S8",
+      "title": "Fechar o fluxo de proposta, autorização e instalação de Skill",
+      "covers": ["§4", "§2.5", "§10.6", "§10.7"],
+      "tasks": [
+        "Implementar `POST /api/agent/skills/proposals` com benefício, riscos, dependências e permissões solicitadas.",
+        "Exigir confirmação humana (S5) para instalar; status vai de `pending` para `installed`.",
+        "Executar o teste declarado no manifesto com `node --test` em diretório temporário, com timeout e sem rede.",
+        "Permitir ativar/desativar skill sem apagar arquivos; teste falhando mantém a skill desativada.",
+        "Cobrir o fluxo completo e a recusa sem autorização em `tests/skill-install.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Uma proposta só entra no catálogo ativo após autorização e teste isolado aprovado.",
+      "scopeNotes": "Nesta versão a implementação da skill é do dev; o runtime instala apenas pacotes validados. Sem execução arbitrária de código do modelo.",
+      "blockedBy": ["S7", "S5"],
+      "techGuidance": "Isolamento = cwd temporário, timeout e sem acesso a `data/` real. Falha de teste nunca promove a skill."
+    },
+    {
+      "id": "S9",
+      "title": "Roteamento de intenção e orquestração no Usami Core",
+      "covers": ["§2.1", "§10.1", "§10.3", "§10.8"],
+      "tasks": [
+        "Criar `src/agent-core.js` que classifica mensagem em conversa, solicitação operacional ou tarefa complexa.",
+        "Encaminhar operacional para o Tool Registry e complexo para o Planner + briefing.",
+        "Integrar sem bloquear a resposta: rota `/api/agent/turn` ou pós-resposta fire-and-forget, mantendo `createChatHandler` intacto.",
+        "Devolver o estado do turno em campo opcional sem quebrar o contrato atual do chat.",
+        "Testar roteamento e regressão do caminho de conversa em `tests/agent-core.test.mjs` e `test:chat`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Mensagem de conversa continua idêntica; pedido operacional gera execução/plano rastreável.",
+      "scopeNotes": "Não substituir o caminho ativo por `FlowExecutor`. Persona, JSON do provedor e latência do balão não mudam.",
+      "blockedBy": ["S4", "S6"],
+      "techGuidance": "Classificador determinístico primeiro; LLM injetável para os casos ambíguos. Respeitar `USAMI_TURN_DEADLINE_MS` e o hedge de provedores."
+    },
+    {
+      "id": "S10",
+      "title": "Entregar a skill operacional Personal Planner",
+      "covers": ["§5-A", "§10.1", "§10.2", "§10.8", "§10.10"],
+      "tasks": [
+        "Publicar manifesto `personal-planner` com ferramentas, permissões nível 2–3 e testes declarados.",
+        "Implementar criar/atualizar tarefa, priorizar, montar cronograma e detectar conflito de horário.",
+        "Conectar ao Planner Engine (S6) e à memória operacional (S3), executando via Tool Executor (S4) e permission gate (S5).",
+        "Devolver resumo verificável do cronograma e dos conflitos encontrados.",
+        "Testar conflito, priorização e fluxo ponta a ponta em `tests/personal-planner.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Usami recebe 'organize minha semana' e devolve cronograma com conflitos apontados e tarefas persistidas.",
+      "scopeNotes": "Primeira skill operacional da Fase A. Agenda e e-mail externos ficam fora; o cronograma usa a memória operacional local.",
+      "blockedBy": ["S6", "S8", "S3"],
+      "techGuidance": "A skill consome contratos e ferramentas; não acessa `data/` diretamente. Saída deve passar por `verify()`."
+    },
+    {
+      "id": "S11",
+      "title": "Implementar Self-Introspection somente leitura",
+      "covers": ["§3", "§10.4", "§10.5"],
+      "tasks": [
+        "Criar `src/self-introspection.js` que monta módulos, ferramentas, skills, versões e limitações a partir de fontes allowlisted.",
+        "Registrar a ferramenta `self.describe` (nível 1) no Tool Registry e a rota `GET /api/agent/self`.",
+        "Resumir erros recentes a partir do histórico de execuções, sem expor stack ou segredo.",
+        "Responder capacidade/limitação a partir dos manifests, sem inventar integrações.",
+        "Testar que `.env`, chaves e credenciais nunca aparecem no retrato em `tests/self-introspection.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Perguntar 'quais ferramentas você tem?' devolve a lista real e aponta limitações conhecidas.",
+      "scopeNotes": "Somente leitura: alteração de código segue o fluxo proposta→risco→autorização de S8. Não ler segredos.",
+      "blockedBy": ["S4", "S7"],
+      "techGuidance": "Allowlist explícita de arquivos (docs, package.json, manifests). Nunca varrer o vault nem o `.env`."
+    },
+    {
+      "id": "S12",
+      "title": "Sugestões proativas contextuais separadas de execução",
+      "covers": ["§6", "§10.12"],
+      "tasks": [
+        "Adicionar fontes de sugestão ao `proactive-engine` (tarefa atrasada, reunião próxima, projeto parado, lacuna de skill) por injeção de relógio e dados.",
+        "Persistir o ciclo `suggested → planned → authorized → verified` em `data/suggestions.json`.",
+        "Aplicar throttle por relevância, DND e teto de uma sugestão não respondida, preservando o comportamento atual.",
+        "Expor `GET /api/agent/suggestions` e `POST /api/agent/suggestions/:id/accept|dismiss` com token.",
+        "Testar DND, throttle e aceite que gera plano autorizado em `tests/proactive-suggestions.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Tarefa vencida gera uma sugestão única; aceitar cria plano e muda o estado da sugestão.",
+      "scopeNotes": "Não duplicar o motor de idle/afinidade; sugestão não é ordem de execução. Execução continua exigindo permissão.",
+      "blockedBy": ["S9", "S10"],
+      "techGuidance": "`proactive-engine.js` já cobre idle, DND, afinidade e `proactive_say`; estender com fontes injetáveis sem alterar o comando de fala existente."
+    },
+    {
+      "id": "S13",
+      "title": "Entregar a skill Daily Briefing",
+      "covers": ["§5-C", "§10.11", "§10.12"],
+      "tasks": [
+        "Criar manifesto `daily-briefing` com permissão nível 1 e teste declarado.",
+        "Montar o briefing com compromissos, tarefas prioritárias, pendências e projetos em andamento a partir da memória operacional, planos e execuções.",
+        "Usar template determinístico; LLM opcional e injetável só para redação.",
+        "Expor a ferramenta `briefing.build` e a rota `GET /api/agent/briefing`.",
+        "Testar base vazia, parcial e com pendências em `tests/daily-briefing.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Gerar o briefing do dia lista apenas dados reais e marca o que está pendente.",
+      "scopeNotes": "Sem integrações externas; não inventar compromissos quando a base está vazia.",
+      "blockedBy": ["S10", "S3"],
+      "techGuidance": "Saída determinística primeiro para o teste não depender de rede; o teto de ~220 caracteres vale para o chat, não para o briefing."
+    },
+    {
+      "id": "S14",
+      "title": "Adicionar Central de Skills e Histórico de Execuções na interface",
+      "covers": ["§8", "§10.5", "§10.9"],
+      "tasks": [
+        "Criar painel de Skills (instaladas, disponíveis, pendentes, desativadas) no padrão de painéis existente.",
+        "Criar histórico de execuções com status verificado/falho, horário e motivo.",
+        "Integrar via `src/api-client.js`; token injetado pelo proxy do Vite, nunca no bundle.",
+        "Aplicar a paleta oficial (Deep Blue/Charcoal/Ice/Pink/Rose) e a exclusividade entre drawers.",
+        "Validar no navegador com a API local e rodar `npm run build`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "A usuária vê as skills por estado e o histórico real de execuções, sem placeholders.",
+      "scopeNotes": "Sem novo design system; reutilizar tokens e anatomia de painel. Sem dados inventados em estado vazio.",
+      "blockedBy": ["S7", "S8", "S4"],
+      "techGuidance": "Seguir `Usami.jsx`/`BondPanel.jsx` para foco e fechamento mútuo dos drawers. Testar no navegador, não só no build."
+    },
+    {
+      "id": "S15",
+      "title": "Adicionar Permissões, Confirmações e Notificações na interface",
+      "covers": ["§8", "§7", "§10.12"],
+      "tasks": [
+        "Criar painel de permissões por ferramenta/integração com nível e ação de revogar.",
+        "Criar fila de confirmações pendentes com aprovar/negar usando token de uso único.",
+        "Exibir sugestões e briefings com aceitar/descartar, respeitando DND e throttle.",
+        "Manter exclusividade dos drawers e foco acessível no padrão existente.",
+        "Validar o fluxo completo no navegador e rodar `npm run build`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "A usuária autoriza uma ação sensível, vê a execução no histórico e revoga o acesso depois.",
+      "scopeNotes": "Depende de S5/S12/S13. Não expor token nem credencial na UI; confirmação é ação explícita.",
+      "blockedBy": ["S5", "S12", "S13"],
+      "techGuidance": "Reutilizar o padrão de confirmação escrita da aba Memória quando a ação for irreversível."
+    }
+  ]
+}
