@@ -98,7 +98,31 @@ function buildDescription(story) {
     + `<p><em>Requisitos: ${escapeHtml(story.covers.join(', '))} - fonte: .agent/plan-usami-2.0.json</em></p>`;
 }
 
+// Estado opcional por story no plano (`status` ausente = não mexe no board).
+// Aceita o vocabulário curto do roadmap e também os grupos do Plane.
+const STATUS_GROUPS = Object.freeze({
+  backlog: 'backlog',
+  todo: 'unstarted',
+  unstarted: 'unstarted',
+  in_progress: 'started',
+  started: 'started',
+  done: 'completed',
+  completed: 'completed',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
+});
+
+function stateGroupFor(story) {
+  if (story.status === undefined) return null;
+  const group = STATUS_GROUPS[story.status];
+  if (!group) {
+    throw new Error(`story ${story.id}: status "${story.status}" inválido (use ${Object.keys(STATUS_GROUPS).join('|')})`);
+  }
+  return group;
+}
+
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+for (const story of plan.stories) stateGroupFor(story);
 const configPath = resolve(args.config || join(dirname(planPath), 'plane.json'));
 let config = null;
 try {
@@ -143,9 +167,19 @@ if (!dryRun && project.id !== 'dry-run') {
   }
 }
 
-const states = dryRun ? [] : await listAll(`/workspaces/${workspace}/projects/${project.id}/states/`);
-const backlogState = states.find(state => state.group === 'backlog')?.id;
-const todoState = states.find(state => state.group === 'unstarted')?.id;
+// O dry-run também lê estados (GET), para validar o mapeamento sem escrever.
+const states = project.id === 'dry-run' ? [] : await listAll(`/workspaces/${workspace}/projects/${project.id}/states/`);
+const stateIdByGroup = new Map();
+for (const state of states) {
+  if (!stateIdByGroup.has(state.group)) stateIdByGroup.set(state.group, state.id);
+}
+
+function resolveStateId(group, story) {
+  if (project.id === 'dry-run') return null;
+  const stateId = stateIdByGroup.get(group);
+  if (!stateId) throw new Error(`story ${story.id}: projeto sem estado no grupo "${group}"`);
+  return stateId;
+}
 
 const issues = project.id === 'dry-run' ? [] : await listAll(`/workspaces/${workspace}/projects/${project.id}/issues/`);
 const byExternalId = new Map();
@@ -167,22 +201,34 @@ for (const story of plan.stories) {
     external_source: 'usami-plan',
   };
 
+  // Sem `status` no plano, o estado do board é preservado (inclusive Done
+  // marcado à mão); com `status`, o JSON vira a fonte da verdade.
+  const statusGroup = stateGroupFor(story);
+  const defaultLabel = story.blockedBy.length ? 'backlog' : 'todo';
+
   const existing = byExternalId.get(externalId) || byStoryPrefix.get(story.id);
   if (existing) {
-    if (!dryRun) {
-      await api(`/workspaces/${workspace}/projects/${project.id}/issues/${existing.id}/`, { method: 'PATCH', body: payload });
+    const updatePayload = { ...payload };
+    if (statusGroup) {
+      const stateId = resolveStateId(statusGroup, story);
+      if (stateId) updatePayload.state = stateId;
     }
-    console.log(`${dryRun ? '[dry-run] atualizaria' : 'atualizado'} ${story.id} #${existing.sequence_id}`);
+    if (!dryRun) {
+      await api(`/workspaces/${workspace}/projects/${project.id}/issues/${existing.id}/`, { method: 'PATCH', body: updatePayload });
+    }
+    const suffix = statusGroup ? ` (estado: ${story.status})` : '';
+    console.log(`${dryRun ? '[dry-run] atualizaria' : 'atualizado'} ${story.id} #${existing.sequence_id}${suffix}`);
   } else {
     const createPayload = { ...payload };
-    const stateId = story.blockedBy.length ? backlogState : todoState;
+    const stateLabel = story.status ?? defaultLabel;
+    const stateId = resolveStateId(statusGroup || (story.blockedBy.length ? 'backlog' : 'unstarted'), story);
     if (stateId) createPayload.state = stateId;
     if (dryRun) {
-      console.log(`[dry-run] criaria ${name}`);
+      console.log(`[dry-run] criaria ${name} (estado: ${stateLabel})`);
     } else {
       const issue = await api(`/workspaces/${workspace}/projects/${project.id}/issues/`, { method: 'POST', body: createPayload });
       created.push(issue);
-      console.log(`criado ${story.id} #${issue.sequence_id}`);
+      console.log(`criado ${story.id} #${issue.sequence_id} (estado: ${stateLabel})`);
     }
   }
   await sleep(250);

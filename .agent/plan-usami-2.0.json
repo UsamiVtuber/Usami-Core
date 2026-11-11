@@ -18,6 +18,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Documento revisado com mapa atual × proposta, waves das skills e ordem aprovada, sem mudança de código.",
       "scopeNotes": "Requisito §11. Somente leitura: nenhum arquivo de runtime é alterado. Complementa a auditoria de 2026-11-08 com o recorte do USAMI 2.0; não a repete.",
+      "status": "done",
       "blockedBy": [],
       "techGuidance": "Confirmar cada afirmação no código atual; `docs/architecture.md` e `AGENTS.md` são ponto de partida, não prova. Não assumir integrações (agenda, e-mail, finanças) que não existem no repositório."
     },
@@ -35,6 +36,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Schemas validam manifesto/plano válidos e rejeitam entradas inválidas nos testes.",
       "scopeNotes": "Somente contratos puros; sem persistência, rota ou LLM.",
+      "status": "done",
       "blockedBy": ["S1"],
       "techGuidance": "ESM + `node:test`, sem dependências novas. Nomes de campo em inglês no código e textos de UI em pt-BR, como o restante do runtime."
     },
@@ -52,6 +54,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Uma tarefa e um projeto criados via API podem ser consultados e atualizados; a suíte não toca em `data/` real.",
       "scopeNotes": "Operacional é a camada ausente do Memory Engine; curto prazo, episódica e semântica existentes não são reescritas. Nada sensível sem flag explícita.",
+      "status": "done",
       "blockedBy": ["S2"],
       "techGuidance": "Seguir o padrão `createBondHandler({bondStore})`: handler recebe o store e o depósito é redirecionável. Nunca importar o caminho padrão de `data/` em teste."
     },
