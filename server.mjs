@@ -13,6 +13,7 @@ import { createPersonalityStore, normalizePersonality, TRAITS, CUSTOM_PROMPT_MAX
 import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
+import { createBondStore } from './src/bond-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
 import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-classifier.js';
@@ -174,6 +175,15 @@ try {
 // então os testes seguem isolados em USAMI_DATA_DIR.
 const installPersonalityStore = createPersonalityStore({ dataDir: resolveDataDir() });
 installPersonalityStore.load();
+
+// Vínculo (data/bond.json): medidores do VN e histórico de momentos. Desde a
+// frente D o core calcula o XP, então web e desktop leem o mesmo estado.
+const installBondStore = createBondStore({ dataDir: resolveDataDir() });
+try {
+  installBondStore.load();
+} catch {
+  console.error('Aviso: vínculo local indisponível — os medidores do VN ficam zerados.');
+}
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
 const installProactiveStore = createProactiveStore({
@@ -1268,6 +1278,85 @@ export function createMemoryHandler(options = {}) {
     }
 
     return send(200, { ok: true, forgotten: kind, removed, memory: memorySnapshot(store) });
+  };
+}
+
+// Vínculo do VN: leitura, ganho por resposta, importação única do
+// localStorage antigo e reset. A regra do XP vive no core (bond-store.js),
+// não no cliente — por isso web e desktop chegam ao mesmo número.
+export function createBondHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.bondStore || installBondStore;
+
+  return async function handleBond(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const route = new URL(req.url || '/api/bond', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/bond') {
+      return send(200, { ok: true, bond: store.getAll() });
+    }
+
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    const read = await readRequestBody(req, { limit: 16384 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    if (route === '/api/bond/event') {
+      // Fim de chamada de voz: companhia por minuto inteiro.
+      if (payload.kind === 'call') {
+        const minutes = Number(payload.minutes);
+        if (!Number.isFinite(minutes) || minutes < 1) {
+          return send(400, { error: 'Minutos inválidos.' });
+        }
+        return send(200, { ok: true, bond: store.awardCall(minutes) });
+      }
+      if (typeof payload.content !== 'string' || !payload.content.trim()) {
+        return send(400, { error: 'Conteúdo ausente.' });
+      }
+      const spoken = payload.spoken === true;
+      return send(200, { ok: true, bond: store.awardChat(payload.content, { spoken }) });
+    }
+
+    if (route === '/api/bond/import') {
+      return send(200, { ok: true, bond: store.importState({ intimacy: payload.intimacy, log: payload.log }) });
+    }
+
+    if (route === '/api/bond/reset') {
+      // Mesma confirmação escrita da memória: nada é apagado sem o token no corpo.
+      if (String(payload.confirm ?? '').trim().toUpperCase() !== FORGET_CONFIRMATION) {
+        return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
+      }
+      return send(200, { ok: true, bond: store.reset() });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
   };
 }
 
@@ -2488,6 +2577,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleN8nCommand = createN8nCommandHandler();
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
+  const handleBond = createBondHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
@@ -2511,6 +2601,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
       if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
       if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
+      if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
       if (req.url === '/api/personality') return handlePersonality(req, res);
       if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
         || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);

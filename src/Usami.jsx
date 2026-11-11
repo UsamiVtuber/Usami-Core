@@ -40,7 +40,7 @@ import { StageErrorBoundary } from './StageErrorBoundary';
 import { useModalFocus } from './focus-trap';
 import { apiFetch } from './api-client';
 import { safeGetItem, safeSetItem, safeRemoveItem } from './storage-safe';
-import { METER_KEYS, LEVELS, levelFor, meterProgress, describeChatGains, appendBondEvent, loadBondLog, saveBondLog, LEVEL_NAMES } from './bond.js';
+import { METER_KEYS, LEVELS, levelFor, meterProgress, describeChatGains, appendBondEvent, loadBondLog, saveBondLog, LEVEL_NAMES, gainsFor, clampMeters, sanitizeBondLog } from './bond.js';
 import { createVrmaManager, VRMA_ANIMATIONS } from './vrma-manager';
 import { classifyFacs } from './facs-classifier.js';
 import { applyFacsToDriver } from './facs-apply.js';
@@ -87,15 +87,15 @@ function playAudioPart(audio, url, onStart) {
   });
 }
 
-// Intimacy meters (visual-novel style bond): XP per interaction, cumulative level thresholds, localStorage persistence.
+// Intimacy meters (visual-novel style bond): desde a frente D quem calcula e
+// guarda o vínculo é o core local (data/bond.json). O localStorage vira espelho
+// para o modo offline e fonte da migração única de quem já tinha dados.
 const INTIMACY_KEY = 'usami.intimidade.v1';
-// METER_KEYS, LEVELS, levelFor e meterProgress moram em ./bond.js (nomes dos níveis e histórico).
-const LAUGHTER_PATTERN = /kkk|haha|rsrs|😂|🤣|risada/i;
+const BOND_CORE_FLAG = 'usami.intimidade.core.v1';
+// METER_KEYS, LEVELS, levelFor, gainsFor e os deltas moram em ./bond.js.
 const loadIntimacy = () => {
   try {
-    const saved = JSON.parse(safeGetItem(INTIMACY_KEY) || 'null') || {};
-    const clamp = value => Math.min(999, Math.max(0, Math.floor(Number(value) || 0)));
-    return { carinho: clamp(saved.carinho), humor: clamp(saved.humor), companhia: clamp(saved.companhia) };
+    return clampMeters(JSON.parse(safeGetItem(INTIMACY_KEY) || 'null') || {});
   } catch { return { carinho: 0, humor: 0, companhia: 0 }; }
 };
 const formatCallTime = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
@@ -879,12 +879,57 @@ export function Usami() {
   const closeSettings = useCallback(() => setOpenPanel(current => current === 'settings' ? null : current), []);
   const bondTriggerRef = useRef(null);
   useEffect(() => { saveBondLog(bondLog); }, [bondLog]);
+  // Espelho do vínculo para o modo offline (a fonte é o core quando ele responde).
+  useEffect(() => { safeSetItem(INTIMACY_KEY, JSON.stringify(intimacy)); }, [intimacy]);
+  // `core` = o estado veio do /api/bond; `local` = API fora, regras locais.
+  const bondSourceRef = useRef('local');
+  const applyBond = useCallback(bond => {
+    if (!bond) return;
+    setIntimacy(clampMeters(bond.intimacy));
+    setBondLog(sanitizeBondLog(bond.log));
+  }, []);
+  // Ao abrir, o core manda. Core vazio + dados antigos no navegador = migração
+  // única, marcada no localStorage para o reset do core não reimportar.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await apiFetch('/api/bond');
+        if (!response.ok) throw new Error(String(response.status));
+        const body = await response.json();
+        let bond = body?.bond;
+        if (!bond) throw new Error('resposta sem vínculo');
+        const legacyIntimacy = loadIntimacy();
+        const legacyLog = loadBondLog();
+        const coreEmpty = !(bond.summary?.xp) && !(bond.log?.length);
+        const alreadyLinked = safeGetItem(BOND_CORE_FLAG) === '1';
+        const hasLegacy = legacyLog.length > 0 || METER_KEYS.some(key => (legacyIntimacy[key] || 0) > 0);
+        if (coreEmpty && !alreadyLinked && hasLegacy) {
+          const imported = await apiFetch('/api/bond/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ intimacy: legacyIntimacy, log: legacyLog }),
+          });
+          if (imported.ok) bond = (await imported.json())?.bond || bond;
+        }
+        if (cancelled) return;
+        safeSetItem(BOND_CORE_FLAG, '1');
+        bondSourceRef.current = 'core';
+        applyBond(bond);
+      } catch {
+        // API fora: segue com o espelho local e as mesmas regras de ganho.
+        bondSourceRef.current = 'local';
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [applyBond]);
   // Subida de nível vira um momento no histórico. O ref nasce com o nível
-  // carregado, então abrir a página não registra subida falsa.
+  // carregado, então abrir a página não registra subida falsa. No modo core
+  // quem registra é o store; isto só cobre o fallback offline.
   const bondLevel = Math.max(...METER_KEYS.map(key => levelFor(intimacy[key] || 0)));
   const bondLevelRef = useRef(bondLevel);
   useEffect(() => {
-    if (bondLevel > bondLevelRef.current) {
+    if (bondSourceRef.current === 'local' && bondLevel > bondLevelRef.current) {
       setBondLog(previous => appendBondEvent(previous, { kind: 'level', text: `Vínculo subiu para Nv.${bondLevel} · ${LEVEL_NAMES[bondLevel - 1]}`, at: Date.now() }));
     }
     bondLevelRef.current = bondLevel;
@@ -1686,7 +1731,7 @@ export function Usami() {
       }
     }
   };
-  const awardXP = (gains, event = null) => {
+  const awardLocal = (gains, event = null) => {
     setIntimacy(previous => {
       const next = {};
       let changed = false;
@@ -1700,11 +1745,60 @@ export function Usami() {
     });
     if (event) setBondLog(previous => appendBondEvent(previous, { ...event, at: Date.now(), gains }));
   };
-  const gainsFor = (content, duringCall) => {
-    const gains = { carinho: 1 };
-    if (LAUGHTER_PATTERN.test(content)) gains.humor = 2;
-    if (content.length > 120 || duringCall) gains.companhia = 2;
-    return gains;
+  // O core decide o XP de cada resposta; se a API cair no meio, a mesma regra
+  // de ./bond.js roda localmente e os medidores continuam andando.
+  const awardBondXP = (content, spoken = false) => {
+    const fallback = () => {
+      const gains = gainsFor(content, { spoken });
+      awardLocal(gains, describeChatGains(gains, { spoken }));
+    };
+    if (bondSourceRef.current !== 'core') {
+      fallback();
+      return;
+    }
+    apiFetch('/api/bond/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, spoken }),
+    })
+      .then(response => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
+      .then(body => applyBond(body?.bond))
+      .catch(() => { bondSourceRef.current = 'local'; fallback(); });
+  };
+  // Zerar: o core é a fonte; offline zera só o espelho local.
+  const resetBond = () => {
+    const clearLocal = () => {
+      setIntimacy({ carinho: 0, humor: 0, companhia: 0 });
+      setBondLog([]);
+    };
+    if (bondSourceRef.current !== 'core') {
+      clearLocal();
+      return;
+    }
+    apiFetch('/api/bond/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: 'APAGAR' }),
+    })
+      .then(response => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
+      .then(body => applyBond(body?.bond))
+      .catch(() => { bondSourceRef.current = 'local'; clearLocal(); });
+  };
+  // Fim de chamada: o core soma companhia por minuto; offline soma local.
+  const awardBondCall = minutes => {
+    const fallback = () => awardLocal({ companhia: minutes }, { kind: 'call', text: `Chamada de voz · ${minutes} min` });
+    if (bondSourceRef.current !== 'core') {
+      fallback();
+      return;
+    }
+    apiFetch('/api/bond/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'call', minutes }),
+    })
+      .then(response => (response.ok ? response.json() : Promise.reject(new Error(String(response.status)))))
+      .then(body => applyBond(body?.bond))
+      .catch(() => { bondSourceRef.current = 'local'; fallback(); });
   };
   const endCall = reason => {
     if (!callActiveRef.current) return;
@@ -1722,7 +1816,7 @@ export function Usami() {
     setMicError(false);
     setVoiceSpeaking(false);
     const minutes = Math.max(0, Math.floor((Date.now() - callStartRef.current) / 60000));
-    if (minutes > 0) awardXP({ companhia: minutes }, { kind: 'call', text: `Chamada de voz · ${minutes} min` });
+    if (minutes > 0) awardBondCall(minutes);
     setCall(false);
     setMessage(reason || 'Chamada encerrada.');
   };
@@ -1873,8 +1967,7 @@ export function Usami() {
       } else if (!wasSleeping && !inSleepCompanion) {
         expressionDriverRef.current?.set('19-prefab_doubt', 0.40, { ttlMs: 3500 });
       }
-      const gains = gainsFor(value, spoken);
-      awardXP(gains, describeChatGains(gains, { spoken }));
+      awardBondXP(value, spoken);
     }
     setMessage('Usami está pensando…');
     try {
@@ -2614,7 +2707,7 @@ export function Usami() {
             <h3>Intimidade</h3>
             <div className="rig-actions">
               {dangerConfirm === 'bond' ? <>
-                <button className="danger" onClick={() => { setIntimacy({ carinho: 0, humor: 0, companhia: 0 }); setBondLog([]); safeRemoveItem(INTIMACY_KEY); setDangerConfirm(null); }}>Confirmar e zerar</button>
+                <button className="danger" onClick={() => { resetBond(); setDangerConfirm(null); }}>Confirmar e zerar</button>
                 <button onClick={() => setDangerConfirm(null)}>Cancelar</button>
               </> : <button className="danger" onClick={() => setDangerConfirm('bond')}>Zerar medidores</button>}
             </div>
