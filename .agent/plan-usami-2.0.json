@@ -163,6 +163,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Mensagem de conversa continua idêntica; pedido operacional gera execução/plano rastreável.",
       "scopeNotes": "Não substituir o caminho ativo por `FlowExecutor`. Persona, JSON do provedor e latência do balão não mudam.",
+      "status": "done",
       "blockedBy": ["S4", "S6"],
       "techGuidance": "Classificador determinístico primeiro; LLM injetável para os casos ambíguos. Respeitar `USAMI_TURN_DEADLINE_MS` e o hedge de provedores."
     },
