@@ -90,8 +90,8 @@ O USAMI 2.0 adiciona um domínio operacional **ao lado** do caminho ativo, em
 `src/agent-*.js` e no namespace `/api/agent/*`. Os contratos puros vivem em
 `src/agent-contracts.js` (Intent, Plan/PlanStep, ToolSpec, SkillManifest,
 PermissionLevel 1–4 e ExecutionRecord). As rotas publicadas hoje são as da
-memória operacional e as de ferramentas (S4); plans, skills e permissão ainda
-não estão publicados.
+memória operacional, das ferramentas, das permissões e dos planos de tarefas;
+skills e confirmações de UI ainda não estão publicadas.
 
 `/api/plan` continua sendo o planner de **animação**; plano de tarefas mora em
 `/api/agent/plans` (S6). O caminho de produção (`createChatHandler`) e o
@@ -124,6 +124,18 @@ execução — argumento inválido não queima a confirmação. Negação vira
 `ExecutionRecord` com status `denied` e motivo no histórico, sem executar a
 ferramenta. `GET/POST /api/agent/permissions` lista, revoga e restaura escopos.
 O executor consulta o gate; a política mora nele, não no executor.
+
+O Planner Engine de tarefas fica em `src/task-planner.js` e é distinto do
+planner de animação. O núcleo é determinístico: `generatePlan` é injetável e o
+default não usa rede (LLM só por adapter). Um objetivo vira plano com passos,
+dependências, esforço e prioridade; acima do limiar de passos
+(`USAMI_PLAN_BRIEFING_THRESHOLD`, padrão 4) o plano ganha briefing com
+`summary`, `missingInfo` e `risks`. Cada plano vive em
+`data/plans/<pl-id>.json` com todas as versões: replanejar acrescenta versão e
+progresso edita a corrente. `POST/GET /api/agent/plans`,
+`GET /api/agent/plans/:id` e `PATCH /api/agent/plans/:id` exigem
+`x-usami-token`; planejamento não entra no caminho crítico do chat. Arquivo de
+plano inválido deixa só aquele plano indisponível, sem derrubar os demais.
 
 ## Módulos extraídos na auditoria de 2026-11-08
 
@@ -189,7 +201,7 @@ Nenhum deles é publicado nem ativado sem autorização explícita.
 ## Segurança de borda da API local
 
 - `Host` e `Origin` passam por allowlist fechada (`src/api-security.js`): `127.0.0.1:8787`, `localhost:8787`, os hosts das origens do front e `USAMI_ALLOWED_HOSTS`. A regra antiga "Origin == Host" foi removida (DNS rebinding). Origens extras (LAN, `terminal.local`): `USAMI_ALLOWED_ORIGINS` e `USAMI_ALLOWED_HOSTS`, separadas por vírgula.
-- Exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto): `/api/memory*`, `/api/agent/memory*`, `/api/agent/executions`, `POST /api/agent/tools/*/execute`, `/api/agent/confirmations`, `/api/agent/permissions`, `/api/personality`, `/api/rag/context`; toda escrita sensível de `/api/technique` (inclui `note` e status ≠ `proposta`), `/api/plan`, `POST /api/learning/verdict`, `/api/stt`, `/api/media/analyze`, `/api/proactive/*` e `/api/n8n/command(s)` + `/ack`. Sem o token no servidor a resposta é 503 (fail-closed); token errado/ausente é 401. O proxy do Vite injeta o header em todo `/api` do navegador, então o token não chega ao bundle; o n8n precisa enviá-lo quando chamar rota tokenizada.
+- Exigem o header `X-Usami-Token` igual a `USAMI_API_TOKEN` (env ou `.env` do projeto): `/api/memory*`, `/api/agent/memory*`, `/api/agent/executions`, `POST /api/agent/tools/*/execute`, `/api/agent/confirmations`, `/api/agent/permissions`, `/api/agent/plans*`, `/api/personality`, `/api/rag/context`; toda escrita sensível de `/api/technique` (inclui `note` e status ≠ `proposta`), `/api/plan`, `POST /api/learning/verdict`, `/api/stt`, `/api/media/analyze`, `/api/proactive/*` e `/api/n8n/command(s)` + `/ack`. Sem o token no servidor a resposta é 503 (fail-closed); token errado/ausente é 401. O proxy do Vite injeta o header em todo `/api` do navegador, então o token não chega ao bundle; o n8n precisa enviá-lo quando chamar rota tokenizada.
 - Ficam só com a borda de Host/Origin (sem token): GETs de leitura usados pelo n8n (`/api/techniques`, `/api/technique?id`) e `GET /api/learning` — token neles exigiria credencial no Nyarch. O poll `GET /api/n8n/commands` **continua tokenizado** (é o frontend/proxy que o chama).
 - O `.env` é `USAMI_KEYS_FILE` ou `../.env` relativo ao projeto; não há mais caminhos fixos de `A:\` nem fallback para outro projeto.
 - Webhook para o n8n: com `N8N_WEBHOOK_SECRET` sai com `X-Usami-Timestamp` e `X-Usami-Signature` (`sha256=` + HMAC-SHA256 de `<timestamp>.<corpo>`); `N8N_WEBHOOK_OMIT_TEXT=true` remove `userMessage` e `reply`.

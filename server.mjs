@@ -15,11 +15,12 @@ import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { createBondStore } from './src/bond-store.js';
 import { createOperationalMemoryStore, OPERATIONAL_DEFAULT_LIMIT, OPERATIONAL_MAX_LIMIT } from './src/operational-memory-store.js';
-import { EXECUTION_ORIGINS, OPERATIONAL_KINDS, OPERATIONAL_STATUSES } from './src/agent-contracts.js';
+import { EXECUTION_ORIGINS, OPERATIONAL_KINDS, OPERATIONAL_STATUSES, PLAN_ORIGINS } from './src/agent-contracts.js';
 import { createToolRegistry } from './src/tool-registry.js';
 import { createToolExecutor, EXECUTIONS_DEFAULT_LIST, EXECUTIONS_LIMIT } from './src/tool-executor.js';
 import { createMemorySearchTool } from './src/memory-search-tool.js';
 import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.js';
+import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseBriefingThreshold } from './src/task-planner.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -226,6 +227,19 @@ try {
 }
 const installToolExecutor = createToolExecutor({ registry: toolRegistry, gate: installToolGate, dataDir: resolveDataDir() });
 installToolExecutor.load();
+
+// Planner Engine de tarefas (data/plans/<pl-id>.json): objetivo vira plano com
+// versões; distinto de /api/plan (animação). O limiar do briefing é ajustável
+// por USAMI_PLAN_BRIEFING_THRESHOLD.
+const installTaskPlanner = createTaskPlanner({
+  dataDir: resolveDataDir(),
+  briefingThreshold: parseBriefingThreshold(process.env.USAMI_PLAN_BRIEFING_THRESHOLD),
+});
+try {
+  installTaskPlanner.load();
+} catch (error) {
+  console.error('Aviso: planner de tarefas indisponível:', error?.message || error);
+}
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
 const installProactiveStore = createProactiveStore({
@@ -1710,6 +1724,117 @@ export function createToolHandler(options = {}) {
   };
 }
 
+// Planos de tarefas (/api/agent/plans): o planner é determinístico e um
+// adapter de LLM entra por injeção, então o handler só cobre a borda HTTP e
+// os estados do contrato — nada de planejar no caminho do chat.
+const AGENT_PLAN_PATH_RE = /^\/api\/agent\/plans\/(pl-[0-9a-f]{12})$/;
+
+export function createPlansHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const planner = options.planner || installTaskPlanner;
+
+  return async function handlePlans(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/plans', 'http://127.0.0.1:8787');
+    const path = url.pathname;
+
+    if (req.method === 'GET') {
+      if (path === '/api/agent/plans') {
+        const rawLimit = url.searchParams.get('limit');
+        let limit = PLAN_LIST_DEFAULT_LIMIT;
+        if (rawLimit !== null) {
+          const parsed = Number(rawLimit);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > PLAN_LIST_MAX_LIMIT) {
+            return send(400, { error: `limit inválido (inteiro entre 1 e ${PLAN_LIST_MAX_LIMIT}).` });
+          }
+          limit = parsed;
+        }
+        const plans = planner.list({ limit });
+        return send(200, { ok: true, plans, count: plans.length, unavailable: planner.unavailable() });
+      }
+      const match = path.match(AGENT_PLAN_PATH_RE);
+      if (!match) return send(404, { error: 'Não encontrado.' });
+      const found = planner.get(match[1]);
+      if (found.notFound) return send(404, { error: 'Plano não encontrado.' });
+      if (found.unavailable) return send(500, { error: 'Plano indisponível (arquivo inválido).' });
+      return send(200, { ok: true, plan: found.plan, versions: found.versions });
+    }
+
+    if (req.method !== 'POST' && req.method !== 'PATCH') return send(404, { error: 'Não encontrado.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+    const read = await readRequestBody(req, { limit: 16384 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    if (req.method === 'POST') {
+      if (path !== '/api/agent/plans') return send(404, { error: 'Não encontrado.' });
+      const unknown = Object.keys(payload).filter(key => !['goal', 'origin', 'replanOf'].includes(key));
+      if (unknown.length) {
+        return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+      }
+      if (payload.origin !== undefined && !PLAN_ORIGINS.includes(payload.origin)) {
+        return send(400, { error: `origin inválido (use ${PLAN_ORIGINS.join('|')}).` });
+      }
+      if (payload.replanOf !== undefined && (typeof payload.replanOf !== 'string' || !/^pl-[0-9a-f]{12}$/.test(payload.replanOf))) {
+        return send(400, { error: 'replanOf inválido (use um id de plano).' });
+      }
+
+      let created;
+      try {
+        created = planner.create({ goal: payload.goal, origin: payload.origin, replanOf: payload.replanOf });
+      } catch (error) {
+        console.error('Aviso: não foi possível salvar o plano:', error?.message || error);
+        return send(500, { error: 'Não foi possível salvar o plano.' });
+      }
+      if (created.notFound) return send(404, { error: 'Plano não encontrado.' });
+      if (created.unavailable) return send(500, { error: 'Plano indisponível (arquivo inválido).' });
+      if (!created.ok) return send(400, { error: 'Plano inválido.', details: created.errors });
+      return send(created.replanned ? 200 : 201, { ok: true, plan: created.plan, version: created.version });
+    }
+
+    const match = path.match(AGENT_PLAN_PATH_RE);
+    if (!match) return send(404, { error: 'Não encontrado.' });
+    const unknown = Object.keys(payload).filter(key => !['steps', 'status'].includes(key));
+    if (unknown.length) {
+      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+    }
+
+    let updated;
+    try {
+      updated = planner.updateProgress(match[1], payload);
+    } catch (error) {
+      console.error('Aviso: não foi possível salvar o progresso do plano:', error?.message || error);
+      return send(500, { error: 'Não foi possível salvar o progresso.' });
+    }
+    if (updated.notFound) return send(404, { error: 'Plano não encontrado.' });
+    if (updated.unavailable) return send(500, { error: 'Plano indisponível (arquivo inválido).' });
+    if (updated.locked) return send(409, { error: 'Plano concluído ou cancelado não aceita progresso.' });
+    if (!updated.ok) return send(400, { error: 'Progresso inválido.', details: updated.errors });
+    return send(200, { ok: true, plan: updated.plan, changed: updated.changed });
+  };
+}
+
 // Conquistas (data/achievements.json): leitura para a aba "Conquistas" do
 // desktop. Mesma borda das rotas do vínculo (origem + token) e mesmo estilo de
 // erro; antes de responder, reavalia o catálogo contra o vínculo para recuperar
@@ -2967,6 +3092,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleBond = createBondHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
   const handleTools = createToolHandler({ gate: installToolGate });
+  const handlePlans = createPlansHandler();
   const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
@@ -3003,6 +3129,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         || req.url === '/api/agent/confirmations' || req.url.startsWith('/api/agent/confirmations?')
         || req.url === '/api/agent/permissions' || req.url.startsWith('/api/agent/permissions?')
         || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
+      if (req.url === '/api/agent/plans' || req.url.startsWith('/api/agent/plans/') || req.url.startsWith('/api/agent/plans?')) return handlePlans(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));
