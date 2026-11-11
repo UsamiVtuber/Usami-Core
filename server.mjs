@@ -19,6 +19,7 @@ import { EXECUTION_ORIGINS, OPERATIONAL_KINDS, OPERATIONAL_STATUSES } from './sr
 import { createToolRegistry } from './src/tool-registry.js';
 import { createToolExecutor, EXECUTIONS_DEFAULT_LIST, EXECUTIONS_LIMIT } from './src/tool-executor.js';
 import { createMemorySearchTool } from './src/memory-search-tool.js';
+import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -210,14 +211,20 @@ try {
   console.error('Aviso: memória operacional indisponível:', error?.message || error);
 }
 
-// Ferramentas do domínio agêntico: registry + executor com histórico
-// auditável (data/executions.json). Só leitura nesta story; permissão é S5.
+// Ferramentas do domínio agêntico: registry + gate de permissões + executor com
+// histórico auditável (data/executions.json e data/permissions.json).
 const toolRegistry = createToolRegistry();
 const memorySearchRegistration = toolRegistry.register(createMemorySearchTool({ memoryStore: installMemoryStore }));
 if (!memorySearchRegistration.ok) {
   console.error('Aviso: ferramenta memory.search não registrada:', memorySearchRegistration.errors.join('; '));
 }
-const installToolExecutor = createToolExecutor({ registry: toolRegistry, dataDir: resolveDataDir() });
+const installToolGate = createPermissionGate({ registry: toolRegistry, dataDir: resolveDataDir() });
+try {
+  installToolGate.load();
+} catch {
+  // load() já loga o aviso; o gate nega execuções até o arquivo ser corrigido.
+}
+const installToolExecutor = createToolExecutor({ registry: toolRegistry, gate: installToolGate, dataDir: resolveDataDir() });
 installToolExecutor.load();
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1554,6 +1561,7 @@ export function createToolHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const registry = options.registry || toolRegistry;
   const executor = options.executor || installToolExecutor;
+  const gate = options.gate || null;
 
   return async function handleTools(req, res) {
     const send = (status, data) => {
@@ -1567,56 +1575,127 @@ export function createToolHandler(options = {}) {
     }
     if (denyWithoutToken(req, options, send)) return;
 
+    // Devolve o payload ou null (resposta de erro já enviada).
+    const readJsonPayload = async (limit) => {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (contentType !== 'application/json') {
+        send(403, { error: 'Content-Type inválido.' });
+        return null;
+      }
+      const read = await readRequestBody(req, { limit });
+      if (!read.ok) {
+        send(413, { error: 'Pedido muito longo.' });
+        return null;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(read.body);
+      } catch {
+        send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+        return null;
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        send(400, { error: 'Corpo inválido.' });
+        return null;
+      }
+      return payload;
+    };
+
+    const rejectUnknownKeys = (payload, allowed) => {
+      const unknown = Object.keys(payload).filter(key => !allowed.includes(key));
+      if (!unknown.length) return false;
+      send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+      return true;
+    };
+
     const url = new URL(req.url || '/api/agent/tools', 'http://127.0.0.1:8787');
     const path = url.pathname;
 
     if (req.method === 'GET') {
-      if (path !== '/api/agent/executions') return send(404, { error: 'Não encontrado.' });
-      const limitValue = url.searchParams.get('limit');
-      let limit = EXECUTIONS_DEFAULT_LIST;
-      if (limitValue !== null) {
-        const parsed = Number(limitValue);
-        if (!Number.isInteger(parsed) || parsed < 1 || parsed > EXECUTIONS_LIMIT) {
-          return send(400, { error: `limit inválido (inteiro entre 1 e ${EXECUTIONS_LIMIT}).` });
+      if (path === '/api/agent/executions') {
+        const limitValue = url.searchParams.get('limit');
+        let limit = EXECUTIONS_DEFAULT_LIST;
+        if (limitValue !== null) {
+          const parsed = Number(limitValue);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > EXECUTIONS_LIMIT) {
+            return send(400, { error: `limit inválido (inteiro entre 1 e ${EXECUTIONS_LIMIT}).` });
+          }
+          limit = parsed;
         }
-        limit = parsed;
+        const executions = executor.list({ limit });
+        return send(200, { ok: true, executions, count: executions.length });
       }
-      const executions = executor.list({ limit });
-      return send(200, { ok: true, executions, count: executions.length });
+      if (path === '/api/agent/permissions') {
+        if (!gate) return send(500, { error: 'Permissões indisponíveis.' });
+        return send(200, { ok: true, ...gate.list() });
+      }
+      return send(404, { error: 'Não encontrado.' });
     }
 
     if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+
+    if (path === '/api/agent/confirmations') {
+      if (!gate) return send(500, { error: 'Permissões indisponíveis.' });
+      const payload = await readJsonPayload(4096);
+      if (!payload) return;
+      if (rejectUnknownKeys(payload, ['tool', 'confirm'])) return;
+      // Confirmação escrita, como no forget da memória: o token de uso único só
+      // nasce com a palavra exata no corpo.
+      if (String(payload.confirm ?? '').trim().toUpperCase() !== CONFIRMATION_WORD) {
+        return send(403, { error: `Confirmação escrita necessária: envie confirm: "${CONFIRMATION_WORD}".` });
+      }
+      if (typeof payload.tool !== 'string' || !payload.tool.trim()) return send(400, { error: 'Ferramenta inválida.' });
+      const created = gate.createConfirmation(payload.tool.trim());
+      if (created.notFound) return send(404, { error: 'Ferramenta não encontrada.' });
+      if (created.notRequired) return send(400, { error: created.errors[0] });
+      if (created.denied) return send(403, { error: created.errors[0] });
+      return send(201, { ok: true, confirmation: created.confirmation });
+    }
+
+    if (path === '/api/agent/permissions') {
+      if (!gate) return send(500, { error: 'Permissões indisponíveis.' });
+      const payload = await readJsonPayload(4096);
+      if (!payload) return;
+      if (rejectUnknownKeys(payload, ['tool', 'action', 'reason'])) return;
+      if (typeof payload.tool !== 'string' || !payload.tool.trim()) return send(400, { error: 'Ferramenta inválida.' });
+      if (payload.action !== 'revoke' && payload.action !== 'restore') {
+        return send(400, { error: 'Ação inválida (use revoke ou restore).' });
+      }
+      let result;
+      try {
+        result = payload.action === 'revoke'
+          ? gate.revoke(payload.tool.trim(), payload.reason)
+          : gate.restore(payload.tool.trim());
+      } catch (error) {
+        console.error('Aviso: não foi possível gravar permissões:', error?.message || error);
+        return send(500, { error: 'Arquivo de permissões indisponível.' });
+      }
+      if (!result.ok) return send(400, { error: 'Permissão inválida.', details: result.errors });
+      return send(200, { ok: true, ...gate.list() });
+    }
+
     const match = path.match(AGENT_TOOL_EXECUTE_RE);
     if (!match) return send(404, { error: 'Não encontrado.' });
     if (!registry.has(match[1])) return send(404, { error: 'Ferramenta não encontrada.' });
 
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
-
-    const read = await readRequestBody(req, { limit: 16384 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-    const unknown = Object.keys(payload).filter(key => key !== 'arguments' && key !== 'origin');
-    if (unknown.length) {
-      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
-    }
+    const payload = await readJsonPayload(16384);
+    if (!payload) return;
+    if (rejectUnknownKeys(payload, ['arguments', 'origin', 'confirmation'])) return;
     const origin = payload.origin ?? 'agent';
     if (!EXECUTION_ORIGINS.includes(origin)) {
       return send(400, { error: `origin inválido (use ${EXECUTION_ORIGINS.join('|')}).` });
     }
+    let confirmation;
+    if (payload.confirmation !== undefined) {
+      if (typeof payload.confirmation !== 'string' || payload.confirmation.length > 128) {
+        return send(400, { error: 'confirmation: deve ser texto de até 128 caracteres.' });
+      }
+      confirmation = payload.confirmation;
+    }
 
     let outcome;
     try {
-      outcome = await executor.execute(match[1], payload.arguments ?? {}, { origin });
+      outcome = await executor.execute(match[1], payload.arguments ?? {}, { origin, confirmation });
     } catch (error) {
       console.error('Aviso: não foi possível registrar a execução:', error?.message || error);
       return send(500, { error: 'Não foi possível registrar a execução.' });
@@ -1624,6 +1703,7 @@ export function createToolHandler(options = {}) {
     if (outcome.notFound) return send(404, { error: 'Ferramenta não encontrada.' });
     if (outcome.invalidOrigin) return send(400, { error: outcome.errors[0] });
     if (outcome.invalidArguments) return send(400, { error: 'Argumentos inválidos.', details: outcome.errors });
+    if (outcome.denied) return send(403, { ok: false, error: outcome.record.reason, execution: outcome.record });
     return send(200, outcome.ok
       ? { ok: true, execution: outcome.record, result: outcome.result }
       : { ok: false, execution: outcome.record });
@@ -2886,7 +2966,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
-  const handleTools = createToolHandler();
+  const handleTools = createToolHandler({ gate: installToolGate });
   const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
   const handleTechnique = createTechniqueHandler();
@@ -2919,7 +2999,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
         || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
       if (req.url === '/api/agent/memory' || req.url.startsWith('/api/agent/memory/') || req.url.startsWith('/api/agent/memory?')) return handleOperationalMemory(req, res);
-      if (req.url === '/api/agent/executions' || req.url.startsWith('/api/agent/executions?') || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
+      if (req.url === '/api/agent/executions' || req.url.startsWith('/api/agent/executions?')
+        || req.url === '/api/agent/confirmations' || req.url.startsWith('/api/agent/confirmations?')
+        || req.url === '/api/agent/permissions' || req.url.startsWith('/api/agent/permissions?')
+        || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

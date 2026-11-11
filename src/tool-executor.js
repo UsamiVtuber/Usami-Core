@@ -18,6 +18,7 @@ import {
   AGENT_LIMITS,
   AGENT_SCHEMAS,
   EXECUTION_ORIGINS,
+  permissionRequiresConfirmation,
   validateExecutionRecord,
 } from './agent-contracts.js';
 import { validateToolArguments } from './tool-registry.js';
@@ -35,6 +36,14 @@ function summarizeArguments(args) {
   return (keys.length ? `args: ${keys.join(', ')}` : 'args: nenhum').slice(0, AGENT_LIMITS.maxInputSummaryChars);
 }
 
+// Antes da validação só dá para listar nomes; argumentos desconhecidos não
+// entram no resumo da negação.
+function summarizeArgumentNames(tool, args) {
+  if (!isPlainObject(args)) return 'args: nenhum';
+  const known = new Set(tool.parameters.map(param => param.name));
+  return summarizeArguments(Object.fromEntries(Object.entries(args).filter(([key]) => known.has(key))));
+}
+
 function sanitizeReason(error) {
   const raw = typeof error?.message === 'string' ? error.message : String(error ?? '');
   const clean = raw.replace(/\s+/g, ' ').trim().slice(0, AGENT_LIMITS.maxReasonChars);
@@ -43,6 +52,7 @@ function sanitizeReason(error) {
 
 export function createToolExecutor({
   registry,
+  gate = null,
   dataDir = resolveDataDir(),
   filePath = join(dataDir, FILE_NAME),
   now = () => Date.now(),
@@ -104,18 +114,66 @@ export function createToolExecutor({
     return { ...checked.value };
   }
 
-  async function execute(name, args, { origin = 'agent' } = {}) {
+  function recordDenial(tool, { origin, reason, startedMs, startedAt, inputSummary }) {
+    const finishedMs = now();
+    return append({
+      schema: AGENT_SCHEMAS.execution,
+      id: `ex-${randomBytes(6).toString('hex')}`,
+      tool: tool.name,
+      status: 'denied',
+      permissionLevel: tool.permissionLevel,
+      origin,
+      startedAt,
+      finishedAt: iso(finishedMs),
+      durationMs: Math.max(0, finishedMs - startedMs),
+      verified: false,
+      reason: sanitizeReason(new Error(reason)),
+      inputSummary,
+    });
+  }
+
+  async function execute(name, args, { origin = 'agent', confirmation } = {}) {
     if (!EXECUTION_ORIGINS.includes(origin)) {
       return { ok: false, invalidOrigin: true, errors: [`origin inválido (use ${EXECUTION_ORIGINS.join('|')})`] };
     }
     const tool = registry.get(name);
     if (!tool) return { ok: false, notFound: true, errors: ['tool: não registrada'] };
 
+    const startedMs = now();
+    const startedAt = iso(startedMs);
+    // Revogação e disponibilidade do gate vêm antes de qualquer coisa: uma
+    // ferramenta negada não deve nem chegar à validação de argumentos.
+    const gateCheck = gate
+      ? gate.check(tool)
+      : (permissionRequiresConfirmation(tool.permissionLevel) ? { ok: false, reason: 'gate de permissões indisponível' } : { ok: true });
+    if (!gateCheck.ok) {
+      const record = recordDenial(tool, {
+        origin,
+        reason: gateCheck.reason,
+        startedMs,
+        startedAt,
+        inputSummary: summarizeArgumentNames(tool, args),
+      });
+      return { ok: false, denied: true, record };
+    }
+
     const validation = validateToolArguments(tool, args === undefined ? {} : args);
     if (!validation.ok) return { ok: false, invalidArguments: true, errors: validation.errors };
 
-    const startedMs = now();
-    const startedAt = iso(startedMs);
+    // A confirmação de uso único é consumida aqui, depois dos argumentos: pedido
+    // inválido não queima a confirmação do usuário.
+    const authorization = gate ? gate.authorize(tool, confirmation) : { ok: true };
+    if (!authorization.ok) {
+      const record = recordDenial(tool, {
+        origin,
+        reason: authorization.reason,
+        startedMs,
+        startedAt,
+        inputSummary: summarizeArguments(validation.value),
+      });
+      return { ok: false, denied: true, record };
+    }
+
     const inputSummary = summarizeArguments(validation.value);
     const controller = new AbortController();
     let timer;
