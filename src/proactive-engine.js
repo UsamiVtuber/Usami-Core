@@ -10,6 +10,13 @@
  */
 
 import { getDailyScene } from './scenes.js';
+import {
+  DEFAULT_DISMISS_SNOOZE_MS,
+  DEFAULT_MAX_UNANSWERED_SUGGESTIONS,
+  DEFAULT_MIN_RELEVANCE,
+  DEFAULT_RELEVANCE_COOLDOWNS_MS,
+  evaluateContextualSuggestions,
+} from './proactive-suggestions.js';
 
 export const IDLE_TRIGGER_DEFAULT_MS = 180 * 1000; // 3 minutos
 export const DND_START_HOUR = 23.5; // 23:30
@@ -206,14 +213,24 @@ export function createProactiveEngine({
   idleThresholdMs = IDLE_TRIGGER_DEFAULT_MS,
   silenceRemarks: initialSilenceRemarks = 'normal',
   enforceQuietHours = true,
+  quietStartHour = DND_START_HOUR,
+  quietEndHour = DND_END_HOUR,
   router = null,
   onProactiveSay = null,
   now = () => Date.now(),
+  suggestionsStore = null,
+  suggestionSources = [],
+  minSuggestionRelevance = DEFAULT_MIN_RELEVANCE,
+  maxUnansweredSuggestions = DEFAULT_MAX_UNANSWERED_SUGGESTIONS,
+  suggestionCooldowns = DEFAULT_RELEVANCE_COOLDOWNS_MS,
+  suggestionDismissSnoozeMs = DEFAULT_DISMISS_SNOOZE_MS,
+  onSuggestion = null,
 } = {}) {
   let lastUserActivityMs = now();
   let unansweredCount = 0;
   let isBusy = false;
   let silenceRemarks = normalizeSilenceRemarks(initialSilenceRemarks);
+  let activeSuggestionSources = Array.isArray(suggestionSources) ? [...suggestionSources] : [];
   // Turnos cuja voz ainda está tocando (turnId -> startedAtMs). O relógio de
   // silêncio só começa a contar quando a voz termina (`markSpeechEnded`).
   const voicePending = new Map();
@@ -294,7 +311,48 @@ export function createProactiveEngine({
       silenceRemarks,
       intervalMs: effectiveIntervalMs,
       idleMs: currentNow - lastUserActivityMs,
+      ...(suggestionsStore
+        ? {
+            unansweredSuggestions: suggestionsStore.countUnanswered(),
+            pendingSuggestionId: suggestionsStore.getPending()?.id || null,
+          }
+        : {}),
     };
+  }
+
+  function setSuggestionSources(sources = []) {
+    activeSuggestionSources = Array.isArray(sources) ? [...sources] : [];
+  }
+
+  /**
+   * Avalia fontes contextuais e persiste no máximo uma sugestão por vez em
+   * `suggestionsStore`. Separado de `checkAndTrigger()` e sem emitir
+   * `proactive_say` nem executar ferramentas automaticamente.
+   */
+  function checkSuggestions(overrides = {}) {
+    const store = overrides.store ?? suggestionsStore;
+    if (!store) {
+      return { suggested: false, reason: 'store_unavailable' };
+    }
+    const evalNow = typeof overrides.now === 'function'
+      ? overrides.now()
+      : Number.isFinite(overrides.now)
+        ? overrides.now
+        : now();
+    return evaluateContextualSuggestions({
+      now: evalNow,
+      store,
+      sources: overrides.sources ?? activeSuggestionSources,
+      enforceQuietHours: overrides.enforceQuietHours ?? enforceQuietHours,
+      quietStartHour: overrides.quietStartHour ?? quietStartHour,
+      quietEndHour: overrides.quietEndHour ?? quietEndHour,
+      isQuiet: isQuietHours,
+      minRelevance: overrides.minRelevance ?? minSuggestionRelevance,
+      maxUnanswered: overrides.maxUnanswered ?? maxUnansweredSuggestions,
+      cooldowns: overrides.cooldowns ?? suggestionCooldowns,
+      dismissSnoozeMs: overrides.dismissSnoozeMs ?? suggestionDismissSnoozeMs,
+      onSuggestion: overrides.onSuggestion ?? onSuggestion,
+    });
   }
 
   async function checkAndTrigger() {
@@ -313,6 +371,8 @@ export function createProactiveEngine({
       silenceRemarks,
       idleThresholdMs,
       enforceQuietHours,
+      quietStartHour,
+      quietEndHour,
     });
 
     if (!check.allowed) {
@@ -354,6 +414,11 @@ export function createProactiveEngine({
     stop();
     intervalTimer = setInterval(() => {
       checkAndTrigger().catch(() => {});
+      if (suggestionsStore) {
+        try {
+          checkSuggestions();
+        } catch {}
+      }
     }, checkIntervalMs);
   }
 
@@ -373,6 +438,8 @@ export function createProactiveEngine({
     setSilenceRemarks,
     getSilenceRemarks,
     getState,
+    setSuggestionSources,
+    checkSuggestions,
     checkAndTrigger,
     start,
     stop,

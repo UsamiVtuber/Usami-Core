@@ -199,6 +199,16 @@ lê `.env`, `USAMI_KEYS_FILE` nem `vault/`). A ferramenta `self.describe` (níve
 e a rota `GET /api/agent/self` (atrás de `x-usami-token` + Host/Origin) devolvem
 o retrato sem reutilizar o termo `capabilities`.
 
+As **Sugestões proativas contextuais** (S12) vivem em
+`src/proactive-suggestions.js` e conectam-se ao `proactive-engine.js` sem
+alterar `proactive_say`. Quatro fontes injetáveis observam tarefa atrasada,
+reunião próxima, projeto parado e lacuna de skill; `data/suggestions.json`
+persiste o ciclo `suggested → planned → authorized → verified` (além de
+`dismissed`) sob DND (`isQuietHours`), teto de 1 sugestão não respondida e
+throttle escalado por relevância. As rotas `GET /api/agent/suggestions` e
+`POST /api/agent/suggestions/:id/accept|dismiss` exigem token + Host/Origin;
+aceitar cria e aprova um plano em `task-planner` sem executar ferramentas.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor

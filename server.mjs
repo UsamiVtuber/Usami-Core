@@ -48,6 +48,13 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
+import {
+  createDefaultSuggestionSources,
+  createSuggestionStore,
+  SUGGESTION_STATUSES,
+  SUGGESTIONS_DEFAULT_LIMIT,
+  SUGGESTIONS_MAX_LIMIT,
+} from './src/proactive-suggestions.js';
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 import { analyzeMedia } from './src/media-analyzer.js';
 import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
@@ -328,10 +335,25 @@ const installProactiveStore = createProactiveStore({
   vaultDir: resolveVaultDir(process.env.USAMI_PROACTIVE_VAULT || process.env.USAMI_RAG_VAULT),
 });
 
-// Motor de proatividade da Usami (<开口> / idle triggers).
+// Store persistente de sugestões contextuais (S12: data/suggestions.json).
+const installSuggestionsStore = createSuggestionStore({ dataDir: resolveDataDir() });
+try {
+  installSuggestionsStore.load();
+} catch (error) {
+  console.error('Aviso: sugestões proativas indisponíveis:', error?.message || error);
+}
+
+// Motor de proatividade da Usami (<开口> / idle triggers + sugestões contextuais).
 export const proactiveEngine = createProactiveEngine({
   affinityProvider: () => (installMemoryStore.getAll()?.affinity?.score ?? 0),
   usernameProvider: () => (installMemoryStore.getAll()?.user?.nickname || 'você'),
+  suggestionsStore: installSuggestionsStore,
+  suggestionSources: createDefaultSuggestionSources({
+    operationalProvider: () => installOperationalStore.getAll().records,
+    plansProvider: () => installTaskPlanner.list({ limit: 200 }),
+    skillsProvider: () => installSkillCatalog.list(),
+    toolsProvider: () => toolRegistry.list(),
+  }),
   onProactiveSay: (cmd) => {
     // A1: envia para o store persistente que o desktop consome
     installProactiveStore.addEvent({
@@ -2377,6 +2399,120 @@ export function createSelfHandler(options = {}) {
   };
 }
 
+// --- Sugestões proativas contextuais (S12): /api/agent/suggestions ---------
+const AGENT_SUGGESTION_PATH_RE = /^\/api\/agent\/suggestions\/(sg-[0-9a-f]{12})$/;
+const AGENT_SUGGESTION_ACTION_RE = /^\/api\/agent\/suggestions\/(sg-[0-9a-f]{12})\/(accept|dismiss)$/;
+
+export function createSuggestionsHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.suggestionsStore || installSuggestionsStore;
+  const planner = options.taskPlanner || installTaskPlanner;
+  const engine = options.proactiveEngine || proactiveEngine;
+
+  return async function handleSuggestions(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/suggestions', 'http://127.0.0.1:8787');
+    const path = url.pathname;
+
+    if (req.method === 'GET') {
+      if (path === '/api/agent/suggestions') {
+        const statusParam = url.searchParams.get('status');
+        if (statusParam !== null && !SUGGESTION_STATUSES.includes(statusParam)) {
+          return send(400, { error: `status inválido (use ${SUGGESTION_STATUSES.join('|')}).` });
+        }
+        const rawLimit = url.searchParams.get('limit');
+        let limit = SUGGESTIONS_DEFAULT_LIMIT;
+        if (rawLimit !== null) {
+          const parsed = Number(rawLimit);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > SUGGESTIONS_MAX_LIMIT) {
+            return send(400, { error: `limit inválido (inteiro entre 1 e ${SUGGESTIONS_MAX_LIMIT}).` });
+          }
+          limit = parsed;
+        }
+        const evaluateParam = url.searchParams.get('evaluate');
+        if ((evaluateParam === '1' || evaluateParam === 'true') && typeof engine?.checkSuggestions === 'function') {
+          engine.checkSuggestions({ store });
+        }
+        const suggestions = store.list({ ...(statusParam ? { status: statusParam } : {}), limit });
+        return send(200, {
+          ok: true,
+          suggestions,
+          count: suggestions.length,
+          unansweredCount: store.countUnanswered(),
+          pending: store.getPending(),
+          unavailable: store.unavailable(),
+        });
+      }
+
+      const idMatch = path.match(AGENT_SUGGESTION_PATH_RE);
+      if (!idMatch) return send(404, { error: 'Não encontrado.' });
+      const found = store.get(idMatch[1]);
+      if (found.unavailable) return send(500, { error: 'Sugestões indisponíveis (arquivo inválido).' });
+      if (found.notFound) return send(404, { error: 'Sugestão não encontrada.' });
+      return send(200, { ok: true, suggestion: found.suggestion });
+    }
+
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+    const actionMatch = path.match(AGENT_SUGGESTION_ACTION_RE);
+    if (!actionMatch) return send(404, { error: 'Não encontrado.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
+    const read = await readRequestBody(req, { limit: 4096 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload;
+    try {
+      payload = JSON.parse(read.body);
+    } catch {
+      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return send(400, { error: 'Corpo inválido.' });
+    }
+
+    const [, suggestionId, action] = actionMatch;
+    const allowedKeys = action === 'accept' ? ['goal', 'note'] : ['reason'];
+    const unknown = Object.keys(payload).filter(key => !allowedKeys.includes(key));
+    if (unknown.length) {
+      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
+    }
+
+    if (store.unavailable()) return send(500, { error: 'Sugestões indisponíveis (arquivo inválido).' });
+
+    let result;
+    try {
+      result = action === 'accept'
+        ? store.accept(suggestionId, { taskPlanner: planner, goal: payload.goal, note: payload.note })
+        : store.dismiss(suggestionId, { reason: payload.reason });
+    } catch (error) {
+      console.error('Aviso: falha ao responder sugestão:', error?.message || error);
+      return send(500, { error: 'Não foi possível atualizar a sugestão.' });
+    }
+
+    if (result.notFound) return send(404, { error: 'Sugestão não encontrada.' });
+    if (result.wrongState) return send(409, { error: result.error });
+    if (result.plannerUnavailable) return send(500, { error: result.error });
+    if (!result.ok) return send(400, { error: 'Pedido inválido.', details: result.errors });
+
+    return send(200, {
+      ok: true,
+      suggestion: result.suggestion,
+      ...(result.plan ? { plan: result.plan } : {}),
+    });
+  };
+}
+
 // Conquistas (data/achievements.json): leitura para a aba "Conquistas" do
 // desktop. Mesma borda das rotas do vínculo (origem + token) e mesmo estilo de
 // erro; antes de responder, reavalia o catálogo contra o vínculo para recuperar
@@ -3627,6 +3763,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleChat = createChatHandler({ agentCore: installAgentCore });
   const handleAgentTurn = createAgentTurnHandler();
   const handleSelf = createSelfHandler();
+  const handleSuggestions = createSuggestionsHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
   const handleMediaAnalyze = createMediaAnalyzeHandler();
@@ -3681,6 +3818,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.url === '/api/agent/turn' || req.url === '/api/agent/turns'
         || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
       if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
+      if (req.url === '/api/agent/suggestions' || req.url.startsWith('/api/agent/suggestions/') || req.url.startsWith('/api/agent/suggestions?')) return handleSuggestions(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));
