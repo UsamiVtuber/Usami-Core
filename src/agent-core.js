@@ -475,27 +475,41 @@ function buildResearchQuery(message) {
 const isScheduleGoal = normalized => /\b(semana|agenda|cronograma|tarefas?|compromissos?|prioriz\w*|conflit\w*|rotina)\b/.test(normalized);
 
 function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
+  const calls = resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive);
+  return calls.length > 0 ? calls[0] : null;
+}
+
+function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
   const normalized = normalizeText(message);
+  const matched = [];
+  const seen = new Set();
 
   if (hintedToolName && registry.has(hintedToolName) && isToolActive(hintedToolName)) {
     const matcher = toolMatchers.find(item => item.toolName === hintedToolName);
-    if (matcher) return { toolName: hintedToolName, args: matcher.buildArgs(message) };
-    const clean = collapseText(message).replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || collapseText(message);
-    const spec = registry.get(hintedToolName);
-    const firstStringParam = spec?.parameters?.find(param => param.type === 'string' && param.required);
-    return {
-      toolName: hintedToolName,
-      args: firstStringParam ? { [firstStringParam.name]: clean } : {},
-    };
+    if (matcher) {
+      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(message) });
+      seen.add(hintedToolName);
+    } else {
+      const clean = collapseText(message).replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || collapseText(message);
+      const spec = registry.get(hintedToolName);
+      const firstStringParam = spec?.parameters?.find(param => param.type === 'string' && param.required);
+      matched.push({
+        toolName: hintedToolName,
+        args: firstStringParam ? { [firstStringParam.name]: clean } : {},
+      });
+      seen.add(hintedToolName);
+    }
   }
 
   for (const matcher of toolMatchers) {
+    if (seen.has(matcher.toolName)) continue;
     if (!registry.has(matcher.toolName) || !isToolActive(matcher.toolName)) continue;
     if (matcher.matches(normalized)) {
-      return { toolName: matcher.toolName, args: matcher.buildArgs(message) };
+      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(message) });
+      seen.add(matcher.toolName);
     }
   }
-  return null;
+  return matched;
 }
 
 export function createAgentCore({
@@ -853,32 +867,76 @@ export function createAgentCore({
     const clean = collapseText(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
-    let resolved = deterministic.kind === 'operational'
-      ? resolveToolCall(clean, registry, toolMatchers, deterministic.matchedToolName || null, isToolActive)
-      : null;
+    let resolvedList = deterministic.kind === 'operational'
+      ? resolveToolCalls(clean, registry, toolMatchers, deterministic.matchedToolName || null, isToolActive)
+      : [];
     let intentGoal = clean;
     let intentConfidence = deterministic.confidence;
 
-    if (resolved && resolved.toolName === 'research.search' && GENERIC_RESEARCH_QUERY_RE.test(normalizeText(resolved.args?.query || '')) && Array.isArray(history) && history.length > 0) {
-      const recent = history.slice(-16).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
-      const specific = findRecentSpecificToolMatch(recent, 'research.search');
-      if (specific?.args?.query) {
-        resolved = { ...resolved, args: { ...resolved.args, query: specific.args.query } };
+    if (resolvedList.length === 0) {
+      const confirmed = resolveFromHistoryConfirmation(clean, history);
+      if (confirmed) {
+        resolvedList = [confirmed];
+        intentGoal = confirmed.goal || clean;
+        intentConfidence = 0.85;
       }
     }
 
-    if (!resolved) {
-      const confirmed = resolveFromHistoryConfirmation(clean, history);
-      if (!confirmed) return null;
-      resolved = { toolName: confirmed.toolName, args: confirmed.args };
-      intentGoal = confirmed.goal || clean;
-      intentConfidence = 0.85;
-    }
+    if (resolvedList.length === 0) return null;
 
-    const spec = registry.get(resolved.toolName);
-    if (!spec || spec.permissionLevel > 3) return null;
+    resolvedList = resolvedList.map(resolved => {
+      if (resolved.toolName === 'research.search' && GENERIC_RESEARCH_QUERY_RE.test(normalizeText(resolved.args?.query || '')) && Array.isArray(history) && history.length > 0) {
+        const recent = history.slice(-16).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
+        const specific = findRecentSpecificToolMatch(recent, 'research.search');
+        if (specific?.args?.query) {
+          return { ...resolved, args: { ...resolved.args, query: specific.args.query } };
+        }
+      }
+      return resolved;
+    });
+
+    const safeList = resolvedList.filter(item => {
+      const spec = registry.get(item.toolName);
+      return spec && spec.permissionLevel <= 3;
+    });
+
+    if (safeList.length === 0) return null;
 
     const startedMs = now();
+    const executeOne = async (resolved) => {
+      let execution;
+      let timerId = null;
+      try {
+        const timeoutPromise = new Promise(resolve => {
+          timerId = setTimeout(
+            () => resolve({ ok: false, errors: ['tempo limite da ferramenta atingido no chat'] }),
+            Math.max(500, timeoutMs),
+          );
+        });
+        execution = await Promise.race([
+          executor.execute(resolved.toolName, resolved.args, { origin }),
+          timeoutPromise,
+        ]);
+      } catch (error) {
+        execution = { ok: false, errors: [String(error?.message || error)] };
+      } finally {
+        if (timerId) clearTimeout(timerId);
+      }
+      const status = execution?.ok
+        ? 'executed'
+        : (execution?.denied ? 'awaiting_confirmation' : 'failed');
+      return {
+        tool: resolved.toolName,
+        args: resolved.args,
+        status,
+        ...(execution?.record ? { execution: execution.record } : {}),
+        ...(execution?.ok ? { result: execution.result } : {}),
+        ...(!execution?.ok && execution?.errors ? { errors: execution.errors } : {}),
+      };
+    };
+
+    const multiResults = await Promise.all(safeList.map(executeOne));
+    const primary = multiResults[0];
     const turnId = `trn-${randomBytes(6).toString('hex')}`;
     const intent = buildIntent({
       kind: 'operational',
@@ -888,37 +946,22 @@ export function createAgentCore({
       now,
     });
 
-    let execution;
-    let timerId = null;
-    try {
-      const timeoutPromise = new Promise(resolve => {
-        timerId = setTimeout(
-          () => resolve({ ok: false, errors: ['tempo limite da ferramenta atingido no chat'] }),
-          Math.max(500, timeoutMs),
-        );
-      });
-      execution = await Promise.race([
-        executor.execute(resolved.toolName, resolved.args, { origin }),
-        timeoutPromise,
-      ]);
-    } catch (error) {
-      execution = { ok: false, errors: [String(error?.message || error)] };
-    } finally {
-      if (timerId) clearTimeout(timerId);
-    }
-
-    const status = execution?.ok
+    const overallStatus = multiResults.some(r => r.status === 'executed')
       ? 'executed'
-      : (execution?.denied ? 'awaiting_confirmation' : 'failed');
+      : (multiResults.some(r => r.status === 'awaiting_confirmation') ? 'awaiting_confirmation' : 'failed');
+
+    const combinedTools = multiResults.map(r => r.tool);
     const turn = {
       id: turnId,
       intent,
       route: 'tool',
-      status,
-      tool: resolved.toolName,
-      ...(execution?.record ? { execution: execution.record } : {}),
-      ...(execution?.ok ? { result: execution.result } : {}),
-      ...(!execution?.ok && execution?.errors ? { errors: execution.errors } : {}),
+      status: overallStatus,
+      tool: primary.tool,
+      tools: combinedTools,
+      ...(multiResults.length > 1 ? { multi: multiResults } : {}),
+      ...(primary.execution ? { execution: primary.execution } : {}),
+      ...(primary.result ? { result: primary.result } : {}),
+      ...(primary.errors ? { errors: primary.errors } : {}),
       createdAt: intent.createdAt,
       durationMs: Math.max(0, now() - startedMs),
     };
@@ -1024,6 +1067,16 @@ function formatGitStatusForPrompt(result) {
 
 export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
   if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
+  if (Array.isArray(turn.multi) && turn.multi.length > 1) {
+    return turn.multi.map(sub => formatAgentTurnPromptContext({
+      route: 'tool',
+      tool: sub.tool,
+      status: sub.status,
+      result: sub.result,
+      errors: sub.errors,
+      execution: sub.execution,
+    }, { maxChars: Math.floor(maxChars / turn.multi.length) })).join('\n');
+  }
   if (turn.status === 'executed') {
     const payload = turn.tool === 'self.describe'
       ? (formatSelfDescribeForPrompt(turn.result) ?? turn.result ?? {})
