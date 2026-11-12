@@ -250,6 +250,15 @@ test('GitHub API falha fechado sem GITHUB_TOKEN e executa listagem + PR nível 4
     if (url === 'https://api.github.com/repos/UsamiVtuber/Usami-Core/pulls' && init.method === 'POST') {
       return json(201, { number: 7, title: 'PR de teste', html_url: 'https://github.com/UsamiVtuber/Usami-Core/pull/7' });
     }
+    if (url === 'https://api.github.com/repos/UsamiVtuber/Usami-Core/issues' && init.method === 'POST') {
+      const parsedBody = JSON.parse(init.body || '{}');
+      return json(201, {
+        number: 42,
+        title: parsedBody.title || 'Issue de teste',
+        html_url: 'https://github.com/UsamiVtuber/Usami-Core/issues/42',
+        labels: (parsedBody.labels || []).map(name => ({ name })),
+      });
+    }
     throw new Error(`URL GitHub inesperada: ${url}`);
   };
 
@@ -286,6 +295,17 @@ test('GitHub API falha fechado sem GITHUB_TOKEN e executa listagem + PR nível 4
   }, { confirmation: confPr.confirmation.token });
   assert.equal(createdPr.ok, true);
   assert.equal(createdPr.result.number, 7);
+
+  const createdIssue = await exec.execute('github.issue', {
+    repo: 'UsamiVtuber/Usami-Core',
+    title: 'Proposta da Usami para agente',
+    body: 'Contexto e detalhes',
+    labels: ['usami-proposal'],
+  });
+  assert.equal(createdIssue.ok, true);
+  assert.equal(createdIssue.result.number, 42);
+  assert.equal(createdIssue.result.created, true);
+  assert.deepEqual(createdIssue.result.labels, ['usami-proposal']);
 });
 
 test('buildPersona e /api/chat injetam consciência real de código, skills e Git sem vazar segredos', async t => {

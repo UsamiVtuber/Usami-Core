@@ -48,6 +48,7 @@ export const GIT_ASSISTANT_TOOLS = Object.freeze([
   'git.push',
   'github.repos',
   'github.pr',
+  'github.issue',
 ]);
 
 const GITHUB_API_BASE = 'https://api.github.com';
@@ -376,6 +377,33 @@ export function createGitAssistantClient({
         htmlUrl: created.html_url || null,
       };
     },
+
+    async createIssue({ repo, title, body = '', labels = ['usami-proposal'] } = {}) {
+      const { slug } = parseRepoSlug(repo || 'UsamiVtuber/Usami-Core');
+      const safeTitle = String(title ?? '').trim().slice(0, 200);
+      if (safeTitle.length < 3) throw new Error('title da issue deve ter ao menos 3 caracteres.');
+      const safeLabels = Array.isArray(labels)
+        ? labels.map(l => String(l || '').trim()).filter(Boolean).slice(0, 10)
+        : ['usami-proposal'];
+
+      const created = await requestGitHub(`/repos/${slug}/issues`, {
+        method: 'POST',
+        body: {
+          title: safeTitle,
+          body: String(body ?? '').slice(0, 4000),
+          ...(safeLabels.length ? { labels: safeLabels } : {}),
+        },
+      });
+
+      return {
+        created: true,
+        repo: slug,
+        number: created.number,
+        title: String(created.title || safeTitle),
+        htmlUrl: created.html_url || null,
+        labels: Array.isArray(created.labels) ? created.labels.map(l => (typeof l === 'string' ? l : l.name)) : safeLabels,
+      };
+    },
   };
 }
 
@@ -565,6 +593,38 @@ export function createGitAssistantTools({
     },
   };
 
-  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool];
+  const issueTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'github.issue',
+    version: '1.0.0',
+    description: 'Abre uma Issue no GitHub via GITHUB_TOKEN para registrar propostas, bugs ou melhorias para code agents.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 15000,
+    parameters: [
+      { name: 'title', type: 'string', required: true, description: 'Título da issue.' },
+      { name: 'body', type: 'string', required: false, description: 'Descrição da proposta, contexto e arquivos sugeridos.' },
+      { name: 'repo', type: 'string', required: false, description: 'Repositório GitHub no formato owner/repo (padrão UsamiVtuber/Usami-Core).' },
+      { name: 'labels', type: 'array', required: false, description: 'Labels opcionais (padrão ["usami-proposal"]).' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === GIT_ASSISTANT_SCHEMA
+        && result.created === true
+        && typeof result.number === 'number';
+    },
+    async execute(args = {}) {
+      const data = await gitClient.createIssue({
+        repo: args.repo,
+        title: args.title,
+        body: args.body || '',
+        labels: args.labels,
+      });
+      return { ok: true, schema: GIT_ASSISTANT_SCHEMA, ...data };
+    },
+  };
+
+  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool];
 }
 

@@ -33,6 +33,7 @@ const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/
 const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b/;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
+const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo|no\s+repositorio)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b/;
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta))\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local)\b/;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
 
@@ -381,6 +382,22 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         return { repo: slugMatch[1] };
       }
       return { limit: 10 };
+    },
+  },
+  {
+    toolName: 'github.issue',
+    matches: normalized => GITHUB_ISSUE_RE.test(normalized),
+    buildArgs: message => {
+      const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
+      const repo = slugMatch?.[1] && !slugMatch[1].startsWith('src/') ? slugMatch[1] : 'UsamiVtuber/Usami-Core';
+      const titleMatch = /(?:issue|tarefa|proposta|ticket)(?:\s+chamada|\s+de|\s+com\s+o\s+titulo|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+no\s+github|\s*$)/i.exec(message);
+      const title = titleMatch?.[1]?.trim() || 'Proposta de melhoria sugerida pela Usami';
+      return {
+        repo,
+        title: title.slice(0, 180),
+        body: `### Proposta registrada pela Usami\n\n**Solicitação do Usuário:**\n> "${message}"\n\n_Esta issue foi aberta automaticamente pela Usami para revisão e implementação por um Code Agent._`,
+        labels: ['usami-proposal'],
+      };
     },
   },
   {
@@ -1064,6 +1081,9 @@ export function formatExecutedTurnFallbackReply(turn) {
     const repos = Array.isArray(r.repositories) ? r.repositories : (Array.isArray(r.repos) ? r.repos : []);
     const list = repos.slice(0, 4).map(repo => repo.fullName || repo.name).filter(Boolean);
     return list.length ? `Seus repositórios no GitHub: ${list.join(', ')}.` : 'Consultei o GitHub, mas não encontrei repositórios.';
+  }
+  if (turn.tool === 'github.issue' && r.created) {
+    return `Abri a issue #${r.number} ("${r.title}") no GitHub com sucesso!`;
   }
   if (typeof r.summary === 'string' && r.summary.trim()) {
     return redactSecrets(r.summary).slice(0, 210);
