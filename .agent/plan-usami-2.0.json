@@ -217,6 +217,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Tarefa vencida gera uma sugestão única; aceitar cria plano e muda o estado da sugestão.",
       "scopeNotes": "Não duplicar o motor de idle/afinidade; sugestão não é ordem de execução. Execução continua exigindo permissão.",
+      "status": "done",
       "blockedBy": ["S9", "S10"],
       "techGuidance": "`proactive-engine.js` já cobre idle, DND, afinidade e `proactive_say`; estender com fontes injetáveis sem alterar o comando de fala existente."
     },
