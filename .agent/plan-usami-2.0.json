@@ -199,6 +199,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Perguntar 'quais ferramentas você tem?' devolve a lista real e aponta limitações conhecidas.",
       "scopeNotes": "Somente leitura: alteração de código segue o fluxo proposta→risco→autorização de S8. Não ler segredos.",
+      "status": "done",
       "blockedBy": ["S4", "S7"],
       "techGuidance": "Allowlist explícita de arquivos (docs, package.json, manifests). Nunca varrer o vault nem o `.env`."
     },
