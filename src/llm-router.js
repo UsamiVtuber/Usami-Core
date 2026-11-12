@@ -125,13 +125,13 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion, 
 // que o modelo pega os verbos — ANIMATION_SYSTEM fica como está, porque
 // planAnimation continua sendo o refinamento em background.
 //
-// maxTokens 1100: o preâmbulo de raciocínio + reply (≤180 chars) + até 5
-// actions + remember não caberiam no orçamento antigo de 700, que devolvia
-// actions vazias.
+// maxTokens 1800: o preâmbulo de raciocínio + reply (≤180 chars) + até 5
+// actions + remember precisam de folga para não bater finish=length em
+// modelos com reasoning quando há contexto de skill.
 export async function generateReplyWithActions(
   systemPrompt,
   userMessage,
-  { temperature = 0.7, maxTokens = 1100, client = sharedClient, signal, blurtReply } = {},
+  { temperature = 0.7, maxTokens = 1800, client = sharedClient, signal, blurtReply } = {},
 ) {
   if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 

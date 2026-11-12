@@ -42,8 +42,8 @@ export function createResearchClient({
   fetchImpl = (...args) => fetch(...args),
 } = {}) {
   const keys = () => ({
-    tinyfish: String(envProvider('TINYFISH_API_KEY') || '').trim(),
-    firecrawl: String(envProvider('FIRECRAWL_API_KEY') || '').trim(),
+    tinyfish: String(envProvider('TINYFISH_API_KEY') || envProvider('TINIFISH_API_KEY') || '').trim(),
+    firecrawl: String(envProvider('FIRECRAWL_API_KEY') || envProvider('FIRECLAW_API_KEY') || '').trim(),
   });
 
   async function runTinyFishSearch(query, { limit = 5, location = null } = {}) {

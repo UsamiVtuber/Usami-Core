@@ -12,7 +12,7 @@ import { createToolExecutor } from '../src/tool-executor.js';
 import { createSkillCatalog } from '../src/skill-catalog.js';
 import { defaultRunSkillTests } from '../src/skill-manager.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from '../src/code-inspector-skill.js';
-import { createAgentCore } from '../src/agent-core.js';
+import { createAgentCore, formatExecutedTurnFallbackReply } from '../src/agent-core.js';
 import { createTaskPlanner } from '../src/task-planner.js';
 import { AGENT_SCHEMAS } from '../src/agent-contracts.js';
 import {
@@ -592,7 +592,11 @@ test('perguntas naturais sobre skills novas acionam self.describe sem truncar sk
     origin: 'runtime',
     permissionLevel: 1,
     timeoutMs: 2000,
-    parameters: [{ name: 'query', type: 'string', required: true }],
+    parameters: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'provider', type: 'string', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ],
     verify: r => Boolean(r?.query),
     execute: args => ({ query: args.query }),
   });
@@ -798,6 +802,11 @@ test('research.search dispara em pedidos naturais de notícias e confirmações 
   assert.equal(direct?.args?.query, undefined);
   assert.equal(queries.at(-1), 'notícias de IA');
 
+  const requestWithResume = await agentCore.runOperationalForChat('quero que vc pesquise as noticias mais recentes de IA e me resuma');
+  assert.equal(requestWithResume?.tool, 'research.search');
+  assert.equal(requestWithResume?.status, 'executed');
+  assert.equal(queries.at(-1), 'as noticias mais recentes de IA');
+
   const followup = await agentCore.runOperationalForChat('e ai o que achou de noticias?', {
     history: [
       { role: 'assistant', content: 'Hmph, quer que eu pesquise notícias de IA pra você? Vou dar uma olhada...' },
@@ -822,4 +831,182 @@ test('research.search dispara em pedidos naturais de notícias e confirmações 
   });
   assert.equal(casual, null);
 });
+
+test('email.list dispara com "ve como esta meu gmail", follow-up "ok e o que achou" e auto-correção pós-LLM no /api/chat', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-deferred-tool-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const memoryStore = createMemoryStore({ dataDir: dir });
+  memoryStore.load();
+  const personalityStore = createPersonalityStore({ dataDir: dir });
+  personalityStore.load();
+
+  let emailCalls = 0;
+  const registry = createToolRegistry();
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'email.list',
+    version: '1.0.0',
+    description: 'Lista e-mails.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 3000,
+    parameters: [
+      { name: 'query', type: 'string', required: false },
+      { name: 'maxResults', type: 'number', required: false },
+    ],
+    verify: r => Array.isArray(r?.messages),
+    execute: () => {
+      emailCalls += 1;
+      return { messages: [{ id: 'm1', subject: 'Fatura pronta', from: 'banco@example.com' }] };
+    },
+  });
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const direct = await agentCore.runOperationalForChat('ok enquanto isso ve pra mim como esta meu gmail');
+  assert.equal(direct?.tool, 'email.list');
+  assert.equal(direct?.status, 'executed');
+
+  const followup = await agentCore.runOperationalForChat('ok e o que achou', {
+    history: [{ role: 'assistant', content: 'Hmph... tá, vou dar uma olhada no seu Gmail agora.' }],
+  });
+  assert.equal(followup?.tool, 'email.list');
+  assert.equal(followup?.status, 'executed');
+
+  let llmTurn = 0;
+  const prevNvidia = process.env.USE_NVIDIA;
+  process.env.USE_NVIDIA = 'true';
+  t.after(() => {
+    if (prevNvidia === undefined) delete process.env.USE_NVIDIA;
+    else process.env.USE_NVIDIA = prevNvidia;
+  });
+  const handler = createChatHandler({
+    agentCore,
+    memoryStore,
+    personalityStore,
+    moodStore: null,
+    vaultSearch: async () => null,
+    getKey: async () => null,
+    generateReply: async prompt => {
+      llmTurn += 1;
+      if (llmTurn === 1) {
+        return '{"reply":"Hmph... tá, vou dar uma olhada no seu Gmail agora.","gesture":"nod"}';
+      }
+      assert.match(prompt, /Fatura pronta/);
+      return '{"reply":"Olhei seu Gmail e chegou um e-mail: Fatura pronta!","gesture":"nod"}';
+    },
+  });
+
+  const req = {
+    method: 'POST',
+    url: '/api/chat',
+    headers: { host: '127.0.0.1:8787', 'content-type': 'application/json' },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify({ message: 'tem carta nova pra mim?' }));
+    },
+  };
+  const res = { statusCode: null, body: '' };
+  res.writeHead = s => { res.statusCode = s; };
+  res.end = b => { res.body = b; };
+  await handler(req, res);
+
+  const data = JSON.parse(res.body);
+  assert.equal(res.statusCode, 200);
+  assert.equal(llmTurn, 2);
+  assert.equal(emailCalls, 3);
+  assert.equal(data.agentTurn?.tool, 'email.list');
+  assert.equal(data.reply, 'Olhei seu Gmail e chegou um e-mail: Fatura pronta!');
+});
+
+test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.search formata fallback', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-news-followup-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const registry = createToolRegistry();
+  let lastResearchQuery = null;
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'research.search',
+    version: '1.0.0',
+    description: 'Pesquisa web.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'provider', type: 'string', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ],
+    verify: r => Array.isArray(r?.results),
+    execute: args => {
+      lastResearchQuery = args.query;
+      return { query: args.query, results: [{ title: 'IA 2026', url: 'https://example.com' }] };
+    },
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'memory.search',
+    version: '1.0.0',
+    description: 'Busca na memória.',
+    origin: 'runtime',
+    permissionLevel: 1,
+    timeoutMs: 1000,
+    parameters: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'provider', type: 'string', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ],
+    verify: r => Array.isArray(r?.results),
+    execute: args => ({ query: args.query, count: 1, results: [{ text: 'Gosta de café com leite' }] }),
+  });
+
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const notMemory = await agentCore.runOperationalForChat('Vou buscar mais detalhes sobre isso');
+  assert.equal(notMemory, null);
+
+  const followUp = await agentCore.runOperationalForChat('Pode buscar mais detalhes', {
+    history: [
+      { role: 'user', content: 'boa e ve pra mim as principais noticias de IA e faz um resumo pra mim' },
+      { role: 'assistant', content: 'Hmph... achei um podcast... Parece polêmico, quer que eu busque mais detalhes?' },
+    ],
+  });
+  assert.equal(followUp?.tool, 'research.search');
+  assert.match(lastResearchQuery || '', /principais noticias de IA/i);
+
+  const laterNewsFollowUp = await agentCore.runOperationalForChat('oi lembra da noticia que pedi pra vc ver, consegue ver ela agr?', {
+    history: [
+      { role: 'user', content: 'boa e ve pra mim as principais noticias de IA e faz um resumo pra mim' },
+      { role: 'assistant', content: 'Hmph... achei um podcast...' },
+      { role: 'user', content: 'Pode buscar mais detalhes' },
+      { role: 'assistant', content: 'Já executei...' },
+      { role: 'user', content: 'vc sabe qual modelo vc usa?' },
+      { role: 'assistant', content: 'Sou um modelo...' },
+      { role: 'user', content: 'blz' },
+      { role: 'assistant', content: 'hmph' },
+    ],
+  });
+  assert.equal(laterNewsFollowUp?.tool, 'research.search');
+  assert.match(lastResearchQuery || '', /principais noticias de IA/i);
+
+  const memFallback = formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'memory.search',
+    result: { query: 'café', count: 1, results: [{ text: 'Gosta de café com leite' }] },
+  });
+  assert.match(memFallback, /Achei na memória \(1\): Gosta de café com leite/);
+});
+
+
 

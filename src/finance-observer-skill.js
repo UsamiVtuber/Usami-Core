@@ -67,10 +67,10 @@ export function createOpenFinanceClient({
     throw new Error('Open Finance não configurado: defina credenciais Pluggy ou Belvo no .env.');
   }
 
-  async function pluggyApiKey() {
-    const direct = String(envProvider('PLUGGY_API_KEY') || '').trim();
-    if (direct) return direct;
+  async function pluggyApiKey({ ignoreDirectKey = false } = {}) {
     if (cachedPluggyKey) return cachedPluggyKey;
+    const direct = String(envProvider('PLUGGY_API_KEY') || '').trim();
+    if (!ignoreDirectKey && direct) return direct;
 
     const baseUrl = String(envProvider('PLUGGY_BASE_URL') || 'https://api.pluggy.ai').replace(/\/+$/, '');
     const clientId = String(envProvider('PLUGGY_CLIENT_ID') || '').trim();
@@ -93,9 +93,13 @@ export function createOpenFinanceClient({
       const baseUrl = String(envProvider('PLUGGY_BASE_URL') || 'https://api.pluggy.ai').replace(/\/+$/, '');
       let apiKey = await pluggyApiKey();
       let res = await fetchImpl(`${baseUrl}${path}`, { headers: { 'X-API-KEY': apiKey } });
-      if (res.status === 401 && !envProvider('PLUGGY_API_KEY')) {
+      const hasClientCreds = Boolean(
+        String(envProvider('PLUGGY_CLIENT_ID') || '').trim()
+        && String(envProvider('PLUGGY_CLIENT_SECRET') || '').trim(),
+      );
+      if ((res.status === 401 || res.status === 403) && hasClientCreds) {
         cachedPluggyKey = null;
-        apiKey = await pluggyApiKey();
+        apiKey = await pluggyApiKey({ ignoreDirectKey: true });
         res = await fetchImpl(`${baseUrl}${path}`, { headers: { 'X-API-KEY': apiKey } });
       }
       const data = await res.json().catch(() => ({}));

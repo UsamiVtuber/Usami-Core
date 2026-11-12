@@ -115,6 +115,8 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
 // aqui é a fonte e o restante importa daqui.
 export function stripLeakedJson(reply) {
   return String(reply ?? '')
+    // Remove vazamento com separadores literais ou pipes, ex.: `.|gesture":"nod` ou `,"gesture":"nod`
+    .replace(/[.|,;\s]*\\?["']?(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']?\s*:\s*[\s\S]*$/i, '')
     // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
     // Ex.: `','gesture': 'angry','actions': [{'type':` ou `"gesture":"angry","actions":[...`
     .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')

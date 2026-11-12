@@ -171,9 +171,8 @@ test('generateReplyWithActions: defaults de temperatura e orçamento de tokens',
   const client = fakeClient({ result: { content: '{"reply":"oi"}' } });
   await withFakeKey(() => generateReplyWithActions('s', 'u', { client }));
   assert.equal(client.calls[0].temperature, 0.7);
-  // 1100 e não 700: o reply + até 5 actions + remember não cabem no orçamento
-  // antigo e as actions voltavam vazias.
-  assert.equal(client.calls[0].max_tokens, 1100);
+  // 1800 tokens: folga para modelos com reasoning ativo não estourarem ao processar contexto de skills
+  assert.equal(client.calls[0].max_tokens, 1800);
 });
 
 test('generateReplyWithActions: JSON preso no reasoning é resgatado', async () => {

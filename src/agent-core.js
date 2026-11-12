@@ -23,16 +23,17 @@ const normalizeText = value => collapseText(value)
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase();
 
-const CALENDAR_LIST_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|quais|tenho)\b.*\b(?:google calendar|calendario|eventos?(?:\s+da\s+agenda)?|compromissos?(?:\s+(?:na|da)\s+agenda|\s+hoje|\s+amanha|\s+essa\s+semana)?|minha\s+agenda)\b/;
-const EMAIL_LIST_RE = /\b(?:list\w*|mostr\w*|ver|chec\w*|ler|olh\w*|busc\w*|procur\w*|chegou|tem|tenho)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/;
-const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|qual|quanto)\b.*\b(?:contas?|saldos?|open\s*finance|pluggy|belvo)\b|\b(?:meu\s+saldo|quanto\s+tenho\s+(?:no\s+banco|na\s+conta|de\s+saldo))\b/;
-const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei)\b/;
-const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*|ach\w*|veja|ver|traz\w*|traga|trouxe|quais(?:\s+as)?|tem|saiu)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:noticias?|manchetes?|novidades?(?:\s+(?:de|sobre|do|da|em|no|na)))\b|\b(?:pesquis\w*|googl\w*)\s+(?:sobre|por|a\s+respeito\s+de)\s+(?!.*\b(?:memoria|fatos|historico|resumos?|mim|eu|meu|minha|e-?mails?|gmail|agenda|calendario|arquivo|codigo|git|repo(?:sitorio)?)\b).+/;
+const CALENDAR_LIST_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|abr\w*|quais|tenho|tem|como\s+(?:esta|ta)|o\s+que\s+(?:tem|tenho|ha))\b(?!.*\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*|marcacao)\b).*\b(?:google calendar|calendario|eventos?(?:\s+da\s+agenda)?|compromissos?(?:\s+(?:na|da)\s+agenda|\s+hoje|\s+amanha|\s+essa\s+semana)?|minha\s+agenda|agenda\s+(?:de\s+)?(?:hoje|amanha|semana))\b/;
+const CALENDAR_CREATE_RE = /\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*|salva\w*)\b.*\b(?:google calendar|calendario|evento|compromisso|agenda)\b|\b(?:no\s+calendario|na\s+agenda)\b.*\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*)\b/;
+const EMAIL_LIST_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|chec\w*|confer\w*|ler|leia|olh\w*|busc\w*|procur\w*|abr\w*|acess\w*|chegou|tem|tenho|como\s+(?:esta|ta)|o\s+que\s+(?:tem|ha|chegou)|quais)\b(?!.*\b(?:envi\w*|mand\w*|escrev\w*|respond\w*)\b).*\b(?:e-?mails?|gmail|caixa de entrada|inbox)\b|\b(?:meu\s+gmail|minha\s+caixa\s+de\s+entrada|meus\s+e-?mails?)\b/;
+const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|qual|quais|quanto)\b.*\b(?:contas?|saldos?|open\s*finance|pluggy|belvo|banco)\b|\b(?:meu\s+saldo|minhas?\s+contas?|quanto\s+tenho\s+(?:no\s+banco|na\s+conta|de\s+saldo))\b/;
+const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei|fatura)\b|\b(?:meu\s+extrato|meus\s+gastos|minhas\s+transacoes)\b/;
+const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*|ach\w*|veja|ver|v[eê]|traz\w*|traga|trouxe|quais(?:\s+as)?|tem|saiu)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:noticias?|manchetes?|novidades?(?:\s+(?:de|sobre|do|da|em|no|na)))\b|\b(?:noticias?|manchetes?)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:ver|v[eê]|veja|pesquis\w*|bus(?:c|qu)\w*|procur\w*|ach\w*|mostr\w*)\b|\b(?:pesquis\w*|googl\w*)\s+(?:sobre|por|a\s+respeito\s+de)\s+(?!.*\b(?:memoria|fatos|historico|resumos?|mim|eu|meu|minha|e-?mails?|gmail|agenda|calendario|arquivo|codigo|git|repo(?:sitorio)?)\b).+/;
 const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/;
 const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b/;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
-const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:repositorios?\s+(?:no\s+|do\s+)?github|github)\b/;
-const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|consult\w*)\b.*\b(?:git-assistant|git\s+assistant)\b/;
+const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
+const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta))\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local)\b/;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
 
 const COMPLEX_PATTERNS = [
@@ -57,6 +58,7 @@ const OPERATIONAL_PATTERNS = [
   GIT_DIFF_RE,
   GITHUB_REPOS_RE,
   GIT_STATUS_RE,
+  CALENDAR_CREATE_RE,
   CALENDAR_LIST_RE,
   EMAIL_LIST_RE,
   FINANCE_ACCOUNTS_RE,
@@ -162,7 +164,7 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       && !RESEARCH_SEARCH_RE.test(normalized)
       && !/\b(?:na\s+web|na\s+internet|online|tinyfish|firecrawl|git|github|commits?|repositorios?|branch|diff|skills?|habilidades?|ferramentas?)\b/.test(normalized)
       && (
-        /\b(busca\w*|procur\w*|pesquis\w*|consult\w*|lembra\w*)\b.*\b(memoria|fatos|historico|resumos?|sobre|eu)\b/.test(normalized)
+        /\b(busca\w*|procur\w*|pesquis\w*|consult\w*|lembra\w*|record\w*)\b.*\b(memoria|fatos|historico|resumos?|sobre\s+mim|te\s+falei|eu\s+(?:disse|falei|gosto))\b/.test(normalized)
         || /\bo que (?:voce|vc|tu) (?:sabe|lembra)\b/.test(normalized)
       )
     ),
@@ -249,6 +251,42 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       return {
         name,
         description: `Skill projetada para ${name}.`,
+      };
+    },
+  },
+  {
+    toolName: 'calendar.create',
+    matches: normalized => CALENDAR_CREATE_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const titleMatch = /\b(?:evento|compromisso|chamada|reuniao)?\s*["“']([^"”']+)["”']/i.exec(clean)
+        || /\b(?:evento|compromisso)\s+([A-Za-z0-9À-ÿ _-]+?)(?:\s+(?:pra|para|hoje|amanha|as|\d{1,2}:))/i.exec(clean);
+      const summary = (titleMatch?.[1]?.trim() || clean.replace(/^(?:(?:ok+|por favor|adiciona|marca|cria|agenda)[,\s]+)*/i, '')).slice(0, 80);
+      
+      const now = new Date();
+      const isTomorrow = /\bamanha\b/i.test(clean);
+      const targetDate = new Date(now);
+      if (isTomorrow) targetDate.setDate(targetDate.getDate() + 1);
+      
+      const timeMatch = /\b(?:as|às)?\s*(\d{1,2})(?::(\d{2}))?\b/i.exec(clean);
+      if (timeMatch) {
+        const hours = parseInt(timeMatch[1], 10);
+        const mins = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+        targetDate.setHours(hours, mins, 0, 0);
+      } else {
+        targetDate.setHours(targetDate.getHours() + 1, 0, 0, 0);
+      }
+      
+      const durationMins = /\bmeia\s+hora\b/i.test(clean)
+        ? 30
+        : (/\b(\d+)\s*(?:minutos?|min)\b/i.exec(clean) ? parseInt(/\b(\d+)\s*(?:minutos?|min)\b/i.exec(clean)[1], 10) : 60);
+      
+      const endDate = new Date(targetDate.getTime() + durationMins * 60_000);
+      
+      return {
+        summary: summary || 'Novo evento',
+        start: targetDate.toISOString(),
+        end: endDate.toISOString(),
       };
     },
   },
@@ -356,9 +394,15 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
 ]);
 
-const CONFIRMATION_REPLY_RE = /^(?:sim+|s+|yes|yep|yeah|uhum|aham|claro|com certeza|pode(?:\s+sim|\s+(?:pesquisar|buscar|fazer|ver|olhar|ir|mandar))?|por favor|pfv|pls|ok+|okay|beleza|blz|fechou|manda ver|vai la|manda|quero(?:\s+sim)?|faz isso|faca isso|pode ir|bora|ta bom|show)(?:[,\s]+(?:por favor|sim|pode|usami|va|vai|manda))*$/;
-const ASSISTANT_OFFER_ACTION_RE = /\b(?:quer(?:e|o)?\s+que\s+eu|posso|devo|vou)\s+(?:pesquis\w*|busc\w*|procur\w*|consult\w*|chec\w*|ver|olh\w*|list\w*|mostr\w*|confer\w*|d[ae]r\s+uma\s+olhada)\b/;
-const GENERIC_RESEARCH_QUERY_RE = /^(?:noticias?|manchetes?|novidades?|isso|agora(?:\s+de\s+verdade)?|de\s+verdade)$/i;
+const CONFIRMATION_REPLY_RE = /^(?:(?:ok+|okay|e\s+ai|entao|hm+)[,\s]+)*(?:sim+|s+|yes|yep|yeah|uhum|aham|claro|com certeza|pode(?:\s+sim|\s+(?:pesquisar|buscar|fazer|ver|olhar|ir|mandar))?|por favor|pfv|pls|ok+|okay|beleza|blz|fechou|manda ver|vai la|manda|quero(?:\s+sim)?|faz isso|faca isso|pode ir|bora|ta bom|show|(?:e\s+)?o\s+que\s+(?:(?:voce|vc)\s+)?(?:achou|encontrou|viu|trouxe|deu)|achou\s+o\s+que|ja\s+(?:viu|olhou|achou)|conseguiu\s+(?:ver|olhar|achar)|me\s+(?:diz|fala|mostra|conta)|qual\s+(?:foi\s+)?o\s+resultado|cade)(?:\s+(?:mais\s+detalhes|mais\s+sobre(?:\s+isso)?|mais\s+info\w*|disso|isso|agora))?(?:[,\s]+(?:por favor|sim|pode|usami|va|vai|manda|la))*$/;
+const ASSISTANT_OFFER_ACTION_RE = /\b(?:quer(?:e|o)?\s+que\s+eu|posso|devo|vou|deixa\s+eu|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando))\s*(?:pesquis\w*|busc\w*|procur\w*|consult\w*|chec\w*|ver|olh\w*|list\w*|mostr\w*|confer\w*|d[ae]r\s+uma\s+olhada)?\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando)\b/;
+const GENERIC_RESEARCH_QUERY_RE = /^(?:noticias?|manchetes?|novidades?|isso|agora(?:\s+de\s+verdade)?|de\s+verdade)$|\b(?:que\s+(?:eu\s+)?pedi|consegue\s+ver\s+ela)\b/i;
+
+export const DEFERRED_TOOL_PROMISE_RE = /\b(?:vou\s+(?:dar\s+uma\s+olhada|olh\w*|ver|verificar|chec\w*|confer\w*|busc\w*|pesquis\w*|procur\w*|consult\w*|list\w*|mostrar)|deixa\s+eu\s+(?:ver|olh\w*|chec\w*|busc\w*|pesquis\w*|confer\w*)|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando)|espera\s+um\s+pouquinho.*(?:olhando|buscando|pesquisando))\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando)\b/i;
+
+export function isDeferredToolPromise(text) {
+  return DEFERRED_TOOL_PROMISE_RE.test(normalizeText(text));
+}
 
 function buildResearchQuery(message) {
   const clean = collapseText(message)
@@ -368,9 +412,11 @@ function buildResearchQuery(message) {
   const stripped = clean
     .replace(/^(?:(?:hmph|ah+|e\s+a[ií]|oi+|ei+|ol[aá]|usami|baka|por\s+favor)[,!?\s]+)*/i, '')
     .replace(/^(?:(?:eu\s+)?acabei\s+me\s+distraindo\b[^?!.]*[!?.]\s*)/i, '')
+    .replace(/^(?:(?:eu\s+)?quer(?:o|ia)\s+que\s+(?:voc[eê]|vc)|voc[eê]\s+(?:pode|consegue)|pode(?:ria)?|consegue|tenta|tente|me\s+faz\s+o\s+favor\s+de)\s+/i, '')
     .replace(/^(?:quer(?:e|o)?\s+que\s+eu|posso|devo|vou)\s+/i, '')
     .replace(/^(?:o\s+que\s+(?:(?:voc[eê]|vc)\s+)?(?:achou|encontrou|trouxe|viu|descobriu)\s+(?:de|sobre)\s+)/i, '')
     .replace(/^(?:pesquis\w*|busc\w*|procur\w*|googl\w*)(?:\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl)))?\s*(?:sobre|por|de|a\s+respeito\s+de)?\s*/i, '')
+    .replace(/\s*,?\s*(?:e|pra|para)\s+(?:depois\s+)?(?:me\s+)?(?:resum\w*|cont\w*|fal\w*|explic\w*|mostr\w*|mand\w*)(?:\s+(?:tudo|isso|pra\s+mim|depois))?$/i, '')
     .replace(/\s+(?:pra|para)\s+(?:voc[eê]|vc|ti|mim)(?:\s+agora)?$/i, '')
     .replace(/\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl)|agora(?:\s+de\s+verdade)?)$/i, '')
     .trim();
@@ -721,7 +767,7 @@ export function createAgentCore({
 
   function resolveFromHistoryConfirmation(clean, history) {
     if (!Array.isArray(history) || history.length === 0) return null;
-    const recent = history.slice(-6).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
+    const recent = history.slice(-16).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
     if (recent.length === 0) return null;
 
     let lastAssistantIdx = -1;
@@ -748,7 +794,7 @@ export function createAgentCore({
       return { ...directRes, goal: lastAssistantContent };
     }
 
-    if (/\b(?:pesquis\w*|busc\w*|procur\w*|olh\w*|chec\w*)\b/.test(normalizeText(lastAssistantContent))) {
+    if (/\b(?:pesquis\w*|bus(?:c|qu)\w*|procur\w*|olh\w*|chec\w*)\b/.test(normalizeText(lastAssistantContent))) {
       return findRecentSpecificToolMatch(recent, null, lastAssistantIdx);
     }
     return null;
@@ -765,7 +811,7 @@ export function createAgentCore({
     let intentConfidence = deterministic.confidence;
 
     if (resolved && resolved.toolName === 'research.search' && GENERIC_RESEARCH_QUERY_RE.test(normalizeText(resolved.args?.query || '')) && Array.isArray(history) && history.length > 0) {
-      const recent = history.slice(-6).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
+      const recent = history.slice(-16).filter(item => item && typeof item.content === 'string' && collapseText(item.content));
       const specific = findRecentSpecificToolMatch(recent, 'research.search');
       if (specific?.args?.query) {
         resolved = { ...resolved, args: { ...resolved.args, query: specific.args.query } };
@@ -891,6 +937,42 @@ function formatResearchSearchForPrompt(result) {
   };
 }
 
+function formatGithubReposForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  const repos = Array.isArray(result.repositories)
+    ? result.repositories
+    : (Array.isArray(result.repos) ? result.repos : []);
+  if (isPlainObject(result.repository)) {
+    const r = result.repository;
+    return {
+      repository: {
+        name: r.fullName || r.name,
+        description: r.description ? String(r.description).slice(0, 120) : null,
+        language: r.language || null,
+      },
+    };
+  }
+  return {
+    count: repos.length,
+    repositories: repos.slice(0, 5).map(r => ({
+      name: r.fullName || r.name,
+      description: r.description ? String(r.description).slice(0, 100) : null,
+      language: r.language || null,
+    })),
+  };
+}
+
+function formatGitStatusForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  return {
+    branch: result.branch,
+    target: result.target,
+    staged: Array.isArray(result.staged) ? result.staged.slice(0, 6) : [],
+    modified: Array.isArray(result.modified) ? result.modified.slice(0, 6) : [],
+    untracked: Array.isArray(result.untracked) ? result.untracked.slice(0, 6) : [],
+  };
+}
+
 export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
   if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
   if (turn.status === 'executed') {
@@ -898,7 +980,11 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       ? (formatSelfDescribeForPrompt(turn.result) ?? turn.result ?? {})
       : turn.tool === 'research.search'
         ? (formatResearchSearchForPrompt(turn.result) ?? turn.result ?? {})
-        : (turn.result ?? {});
+        : turn.tool === 'github.repos'
+          ? (formatGithubReposForPrompt(turn.result) ?? turn.result ?? {})
+          : turn.tool === 'git.status'
+            ? (formatGitStatusForPrompt(turn.result) ?? turn.result ?? {})
+            : (turn.result ?? {});
     let serialized = '';
     try {
       serialized = JSON.stringify(payload);
@@ -918,7 +1004,13 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
 }
 
 export function formatExecutedTurnFallbackReply(turn) {
-  if (!turn || turn.status !== 'executed' || !turn.result) return null;
+  if (!turn) return null;
+  if (turn.status !== 'executed' || !turn.result) {
+    const errDetail = redactSecrets(
+      String(turn.execution?.reason || (Array.isArray(turn.errors) ? turn.errors.join('; ') : 'falha ao executar ferramenta')).slice(0, 180),
+    );
+    return `Tentei usar ${turn.tool || 'a ferramenta'} agora, mas falhou: ${errDetail}`;
+  }
   const r = turn.result;
   if (turn.tool === 'self.describe') {
     const skills = Array.isArray(r.skills)
@@ -932,6 +1024,15 @@ export function formatExecutedTurnFallbackReply(turn) {
     const list = r.accounts.slice(0, 3).map(a => `${a.name || a.type || 'Conta'}: ${a.balance ?? '-'} ${a.currencyCode || 'BRL'}`);
     return list.length ? `Conferi suas contas no Open Finance: ${list.join('; ')}.` : 'Consultei o Open Finance, mas não encontrei contas listadas.';
   }
+  if (turn.tool === 'finance.transactions' && Array.isArray(r.transactions)) {
+    const list = r.transactions.slice(0, 3).map(t => `${t.description || t.category || 'Transação'}: ${t.amount ?? '-'}`);
+    return list.length ? `Últimas transações no Open Finance: ${list.join('; ')}.` : 'Consultei o extrato no Open Finance e não há transações nesse período.';
+  }
+  if (turn.tool === 'calendar.create' && r.event) {
+    const title = r.event.summary || 'Evento';
+    const time = r.event.start?.dateTime || r.event.start?.date || '';
+    return `Criei o evento "${title}" no seu Google Calendar${time ? ` para ${time}` : ''}!`;
+  }
   if (turn.tool === 'calendar.list' && Array.isArray(r.events)) {
     const list = r.events.slice(0, 3).map(e => e.summary || '(sem título)');
     return list.length ? `Na sua agenda encontrei: ${list.join(', ')}.` : 'Olhei sua agenda e não há eventos nesse filtro.';
@@ -939,6 +1040,12 @@ export function formatExecutedTurnFallbackReply(turn) {
   if (turn.tool === 'email.list' && Array.isArray(r.messages)) {
     const list = r.messages.slice(0, 2).map(m => m.subject || m.from || '(sem assunto)');
     return list.length ? `Encontrei ${r.messages.length} e-mail(s), incluindo: ${list.join('; ')}.` : 'Olhei sua caixa de entrada e não há mensagens nesse filtro.';
+  }
+  if (turn.tool === 'memory.search' && Array.isArray(r.results)) {
+    const list = r.results.slice(0, 3).map(item => item.text).filter(Boolean);
+    return list.length
+      ? `Achei na memória (${r.results.length}): ${list.join(' | ').slice(0, 180)}`
+      : 'Consultei minha memória e não achei registros sobre isso.';
   }
   if (turn.tool === 'research.search' && Array.isArray(r.results)) {
     const top = r.results.slice(0, 2).map(item => item.title || item.url).filter(Boolean);
@@ -948,6 +1055,15 @@ export function formatExecutedTurnFallbackReply(turn) {
     const dirty = (r.staged?.length || 0) + (r.modified?.length || 0) + (r.untracked?.length || 0);
     const head = r.head?.hash ? ` (commit ${r.head.hash})` : '';
     return `Git (${r.target || 'usami'}): branch ${r.branch}${head}, ${dirty} alteração(ões) pendente(s).`;
+  }
+  if (turn.tool === 'git.log' && Array.isArray(r.commits)) {
+    const list = r.commits.slice(0, 3).map(c => `${c.hash || ''} ${c.subject || ''}`.trim());
+    return list.length ? `Últimos commits (${r.target || 'usami'}): ${list.join(' | ')}.` : 'Não encontrei commits recentes.';
+  }
+  if (turn.tool === 'github.repos') {
+    const repos = Array.isArray(r.repositories) ? r.repositories : (Array.isArray(r.repos) ? r.repos : []);
+    const list = repos.slice(0, 4).map(repo => repo.fullName || repo.name).filter(Boolean);
+    return list.length ? `Seus repositórios no GitHub: ${list.join(', ')}.` : 'Consultei o GitHub, mas não encontrei repositórios.';
   }
   if (typeof r.summary === 'string' && r.summary.trim()) {
     return redactSecrets(r.summary).slice(0, 210);
