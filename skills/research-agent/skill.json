@@ -1,0 +1,42 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "research-agent",
+  "name": "Research Agent",
+  "version": "1.0.0",
+  "description": "Pesquisa na web e extrai conteúdo limpo em Markdown usando Firecrawl e TinyFish (com fusão/deduplicação e proteção SSRF), integrável ao índice local.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "research.search",
+    "research.fetch"
+  ],
+  "permissions": [3],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "query",
+      "type": "string",
+      "required": false,
+      "description": "Termo ou pergunta de pesquisa web."
+    },
+    {
+      "name": "provider",
+      "type": "string",
+      "required": false,
+      "description": "Provedor: auto, tinyfish, firecrawl ou both."
+    },
+    {
+      "name": "url",
+      "type": "string",
+      "required": false,
+      "description": "URL pública para extração de conteúdo."
+    }
+  ],
+  "instructions": "Use research.search para localizar fontes via TinyFish e/ou Firecrawl e research.fetch apenas para URLs públicas http(s). Nunca envie credenciais ou URLs internas/privadas.",
+  "tests": {
+    "files": ["test/research-agent.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
