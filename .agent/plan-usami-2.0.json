@@ -181,6 +181,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Usami recebe 'organize minha semana' e devolve cronograma com conflitos apontados e tarefas persistidas.",
       "scopeNotes": "Primeira skill operacional da Fase A. Agenda e e-mail externos ficam fora; o cronograma usa a memória operacional local.",
+      "status": "done",
       "blockedBy": ["S6", "S8", "S3"],
       "techGuidance": "A skill consome contratos e ferramentas; não acessa `data/` diretamente. Saída deve passar por `verify()`."
     },
