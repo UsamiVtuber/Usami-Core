@@ -115,21 +115,33 @@ export function createOpenFinanceClient({
     return data;
   }
 
+  async function resolvePluggyAccounts(connectionId = null) {
+    const itemIds = connectionId
+      ? [sanitizeOpenFinanceId(connectionId, 'connectionId')]
+      : String(envProvider('PLUGGY_ITEM_ID') || '')
+        .split(',')
+        .map(part => part.trim())
+        .filter(Boolean)
+        .map(id => sanitizeOpenFinanceId(id, 'PLUGGY_ITEM_ID'));
+    if (itemIds.length === 0) {
+      throw new Error('Pluggy requer connectionId (itemId) ou PLUGGY_ITEM_ID configurado.');
+    }
+    const lists = await Promise.all(itemIds.map(async (itemId) => {
+      const data = await requestProvider('pluggy', `/accounts?itemId=${encodeURIComponent(itemId)}`);
+      const rawList = Array.isArray(data?.results) ? data.results : (Array.isArray(data) ? data : []);
+      return rawList.map(item => normalizeAccount(item, 'pluggy')).filter(Boolean);
+    }));
+    return lists.flat();
+  }
+
   return {
     async listAccounts({ provider = 'auto', connectionId = null } = {}) {
       const chosen = resolveProvider(provider);
       if (chosen === 'pluggy') {
-        const itemId = connectionId
-          ? sanitizeOpenFinanceId(connectionId, 'connectionId')
-          : String(envProvider('PLUGGY_ITEM_ID') || '').trim();
-        if (!itemId) {
-          throw new Error('Pluggy requer connectionId (itemId) ou PLUGGY_ITEM_ID configurado.');
-        }
-        const data = await requestProvider('pluggy', `/accounts?itemId=${encodeURIComponent(itemId)}`);
-        const rawList = Array.isArray(data?.results) ? data.results : (Array.isArray(data) ? data : []);
+        const accounts = await resolvePluggyAccounts(connectionId);
         return {
           provider: 'pluggy',
-          accounts: rawList.map(item => normalizeAccount(item, 'pluggy')).filter(Boolean),
+          accounts,
         };
       }
 
@@ -151,7 +163,16 @@ export function createOpenFinanceClient({
       const safeLimit = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 50;
 
       if (chosen === 'pluggy') {
-        const safeAccountId = sanitizeOpenFinanceId(accountId, 'accountId');
+        let safeAccountId = null;
+        if (accountId && String(accountId).trim()) {
+          safeAccountId = sanitizeOpenFinanceId(accountId, 'accountId');
+        } else {
+          const accounts = await resolvePluggyAccounts(connectionId);
+          if (!accounts[0]?.id) {
+            throw new Error('Pluggy não encontrou nenhuma conta para consultar transações.');
+          }
+          safeAccountId = sanitizeOpenFinanceId(accounts[0].id, 'accountId');
+        }
         const params = new URLSearchParams({ accountId: safeAccountId, pageSize: String(safeLimit) });
         if (range.from) params.set('from', range.from);
         if (range.to) params.set('to', range.to);
