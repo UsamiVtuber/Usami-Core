@@ -1,0 +1,42 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "finance-observer",
+  "name": "Finance Observer",
+  "version": "1.0.0",
+  "description": "Consulta contas, saldos e extrato de transações via Open Finance (Pluggy ou Belvo) em modo estritamente somente leitura.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "finance.accounts",
+    "finance.transactions"
+  ],
+  "permissions": [3],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "accountId",
+      "type": "string",
+      "required": false,
+      "description": "ID da conta no agregador Open Finance."
+    },
+    {
+      "name": "from",
+      "type": "string",
+      "required": false,
+      "description": "Data inicial YYYY-MM-DD."
+    },
+    {
+      "name": "to",
+      "type": "string",
+      "required": false,
+      "description": "Data final YYYY-MM-DD."
+    }
+  ],
+  "instructions": "Operação estritamente somente leitura sobre contas e transações do Open Finance (Pluggy/Belvo). Nunca solicite senhas bancárias diretas nem execute transferências ou pagamentos.",
+  "tests": {
+    "files": ["test/finance-observer.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
