@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { dataDir as resolveDataDir } from './data-paths.js';
-import { checkApiToken, isAllowedRequest, readApiToken } from './api-security.js';
+import { checkApiToken, isAllowedRequest, readApiToken, withExtraOrigins } from './api-security.js';
 
 export const PROPOSALS_SCHEMA = 'usami.agent_proposals.v1';
 export const PROPOSALS_VERSION = '1.0.0';
@@ -343,7 +343,7 @@ export function createAgentBridgeHandler(options = {}) {
   if (!bridge) throw new Error('createAgentBridgeHandler: bridge é obrigatório.');
 
   const apiToken = options.apiToken !== undefined ? options.apiToken : readApiToken();
-  const allowedOrigins = options.allowedOrigins || ['http://127.0.0.1:8787', 'http://localhost:8787'];
+  const allowedOrigins = options.allowedOrigins || withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8787', 'http://localhost:8787']);
 
   return async function handleBridgeRequest(req, res) {
     function send(status, body) {

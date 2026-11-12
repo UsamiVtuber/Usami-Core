@@ -4192,8 +4192,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
   const handleBridge = createAgentBridgeHandler({
-    bridge: options.codeBridge || installCodeBridge,
-    allowedOrigins: withExtraOrigins(allowedHostsOrigins.origins),
+    bridge: installCodeBridge,
+    allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
   });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
   const server = createServer(async (req, res) => {
