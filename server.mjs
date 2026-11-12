@@ -15,7 +15,6 @@ import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { createBondStore } from './src/bond-store.js';
 import { createMoodStore } from './src/mood-store.js';
-import { createMoodStore } from './src/mood-store.js';
 import { createOperationalMemoryStore, OPERATIONAL_DEFAULT_LIMIT, OPERATIONAL_MAX_LIMIT } from './src/operational-memory-store.js';
 import { EXECUTION_ORIGINS, OPERATIONAL_KINDS, OPERATIONAL_STATUSES, PLAN_ORIGINS } from './src/agent-contracts.js';
 import { createToolRegistry } from './src/tool-registry.js';

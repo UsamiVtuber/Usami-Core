@@ -33,6 +33,8 @@ const OPERATIONAL_PATTERNS = [
   /\bo que (?:voce|vc|tu) (?:sabe|lembra)\b/,
   /\b(lembr\w*|record\w*)\b.*\b(te falei|eu disse|eu gosto|sobre mim|memoria)\b/,
   /\b(list\w*|mostr\w*|quais|adicion\w*|cri\w*|anot\w*|registr\w*|mar(?:c|qu)\w*|atualiz\w*|conclu\w*|prioriz\w*|orden\w*)\b.*\b(tarefas?|pendencias?|compromissos?|projetos?|prazos?|agenda)\b/,
+  /\b(quais|lista\w*|mostr\w*|descrev\w*|resum\w*)\b.*\b(ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|erros?\s+recentes?)\b/,
+  /\b(?:o que (?:voce|vc|tu) (?:tem|faz|consegue fazer)|suas? limitacoes?|seu status)\b/,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -124,6 +126,22 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     toolName: 'planner.prioritize',
     matches: normalized => /\b(prioriz\w*|orden\w*)\b.*\b(tarefas?|pendencias?|compromissos?|agenda)\b/.test(normalized),
     buildArgs: () => ({}),
+  },
+  {
+    toolName: 'self.describe',
+    matches: normalized => (
+      /\b(quais|lista\w*|mostr\w*|descrev\w*|resum\w*)\b.*\b(ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|erros?\s+recentes?)\b/.test(normalized)
+      || /\b(?:o que (?:voce|vc|tu) (?:tem|faz|consegue fazer)|suas? limitacoes?|seu status)\b/.test(normalized)
+    ),
+    buildArgs: message => {
+      const normalized = normalizeText(message);
+      if (/\berros?\b/.test(normalized)) return { focus: 'errors' };
+      if (/\blimitacoes?\b/.test(normalized)) return { focus: 'limitations' };
+      if (/\bskills?\b/.test(normalized)) return { focus: 'skills' };
+      if (/\bmodulos?\b/.test(normalized)) return { focus: 'modules' };
+      if (/\bferramentas?\b/.test(normalized)) return { focus: 'tools' };
+      return { focus: 'all' };
+    },
   },
 ]);
 

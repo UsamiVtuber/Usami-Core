@@ -190,6 +190,15 @@ exclusivamente `operational-memory-store` (S3) e `task-planner` (S6) via
 apontando conflitos de horário; pedidos de organização semanal no `agent-core`
 acionam `planner.schedule` quando a skill está ativa.
 
+A **Self-Introspection somente leitura** (S11) fica em `src/self-introspection.js`,
+construindo o retrato de módulos (`src/`), ferramentas reais (`tool-registry`),
+skills (`skill-catalog`), versão (`package.json`), erros recentes sem stack ou
+credenciais (`tool-executor` / `permission-gate`) e limitações explícitas usando
+apenas fontes em allowlist (`package.json`, `docs/*.md` permitidos e `src/`; nunca
+lê `.env`, `USAMI_KEYS_FILE` nem `vault/`). A ferramenta `self.describe` (nível 1)
+e a rota `GET /api/agent/self` (atrás de `x-usami-token` + Host/Origin) devolvem
+o retrato sem reutilizar o termo `capabilities`.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
