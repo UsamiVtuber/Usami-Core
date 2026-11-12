@@ -39,8 +39,12 @@ const OPERATIONAL_PATTERNS = [
   /\bresumo\s+(?:do\s+dia|diario)\b/,
   /\b(revis\w*|resum\w*)\b.*\b(estudos?|aprendizado|revisao espacada)\b/,
   /\b(?:criar|gerar|montar)\s+(?:uma?\s+)?(?:trilha\s+de\s+estudos?|rascunho|documento|nota|checklist|adr)\b/,
-  /\b(?:inspecion\w*|ler|ver|mostr\w*|busc\w*|procur\w*)\b.*\b(?:arquivo|codigo|src\/|docs\/|skills\/)\b/,
+  /\b(?:inspecion\w*|ler|ver|mostr\w*|busc\w*|procur\w*)\b.*\b(?:arquivo|codigo|src\/|docs\/|skills\/|desktop\/|usami-desktop\/|cargo\.toml)\b/,
   /\b(?:projet\w*|desenh\w*|blueprint)\b.*\bskill\b/,
+  /\b(?:status|branch|estado)\s+(?:do\s+)?git\b|\b(?:em\s+qual|qual)\s+branch\b/,
+  /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?git\b|\bultimos?\s+commits?\b/,
+  /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?git\b/,
+  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:repositorios?|github)\b/,
   /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:google calendar|calendario|eventos? da agenda)\b/,
   /\b(?:list\w*|mostr\w*|ver|checar|buscar)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/,
   /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:contas?|saldos?|open\s*finance)\b/,
@@ -128,7 +132,7 @@ export function classifyDeterministic(message, { toolNames = [] } = {}) {
 export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   {
     toolName: 'memory.search',
-    matches: normalized => !/\b(?:na\s+web|na\s+internet|online|tinyfish|firecrawl)\b/.test(normalized) && (
+    matches: normalized => !/\b(?:na\s+web|na\s+internet|online|tinyfish|firecrawl|git|github|commits?|repositorios?|branch|diff)\b/.test(normalized) && (
       /\b(busca\w*|procur\w*|pesquis\w*|consult\w*|lembra\w*)\b.*\b(memoria|fatos|historico|resumos?|sobre|eu)\b/.test(normalized)
       || /\bo que (?:voce|vc|tu) (?:sabe|lembra)\b/.test(normalized)
     ),
@@ -203,19 +207,22 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'code.inspect',
-    matches: normalized => /\b(?:inspecion\w*|ler|ver|mostr\w*)\b.*\b(?:src\/|docs\/|skills\/|package\.json|server\.mjs)\b/.test(normalized),
+    matches: normalized => /\b(?:inspecion\w*|ler|ver|mostr\w*)\b.*\b(?:src\/|docs\/|skills\/|desktop\/|usami-desktop\/|package\.json|server\.mjs|cargo\.toml)\b/.test(normalized),
     buildArgs: message => {
-      const pathMatch = String(message ?? '').match(/\b((?:src|docs|skills|tests)\/[a-zA-Z0-9._/-]+|package\.json|server\.mjs)\b/);
+      const pathMatch = String(message ?? '').match(/\b((?:(?:usami-)?desktop\/)?(?:src|docs|skills|tests)\/[a-zA-Z0-9._/-]+|(?:(?:usami-)?desktop\/)?Cargo\.toml|(?:(?:usami-)?desktop\/)?README\.md|package\.json|server\.mjs)\b/);
       return { path: pathMatch ? pathMatch[1] : 'package.json' };
     },
   },
   {
     toolName: 'code.search',
-    matches: normalized => /\b(?:busc\w*|procur\w*|pesquis\w*)\b.*\b(?:codigo|src\/|docs\/|skills\/)\b/.test(normalized),
+    matches: normalized => /\b(?:busc\w*|procur\w*|pesquis\w*)\b.*\b(?:codigo|src\/|docs\/|skills\/|desktop\/|usami-desktop\/)\b/.test(normalized),
     buildArgs: message => {
       const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const norm = normalizeText(clean);
       const match = /(?:por|sobre|termo|simbolo)\s+([a-zA-Z0-9_.-]{2,80})$/i.exec(clean);
-      return { query: (match?.[1] || clean).slice(0, 80) };
+      const args = { query: (match?.[1] || clean).slice(0, 80) };
+      if (/\b(?:usami-)?desktop\b/.test(norm)) args.scope = 'desktop';
+      return args;
     },
   },
   {
@@ -296,6 +303,44 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         url,
         provider,
       };
+    },
+  },
+  {
+    toolName: 'git.status',
+    matches: normalized => /\b(?:status|branch|estado)\s+(?:do\s+)?git\b|\b(?:em\s+qual|qual)\s+branch\b/.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const target = /\bdesktop\b/.test(norm) ? 'desktop' : (/\bworkspace\b/.test(norm) ? 'workspace' : 'usami');
+      return { target };
+    },
+  },
+  {
+    toolName: 'git.log',
+    matches: normalized => /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?git\b|\bultimos?\s+commits?\b/.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const target = /\bdesktop\b/.test(norm) ? 'desktop' : (/\bworkspace\b/.test(norm) ? 'workspace' : 'usami');
+      return { target, limit: 10 };
+    },
+  },
+  {
+    toolName: 'git.diff',
+    matches: normalized => /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?git\b/.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const target = /\bdesktop\b/.test(norm) ? 'desktop' : (/\bworkspace\b/.test(norm) ? 'workspace' : 'usami');
+      return { target };
+    },
+  },
+  {
+    toolName: 'github.repos',
+    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:repositorios?|github)\b/.test(normalized),
+    buildArgs: message => {
+      const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
+      if (slugMatch?.[1] && !slugMatch[1].startsWith('src/')) {
+        return { repo: slugMatch[1] };
+      }
+      return { limit: 10 };
     },
   },
 ]);

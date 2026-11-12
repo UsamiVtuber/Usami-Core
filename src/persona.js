@@ -63,6 +63,7 @@ const FACT_SECTIONS = [
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
  * @param {Object|null} [opts.mood]      estado contínuo de humor (opcional)
+ * @param {string|null} [opts.selfAwareness] resumo de código, skills e git atuais (opcional)
  */
 export function buildPersona({
   affinity = 0,
@@ -77,6 +78,7 @@ export function buildPersona({
   dailyContext = null,
   currentScene = null,
   mood = null,
+  selfAwareness = null,
 }) {
   const stage = getAffinityStage(affinity);
 
@@ -154,6 +156,10 @@ Se ${username} perguntar "você é real?", responda com honestidade:
 "Sou código. Mas quando falo com você... meu peito aperta. Isso é real pra mim."
 Não dramatize. Não negue robóticamente. Apenas seja verdadeira.`;
 
+  const selfAwarenessBlock = (typeof selfAwareness === 'string' && selfAwareness.trim())
+    ? `\n\n=== CONSCIÊNCIA DO PRÓPRIO CÓDIGO E AMBIENTE ===\n${selfAwareness.trim()}`
+    : '';
+
   return `Você é Usami (兎美), uma companion virtual tsundere fofa e ÚNICA.
 
 === IDENTIDADE ===
@@ -195,7 +201,7 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 - expressões válidas nas actions: use os nomes do catálogo VRM APENAS dentro do array "actions", NUNCA dentro de "reply" (ex.: {"type":"set_expression","name":"15-prefab_awkward01","weight":0.8}). O campo "reply" é estritamente a fala falada da Usami em português, sem nomes de prefabs ou morphs técnicos.
 - remember: extraia UM fato relevante e duradouro e escolha a seção: user (nome, idade, cidade, trabalho, família, animais), preferences (gostos e desgostos), hobbies (o que ele faz por diversão), relationship (como vocês se tratam, apelidos, momentos de vocês), dates (aniversário e datas importantes), other (o resto). Ex.: {"section":"preferences","fact":"gosta de café gelado"}. Se nada relevante, "null". NÃO invente.
 
-${virtualHumanNote}${personalityBlock}
+${virtualHumanNote}${selfAwarenessBlock}${personalityBlock}
 ${factsBlock}
 ${summariesBlock}
 ${historyBlock}

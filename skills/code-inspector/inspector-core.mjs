@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 export const CODE_INSPECT_SCHEMA = 'usami.code.inspect.v1';
-export const CODE_SEARCH_SCOPES = Object.freeze(['all', 'src', 'skills', 'docs']);
+export const CODE_SEARCH_SCOPES = Object.freeze(['all', 'src', 'skills', 'docs', 'desktop']);
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_WINDOW_LINES = 120;
 const DEFAULT_SEARCH_LIMIT = 15;
@@ -17,13 +17,22 @@ const ALLOWED_FILE_PATTERNS = Object.freeze([
   /^skills\/[a-z][a-z0-9-]{2,39}\/(?:test\/)?[a-zA-Z0-9._-]+\.(?:mjs|js|json)$/,
 ]);
 
-const FORBIDDEN_SEGMENT_RE = /(?:^|\/)(?:\.env(?:\..*)?|\.git|vault|data|tmp|dist|node_modules|secrets?|credentials?|keys?\.env)(?:\/|$)/i;
+const ALLOWED_DESKTOP_PATTERNS = Object.freeze([
+  /^Cargo\.toml$/,
+  /^README\.md$/,
+  /^src\/(?:[a-zA-Z0-9._-]+\/)*[a-zA-Z0-9._-]+\.rs$/,
+  /^docs\/[a-zA-Z0-9._-]+\.md$/,
+]);
+
+const FORBIDDEN_SEGMENT_RE = /(?:^|\/)(?:\.env(?:\..*)?|\.git|vault|data|tmp|dist|target|node_modules|secrets?|credentials?|keys?\.env)(?:\/|$)/i;
 
 const SECRET_PATTERNS = Object.freeze([
   /\bsk-(?:or-)?[a-zA-Z0-9_-]{8,}\b/g,
   /\bnvapi-[a-zA-Z0-9_-]{8,}\b/gi,
+  /\b(?:ghp|gho|ghu|ghs)_[a-zA-Z0-9]{10,}\b/g,
+  /\bgithub_pat_[a-zA-Z0-9_]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._-]{8,}\b/gi,
-  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
+  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|GITHUB_TOKEN|GH_TOKEN|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
 ]);
 
 export function redactLine(text) {
@@ -33,7 +42,8 @@ export function redactLine(text) {
 }
 
 export function normalizeRelPath(relPath) {
-  return String(relPath ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  const clean = String(relPath ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  return clean.startsWith('usami-desktop/') ? `desktop/${clean.slice('usami-desktop/'.length)}` : clean;
 }
 
 export function isAllowlistedCodePath(relPath) {
@@ -41,17 +51,25 @@ export function isAllowlistedCodePath(relPath) {
   if (!norm || norm.startsWith('/') || norm.includes('..') || FORBIDDEN_SEGMENT_RE.test(norm)) {
     return false;
   }
+  if (norm.startsWith('desktop/')) {
+    const inner = norm.slice('desktop/'.length);
+    return ALLOWED_DESKTOP_PATTERNS.some(re => re.test(inner));
+  }
   return ALLOWED_FILE_PATTERNS.some(re => re.test(norm));
 }
 
-function readSafeAllowlisted(rootDir, relPath) {
+function readSafeAllowlisted(rootDir, relPath, { desktopRoot = resolve(rootDir, '../usami-desktop') } = {}) {
   const norm = normalizeRelPath(relPath);
   if (!isAllowlistedCodePath(norm)) {
     throw new Error(`caminho fora da allowlist: ${norm || '(vazio)'}`);
   }
-  const rootReal = realpathSync(resolve(rootDir));
-  const target = resolve(rootReal, norm);
-  const diff = relative(rootReal, target).replace(/\\/g, '/');
+  const isDesktop = norm.startsWith('desktop/');
+  const baseDir = isDesktop ? desktopRoot : rootDir;
+  const innerPath = isDesktop ? norm.slice('desktop/'.length) : norm;
+
+  const baseReal = realpathSync(resolve(baseDir));
+  const target = resolve(baseReal, innerPath);
+  const diff = relative(baseReal, target).replace(/\\/g, '/');
   if (!diff || diff.startsWith('..') || isAbsolute(diff) || FORBIDDEN_SEGMENT_RE.test(diff)) {
     throw new Error(`caminho inválido: ${norm}`);
   }
@@ -70,23 +88,27 @@ function readSafeAllowlisted(rootDir, relPath) {
 
 function extractExports(content) {
   const names = [];
-  const re = /^export\s+(?:async\s+)?(?:function|const|let|class)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/gm;
-  let match;
-  while ((match = re.exec(content)) !== null) {
-    if (!names.includes(match[1])) names.push(match[1]);
-    if (names.length >= 60) break;
+  const jsRe = /^export\s+(?:async\s+)?(?:function|const|let|class)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)/gm;
+  const rsRe = /^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?(?:fn|struct|enum|trait|mod|const)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm;
+  for (const re of [jsRe, rsRe]) {
+    let match;
+    while ((match = re.exec(content)) !== null) {
+      if (!names.includes(match[1])) names.push(match[1]);
+      if (names.length >= 60) return names;
+    }
   }
   return names;
 }
 
 export function inspectAllowlistedFile({
   rootDir,
+  desktopRoot,
   path,
   startLine = 1,
   endLine = 80,
 } = {}) {
   if (!rootDir || typeof rootDir !== 'string') throw new Error('rootDir é obrigatório.');
-  const { norm, content } = readSafeAllowlisted(rootDir, path);
+  const { norm, content } = readSafeAllowlisted(rootDir, path, { desktopRoot });
   const allLines = content.split(/\r?\n/);
   const totalLines = allLines.length;
   const start = Number.isInteger(startLine) && startLine >= 1 ? Math.min(startLine, totalLines) : 1;
@@ -108,8 +130,7 @@ export function inspectAllowlistedFile({
   };
 }
 
-function listFilesInScope(rootDir, scope) {
-  const roots = scope === 'all' ? ['src', 'skills', 'docs'] : [scope];
+function listFilesInScope(rootDir, scope, { desktopRoot = resolve(rootDir, '../usami-desktop') } = {}) {
   const collected = [];
 
   function walk(absDir, relPrefix) {
@@ -140,12 +161,19 @@ function listFilesInScope(rootDir, scope) {
     }
   }
 
-  for (const dir of roots) walk(join(rootDir, dir), dir);
+  if (scope === 'desktop' || scope === 'all') {
+    for (const sub of ['src', 'docs']) walk(join(desktopRoot, sub), `desktop/${sub}`);
+  }
+  if (scope !== 'desktop') {
+    const roots = scope === 'all' ? ['src', 'skills', 'docs'] : [scope];
+    for (const dir of roots) walk(join(rootDir, dir), dir);
+  }
   return collected.sort();
 }
 
 export function searchAllowlistedCode({
   rootDir,
+  desktopRoot,
   query,
   scope = 'src',
   limit = DEFAULT_SEARCH_LIMIT,
@@ -159,13 +187,13 @@ export function searchAllowlistedCode({
   const safeLimit = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), MAX_SEARCH_LIMIT) : DEFAULT_SEARCH_LIMIT;
   const needle = cleanQuery.toLowerCase();
 
-  const files = listFilesInScope(rootDir, safeScope);
+  const files = listFilesInScope(rootDir, safeScope, { desktopRoot });
   const matches = [];
 
   for (const rel of files) {
     let content;
     try {
-      content = readSafeAllowlisted(rootDir, rel).content;
+      content = readSafeAllowlisted(rootDir, rel, { desktopRoot }).content;
     } catch {
       continue;
     }

@@ -29,17 +29,18 @@ export function publishCodeInspectorSkill({ dataDir, bundledDir } = {}) {
 
 export function createCodeInspectorTools({
   rootDir = DEFAULT_ROOT_DIR,
+  desktopRoot = resolve(rootDir, '../usami-desktop'),
 } = {}) {
   const inspectTool = {
     schema: AGENT_SCHEMAS.tool,
     name: 'code.inspect',
-    version: '1.0.0',
-    description: 'Lê trecho e símbolos exportados de um arquivo na allowlist (src/, skills/, docs/, tests/, package.json, server.mjs).',
+    version: '1.1.0',
+    description: 'Lê trecho e símbolos exportados de arquivo na allowlist (usami/: src/, skills/, docs/, tests/, package.json, server.mjs; usami-desktop/: src/*.rs, Cargo.toml, docs/).',
     origin: 'skill',
     permissionLevel: 1,
     timeoutMs: 5000,
     parameters: [
-      { name: 'path', type: 'string', required: true, description: 'Caminho relativo permitido (ex.: src/agent-core.js).' },
+      { name: 'path', type: 'string', required: true, description: 'Caminho relativo permitido (ex.: src/agent-core.js ou desktop/src/main.rs).' },
       { name: 'startLine', type: 'number', required: false, description: 'Linha inicial (>= 1).' },
       { name: 'endLine', type: 'number', required: false, description: 'Linha final (máx. 120 linhas por leitura).' },
     ],
@@ -55,6 +56,7 @@ export function createCodeInspectorTools({
     async execute(args = {}) {
       const inspected = inspectAllowlistedFile({
         rootDir,
+        desktopRoot,
         path: args.path,
         startLine: args.startLine,
         endLine: args.endLine,
@@ -70,14 +72,14 @@ export function createCodeInspectorTools({
   const searchTool = {
     schema: AGENT_SCHEMAS.tool,
     name: 'code.search',
-    version: '1.0.0',
-    description: 'Busca texto ou símbolo nos arquivos permitidos (src/, skills/, docs/) sem ler segredos ou vault.',
+    version: '1.1.0',
+    description: 'Busca texto ou símbolo nos arquivos permitidos (usami e usami-desktop) sem ler segredos ou vault.',
     origin: 'skill',
     permissionLevel: 1,
     timeoutMs: 5000,
     parameters: [
       { name: 'query', type: 'string', required: true, description: 'Termo ou símbolo procurado.' },
-      { name: 'scope', type: 'string', required: false, enum: [...CODE_SEARCH_SCOPES], description: 'Escopo da busca: all, src, skills ou docs.' },
+      { name: 'scope', type: 'string', required: false, enum: [...CODE_SEARCH_SCOPES], description: 'Escopo da busca: all, src, skills, docs ou desktop.' },
       { name: 'limit', type: 'number', required: false, description: 'Máximo de ocorrências (1 a 30).' },
     ],
     verify(result) {
@@ -90,6 +92,7 @@ export function createCodeInspectorTools({
     async execute(args = {}) {
       const found = searchAllowlistedCode({
         rootDir,
+        desktopRoot,
         query: args.query,
         scope: args.scope,
         limit: args.limit,

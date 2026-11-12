@@ -39,7 +39,8 @@ import { createCalendarManagerTools, publishCalendarManagerSkill } from './src/c
 import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/email-assistant-skill.js';
 import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/finance-observer-skill.js';
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
-import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, MAX_ERROR_LIMIT } from './src/self-introspection.js';
+import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
+import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
@@ -316,9 +317,11 @@ if (!briefingRegistration.ok) {
   console.error('Aviso: ferramenta briefing.build não registrada:', briefingRegistration.errors.join('; '));
 }
 
+const installGitClient = createGitAssistantClient();
+
 // Skills locais e externas da Fase 3: Study Companion, Document Creator,
 // Code Inspector, Skill Architect, Calendar Manager, Email Assistant,
-// Finance Observer e Research Agent.
+// Finance Observer, Research Agent e Git Assistant.
 for (const [label, publishFn] of [
   ['study-companion', publishStudyCompanionSkill],
   ['document-creator', publishDocumentCreatorSkill],
@@ -328,6 +331,7 @@ for (const [label, publishFn] of [
   ['email-assistant', publishEmailAssistantSkill],
   ['finance-observer', publishFinanceObserverSkill],
   ['research-agent', publishResearchAgentSkill],
+  ['git-assistant', publishGitAssistantSkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -353,6 +357,7 @@ for (const skillTool of [
       return ctx ? [ctx] : [];
     },
   }),
+  ...createGitAssistantTools({ gitClient: installGitClient }),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {
@@ -759,6 +764,45 @@ export function createChatHandler(options = {}) {
     }
   });
 
+  // Retrato leve (cache 15s + atualização Git em background) sem bloquear o turno do chat.
+  let cachedAwareness = { expiresAt: 0, text: null };
+  let cachedGitStatus = null;
+  let gitRefreshInFlight = null;
+  const gitClient = options.gitClient || installGitClient;
+  const refreshGitStatusInBackground = () => {
+    if (gitRefreshInFlight || typeof gitClient?.status !== 'function') return;
+    gitRefreshInFlight = Promise.resolve()
+      .then(() => gitClient.status({ target: 'usami' }))
+      .then(st => {
+        cachedGitStatus = st;
+        cachedAwareness.expiresAt = 0;
+      })
+      .catch(() => {})
+      .finally(() => { gitRefreshInFlight = null; });
+  };
+  const readSelfAwareness = options.readSelfAwareness || (() => {
+    if (options.includeSelfAwareness === false) return null;
+    if (typeof options.selfAwareness === 'string') return options.selfAwareness;
+    const t = now();
+    if (cachedAwareness.text && t < cachedAwareness.expiresAt) return cachedAwareness.text;
+    try {
+      const snapshot = (options.introspection || installSelfIntrospection).describe({ focus: 'all', errorLimit: 5 });
+      const fallbackGit = cachedGitStatus || (typeof gitClient?.readBranchSync === 'function' ? gitClient.readBranchSync('usami') : null);
+      if (!cachedGitStatus || t >= cachedAwareness.expiresAt) {
+        refreshGitStatusInBackground();
+      }
+      const text = formatSelfAwarenessPrompt({
+        snapshot,
+        gitStatus: fallbackGit,
+        githubConfigured: typeof gitClient?.isGitHubConfigured === 'function' ? gitClient.isGitHubConfigured() : false,
+      });
+      cachedAwareness = { expiresAt: t + 15_000, text };
+      return text;
+    } catch {
+      return null;
+    }
+  });
+
   return async function handleChat(req, res) {
     const send = (status, data) => {
       if (res.headersSent) return;
@@ -816,6 +860,13 @@ export function createChatHandler(options = {}) {
       } catch {
         currentMood = null;
       }
+      let selfAwareness = null;
+      try {
+        const resAwareness = readSelfAwareness();
+        selfAwareness = resAwareness && typeof resAwareness.then === 'function' ? await resAwareness : resAwareness;
+      } catch {
+        selfAwareness = null;
+      }
       let system = buildPersona({
         affinity: mem.affinity.score,
         sections: memoryStore.getSections(),
@@ -827,6 +878,7 @@ export function createChatHandler(options = {}) {
         timeOfDay,
         personality: personalityStore.get(),
         mood: currentMood,
+        selfAwareness,
       });
 
       // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de

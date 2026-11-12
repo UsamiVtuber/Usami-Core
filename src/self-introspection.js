@@ -31,8 +31,10 @@ const FORBIDDEN_PATH_SEGMENT_RE = /(?:^|\/)(?:\.env(?:\..*)?|\.git|vault|data|tm
 const SECRET_PATTERNS = Object.freeze([
   /\bsk-(?:or-)?[a-zA-Z0-9_-]{8,}\b/g,
   /\bnvapi-[a-zA-Z0-9_-]{8,}\b/gi,
+  /\b(?:ghp|gho|ghu|ghs)_[a-zA-Z0-9]{10,}\b/g,
+  /\bgithub_pat_[a-zA-Z0-9_]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._-]{8,}\b/gi,
-  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
+  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|GITHUB_TOKEN|GH_TOKEN|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
   /\bx-usami-token\s*[:=]\s*\S+/gi,
 ]);
 
@@ -63,7 +65,7 @@ export function stripStackAndSecrets(value, maxChars = MAX_SUMMARY_REASON_CHARS)
 
 export function containsSensitiveLeak(value) {
   const serialized = typeof value === 'string' ? value : JSON.stringify(value ?? '');
-  return /\b(?:sk-or-v1-|nvapi-|OPENROUTER_API_KEY=|NVIDIA_API_KEY=|USAMI_API_TOKEN=|PLANE_API_KEY=)/i.test(serialized)
+  return /\b(?:sk-or-v1-|nvapi-|ghp_|github_pat_|OPENROUTER_API_KEY=|NVIDIA_API_KEY=|USAMI_API_TOKEN=|PLANE_API_KEY=|GITHUB_TOKEN=|GH_TOKEN=)/i.test(serialized)
     || /\n\s+at\s+\S+:\d+/.test(serialized);
 }
 
@@ -411,6 +413,40 @@ export function createSelfIntrospection({
     describe,
     allowlist: Object.freeze([...normalizedAllowlist]),
   };
+}
+
+export function formatSelfAwarenessPrompt({
+  snapshot,
+  gitStatus = null,
+  githubConfigured = false,
+} = {}) {
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const pkgName = String(snapshot.runtime?.name || 'usami');
+  const pkgVer = String(snapshot.runtime?.version || '0.0.0');
+  const modulesCount = Array.isArray(snapshot.modules) ? snapshot.modules.length : 0;
+  const activeTools = Array.isArray(snapshot.tools)
+    ? snapshot.tools.filter(t => t.active).map(t => t.name)
+    : [];
+  const activeSkills = Array.isArray(snapshot.skills)
+    ? snapshot.skills.filter(s => s.activation?.canActivate || s.state === 'active').map(s => s.id)
+    : [];
+
+  const lines = [
+    `Runtime: ${pkgName} v${pkgVer} (${modulesCount} módulos em src/, código inspecionável em usami/ e usami-desktop/ via allowlist).`,
+    `Skills prontas/ativas (${activeSkills.length}): ${activeSkills.join(', ') || 'nenhuma'}.`,
+    `Ferramentas ativas (${activeTools.length}): ${activeTools.slice(0, 28).join(', ')}${activeTools.length > 28 ? ', ...' : ''}.`,
+  ];
+
+  if (gitStatus && typeof gitStatus === 'object') {
+    const headHash = gitStatus.head?.hash ? ` (${gitStatus.head.hash}: ${String(gitStatus.head.subject || '').slice(0, 70)})` : '';
+    const dirtyCount = (gitStatus.staged?.length || 0) + (gitStatus.modified?.length || 0) + (gitStatus.untracked?.length || 0);
+    lines.push(`Git local (${gitStatus.target || 'usami'}): branch ${gitStatus.branch || 'HEAD'}${headHash}; ${dirtyCount} alteração(ões) pendente(s).`);
+  }
+
+  lines.push(`GitHub API (GITHUB_TOKEN): ${githubConfigured ? 'configurada' : 'não configurada (falha fechado até definir no .env)'}.`);
+  lines.push('Regra: você conhece sua arquitetura real acima e nunca deve inventar arquivos, segredos ou tokens.');
+
+  return redactSecrets(lines.join('\n'));
 }
 
 export function createSelfDescribeTool({ introspection } = {}) {
