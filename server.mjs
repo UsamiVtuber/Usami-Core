@@ -31,6 +31,10 @@ import {
   isValidCalendarDate,
   publishDailyBriefingSkill,
 } from './src/daily-briefing-skill.js';
+import { createStudyCompanionTools, publishStudyCompanionSkill } from './src/study-companion-skill.js';
+import { createDocumentCreatorTools, publishDocumentCreatorSkill } from './src/document-creator-skill.js';
+import { createCodeInspectorTools, publishCodeInspectorSkill } from './src/code-inspector-skill.js';
+import { createSkillArchitectTools, publishSkillArchitectSkill } from './src/skill-architect-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
@@ -114,7 +118,6 @@ const HEDGE_AFTER_MS = (() => {
 })();
 
 const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
-
 
 // Fila de comandos vindos do n8n (n8n → Usami) e do refino de animação do
 // próprio turno. O cliente (Usami.jsx) consome via GET /api/n8n/commands com
@@ -309,6 +312,35 @@ if (!briefingRegistration.ok) {
   console.error('Aviso: ferramenta briefing.build não registrada:', briefingRegistration.errors.join('; '));
 }
 
+// Skills locais da Fase 3: Study Companion, Document Creator, Code Inspector e Skill Architect.
+for (const [label, publishFn] of [
+  ['study-companion', publishStudyCompanionSkill],
+  ['document-creator', publishDocumentCreatorSkill],
+  ['code-inspector', publishCodeInspectorSkill],
+  ['skill-architect', publishSkillArchitectSkill],
+]) {
+  try {
+    publishFn({ dataDir: resolveDataDir() });
+  } catch (error) {
+    console.error(`Aviso: publicação do manifesto ${label} falhou:`, error?.message || error);
+  }
+}
+
+for (const skillTool of [
+  ...createStudyCompanionTools({
+    memoryStore: installMemoryStore,
+    operationalStore: installOperationalStore,
+    taskPlanner: installTaskPlanner,
+  }),
+  ...createDocumentCreatorTools({ dataDir: resolveDataDir() }),
+  ...createCodeInspectorTools(),
+]) {
+  const registered = toolRegistry.register(skillTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${skillTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
 // Catálogo de Skills (data/skills/<id>/skill.json): descoberta somente leitura.
 // A ativação é derivada do estado do manifesto, do registry e das dependências;
 // o código da skill nunca é importado.
@@ -325,6 +357,16 @@ try {
   installSkillManager.load();
 } catch (error) {
   console.error('Aviso: gerenciador de skills indisponível:', error?.message || error);
+}
+
+for (const architectTool of createSkillArchitectTools({
+  skillCatalog: installSkillCatalog,
+  skillManager: installSkillManager,
+})) {
+  const registered = toolRegistry.register(architectTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${architectTool.name} não registrada:`, registered.errors.join('; '));
+  }
 }
 
 // Self-Introspection somente leitura (S11): allowlist de fontes (docs,

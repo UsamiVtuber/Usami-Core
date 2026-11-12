@@ -37,6 +37,10 @@ const OPERATIONAL_PATTERNS = [
   /\b(?:o que (?:voce|vc|tu) (?:tem|faz|consegue fazer)|suas? limitacoes?|seu status)\b/,
   /\bbriefing\b/,
   /\bresumo\s+(?:do\s+dia|diario)\b/,
+  /\b(revis\w*|resum\w*)\b.*\b(estudos?|aprendizado|revisao espacada)\b/,
+  /\b(?:criar|gerar|montar)\s+(?:uma?\s+)?(?:trilha\s+de\s+estudos?|rascunho|documento|nota|checklist|adr)\b/,
+  /\b(?:inspecion\w*|ler|ver|mostr\w*|busc\w*|procur\w*)\b.*\b(?:arquivo|codigo|src\/|docs\/|skills\/)\b/,
+  /\b(?:projet\w*|desenh\w*|blueprint)\b.*\bskill\b/,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -154,6 +158,71 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     buildArgs: message => {
       const dateMatch = String(message ?? '').match(/\b(\d{4}-\d{2}-\d{2})\b/);
       return dateMatch ? { date: dateMatch[1] } : {};
+    },
+  },
+  {
+    toolName: 'study.review',
+    matches: normalized => /\b(revis\w*|resum\w*)\b.*\b(estudos?|aprendizado|revisao espacada)\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const match = /(?:sobre|de)\s+([a-zA-Z0-9À-ÿ _-]{2,80})[?!.]*$/i.exec(clean);
+      const topic = match?.[1]?.trim();
+      return topic && !/^estudos?$/i.test(topic) ? { topic } : {};
+    },
+  },
+  {
+    toolName: 'study.plan',
+    matches: normalized => /\b(?:criar|gerar|montar)\s+(?:uma?\s+)?trilha\s+de\s+estudos?\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const match = /trilha\s+de\s+estudos?\s*(?:sobre|de|para)?\s*(.+)$/i.exec(clean);
+      return { topic: (match?.[1]?.trim() || clean).slice(0, 160) };
+    },
+  },
+  {
+    toolName: 'document.draft',
+    matches: normalized => /\b(?:criar|gerar|montar)\s+(?:uma?\s+)?(?:rascunho|documento|nota|checklist|adr)\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const norm = normalizeText(clean);
+      const format = /\bchecklist\b/.test(norm)
+        ? 'checklist'
+        : (/\badr\b/.test(norm) ? 'adr' : (/\bresumo\b/.test(norm) ? 'summary' : 'note'));
+      const match = /(?:rascunho|documento|nota|checklist|adr)\s*(?:sobre|de|para|com titulo)?\s*(.+)$/i.exec(clean);
+      return {
+        title: (match?.[1]?.trim() || clean).slice(0, 180),
+        format,
+      };
+    },
+  },
+  {
+    toolName: 'code.inspect',
+    matches: normalized => /\b(?:inspecion\w*|ler|ver|mostr\w*)\b.*\b(?:src\/|docs\/|skills\/|package\.json|server\.mjs)\b/.test(normalized),
+    buildArgs: message => {
+      const pathMatch = String(message ?? '').match(/\b((?:src|docs|skills|tests)\/[a-zA-Z0-9._/-]+|package\.json|server\.mjs)\b/);
+      return { path: pathMatch ? pathMatch[1] : 'package.json' };
+    },
+  },
+  {
+    toolName: 'code.search',
+    matches: normalized => /\b(?:busc\w*|procur\w*|pesquis\w*)\b.*\b(?:codigo|src\/|docs\/|skills\/)\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const match = /(?:por|sobre|termo|simbolo)\s+([a-zA-Z0-9_.-]{2,80})$/i.exec(clean);
+      return { query: (match?.[1] || clean).slice(0, 80) };
+    },
+  },
+  {
+    toolName: 'architect.blueprint',
+    matches: normalized => /\b(?:projet\w*|desenh\w*|blueprint)\b.*\bskill\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const match = /skill\s*(?:de|para|chamada)?\s*(.+)$/i.exec(clean);
+      const name = (match?.[1]?.trim() || 'Nova Skill').slice(0, 60);
+      return {
+        name,
+        description: `Skill projetada para ${name}.`,
+      };
     },
   },
 ]);

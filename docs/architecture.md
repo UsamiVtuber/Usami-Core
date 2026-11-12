@@ -237,6 +237,12 @@ mesmo drawer (`ActiveDrawer::Skills`) com as abas **Permissões**,
 único (sem expor tokens), respeito a DND (`23:30–08:30`) e throttle (`unansweredCount`),
 e indicador discreto no botão `#top-skills-btn`.
 
+As **Skills locais da Fase 3** estendem o catálogo com 4 pacotes versionados em `skills/` publicados no startup em `data/skills/` e ligados ao `tool-registry` e `agent-core`:
+- **Study Companion** (`skills/study-companion/`, `src/study-companion-skill.js`): `study.plan` (nível 2) e `study.review` (nível 1), integrando memória semântica, memória operacional e Task Planner.
+- **Document Creator** (`skills/document-creator/`, `src/document-creator-skill.js`): `document.draft` (nível 1) e `document.write` (nível 4, exige confirmação humana S5), com política estrita de escrita em `dataDir/documents/` (sem traversal nem symlinks).
+- **Code Inspector** (`skills/code-inspector/`, `src/code-inspector-skill.js`): `code.inspect` e `code.search` (nível 1, somente leitura em allowlist `src/`, `skills/`, `docs/`, `tests/`, `package.json`, `server.mjs`, com redação de segredos e bloqueio de `.env`, `data/` e `vault/`).
+- **Skill Architect** (`skills/skill-architect/`, `src/skill-architect-skill.js`): `architect.blueprint` (nível 1, projeta manifestos `usami.agent.skill.v1` validados) e `architect.propose` (nível 2, registra propostas para pacotes em `data/skills/<id>/` via `skill-manager`).
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
