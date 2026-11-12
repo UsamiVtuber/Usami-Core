@@ -50,6 +50,7 @@ export const GIT_ASSISTANT_TOOLS = Object.freeze([
   'github.pr',
   'github.issue',
   'code.propose',
+  'code.proposals',
 ]);
 
 const GITHUB_API_BASE = 'https://api.github.com';
@@ -677,6 +678,43 @@ export function createGitAssistantTools({
     },
   };
 
-  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool, proposeTool];
+  const proposalsListTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'code.proposals',
+    version: '1.0.0',
+    description: 'Consulta as propostas de código registradas pela Usami para os Code Agents (Antigravity) e GitHub.',
+    origin: 'skill',
+    permissionLevel: 1,
+    timeoutMs: 10000,
+    parameters: [
+      { name: 'status', type: 'string', required: false, description: 'Filtrar por status: pending, in_progress, completed, rejected ou all.' },
+      { name: 'limit', type: 'number', required: false, description: 'Número máximo de propostas a listar (padrão: 5).' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === GIT_ASSISTANT_SCHEMA
+        && Array.isArray(result.proposals);
+    },
+    async execute(args = {}) {
+      if (codeBridge && typeof codeBridge.listProposals === 'function') {
+        const list = codeBridge.listProposals({ status: args.status || 'all', limit: args.limit || 5 });
+        return {
+          ok: true,
+          schema: GIT_ASSISTANT_SCHEMA,
+          proposals: list,
+          count: list.length,
+        };
+      }
+      return {
+        ok: true,
+        schema: GIT_ASSISTANT_SCHEMA,
+        proposals: [],
+        count: 0,
+      };
+    },
+  };
+
+  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool, proposeTool, proposalsListTool];
 }
 

@@ -16,7 +16,8 @@
     "github.repos",
     "github.pr",
     "github.issue",
-    "code.propose"
+    "code.propose",
+    "code.proposals"
   ],
   "permissions": [1, 3, 4],
   "dependencies": [],

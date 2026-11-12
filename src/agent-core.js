@@ -35,6 +35,7 @@ const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|re
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
 const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo|no\s+repositorio)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b/;
 const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|sugest\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|antigravity))\b/i;
+const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b/i;
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta))\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local)\b/;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
 
@@ -61,6 +62,7 @@ const OPERATIONAL_PATTERNS = [
   GITHUB_REPOS_RE,
   GITHUB_ISSUE_RE,
   CODE_PROPOSE_RE,
+  CODE_PROPOSALS_QUERY_RE,
   GIT_STATUS_RE,
   CALENDAR_CREATE_RE,
   CALENDAR_LIST_RE,
@@ -266,12 +268,12 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       const titleMatch = /\b(?:evento|compromisso|chamada|reuniao)?\s*["“']([^"”']+)["”']/i.exec(clean)
         || /\b(?:evento|compromisso)\s+([A-Za-z0-9À-ÿ _-]+?)(?:\s+(?:pra|para|hoje|amanha|as|\d{1,2}:))/i.exec(clean);
       const summary = (titleMatch?.[1]?.trim() || clean.replace(/^(?:(?:ok+|por favor|adiciona|marca|cria|agenda)[,\s]+)*/i, '')).slice(0, 80);
-      
+
       const now = new Date();
       const isTomorrow = /\bamanha\b/i.test(clean);
       const targetDate = new Date(now);
       if (isTomorrow) targetDate.setDate(targetDate.getDate() + 1);
-      
+
       const timeMatch = /\b(?:as|às)?\s*(\d{1,2})(?::(\d{2}))?\b/i.exec(clean);
       if (timeMatch) {
         const hours = parseInt(timeMatch[1], 10);
@@ -280,13 +282,13 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       } else {
         targetDate.setHours(targetDate.getHours() + 1, 0, 0, 0);
       }
-      
+
       const durationMins = /\bmeia\s+hora\b/i.test(clean)
         ? 30
         : (/\b(\d+)\s*(?:minutos?|min)\b/i.exec(clean) ? parseInt(/\b(\d+)\s*(?:minutos?|min)\b/i.exec(clean)[1], 10) : 60);
-      
+
       const endDate = new Date(targetDate.getTime() + durationMins * 60_000);
-      
+
       return {
         summary: summary || 'Novo evento',
         start: targetDate.toISOString(),
@@ -408,6 +410,11 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         files: [],
       };
     },
+  },
+  {
+    toolName: 'code.proposals',
+    matches: normalized => CODE_PROPOSALS_QUERY_RE.test(normalized),
+    buildArgs: () => ({ status: 'all', limit: 5 }),
   },
   {
     toolName: 'github.issue',
@@ -1118,6 +1125,12 @@ export function formatExecutedTurnFallbackReply(turn) {
       return `Nenhum Code Agent online no momento. Abri a issue #${r.issue?.number || r.proposal?.issueNumber} no GitHub com a tag [usami-proposal] para ser revisada!`;
     }
     return `Registrei a proposta "${r.proposal?.title || 'de código'}" com sucesso!`;
+  }
+  if (turn.tool === 'code.proposals' && Array.isArray(r.proposals)) {
+    const list = r.proposals.slice(0, 3).map(p => `"${p.title}" (${p.status}, via ${p.routedTo})`);
+    return list.length
+      ? `As propostas registradas são: ${list.join('; ')}.`
+      : 'Não encontrei nenhuma proposta de código pendente ou enviada recentemente.';
   }
   if (typeof r.summary === 'string' && r.summary.trim()) {
     return redactSecrets(r.summary).slice(0, 210);
