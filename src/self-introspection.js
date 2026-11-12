@@ -29,12 +29,15 @@ const ALLOWED_MODULE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:js|mjs|jsx|ts)$/;
 const FORBIDDEN_PATH_SEGMENT_RE = /(?:^|\/)(?:\.env(?:\..*)?|\.git|vault|data|tmp|secrets?|credentials?|keys?\.env)(?:\/|$)/i;
 
 const SECRET_PATTERNS = Object.freeze([
-  /\bsk-(?:or-)?[a-zA-Z0-9_-]{8,}\b/g,
+  /\bsk-(?:or-|tinyfish-)?[a-zA-Z0-9_-]{8,}\b/gi,
+  /\bfc-[a-zA-Z0-9_-]{8,}\b/gi,
   /\bnvapi-[a-zA-Z0-9_-]{8,}\b/gi,
   /\b(?:ghp|gho|ghu|ghs)_[a-zA-Z0-9]{10,}\b/g,
   /\bgithub_pat_[a-zA-Z0-9_]{12,}\b/g,
+  /\bya29\.[a-zA-Z0-9._-]{12,}\b/g,
+  /\b1\/\/[a-zA-Z0-9._-]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._-]{8,}\b/gi,
-  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|GITHUB_TOKEN|GH_TOKEN|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
+  /\b(?:USAMI_API_TOKEN|OPENROUTER_API_KEY|NVIDIA_API_KEY|ELEVENLABS_API_KEY|GEMINI_API_KEY|PLANE_API_KEY|GITHUB_TOKEN|GH_TOKEN|TINYFISH_API_KEY|FIRECRAWL_API_KEY|PLUGGY_API_KEY|PLUGGY_CLIENT_SECRET|BELVO_SECRET_PASSWORD|GOOGLE_CLIENT_SECRET|GOOGLE_REFRESH_TOKEN|GOOGLE_ACCESS_TOKEN|API_KEY|SECRET|PASSWORD|ACCESS_TOKEN)\s*[:=]\s*\S+/gi,
   /\bx-usami-token\s*[:=]\s*\S+/gi,
 ]);
 
@@ -419,6 +422,7 @@ export function formatSelfAwarenessPrompt({
   snapshot,
   gitStatus = null,
   githubConfigured = false,
+  integrationsStatus = null,
 } = {}) {
   if (!snapshot || typeof snapshot !== 'object') return '';
   const pkgName = String(snapshot.runtime?.name || 'usami');
@@ -427,15 +431,24 @@ export function formatSelfAwarenessPrompt({
   const activeTools = Array.isArray(snapshot.tools)
     ? snapshot.tools.filter(t => t.active).map(t => t.name)
     : [];
-  const activeSkills = Array.isArray(snapshot.skills)
-    ? snapshot.skills.filter(s => s.activation?.canActivate || s.state === 'active').map(s => s.id)
+  const activeSkillEntries = Array.isArray(snapshot.skills)
+    ? snapshot.skills.filter(s => s.activation?.canActivate || s.state === 'active')
     : [];
+  const activeSkillIds = activeSkillEntries.map(s => s.id);
 
   const lines = [
     `Runtime: ${pkgName} v${pkgVer} (${modulesCount} módulos em src/, código inspecionável em usami/ e usami-desktop/ via allowlist).`,
-    `Skills prontas/ativas (${activeSkills.length}): ${activeSkills.join(', ') || 'nenhuma'}.`,
-    `Ferramentas ativas (${activeTools.length}): ${activeTools.slice(0, 28).join(', ')}${activeTools.length > 28 ? ', ...' : ''}.`,
+    `Skills prontas/ativas (${activeSkillEntries.length}): ${activeSkillIds.join(', ') || 'nenhuma'}.`,
   ];
+
+  if (activeSkillEntries.length > 0) {
+    for (const skill of activeSkillEntries) {
+      const desc = redactSecrets(String(skill.description || '').replace(/\s+/g, ' ').trim()).slice(0, 140);
+      lines.push(`- ${skill.id}${desc ? `: ${desc}` : ''}`);
+    }
+  }
+
+  lines.push(`Ferramentas ativas (${activeTools.length}): ${activeTools.join(', ') || 'nenhuma'}.`);
 
   if (gitStatus && typeof gitStatus === 'object') {
     const headHash = gitStatus.head?.hash ? ` (${gitStatus.head.hash}: ${String(gitStatus.head.subject || '').slice(0, 70)})` : '';
@@ -443,7 +456,21 @@ export function formatSelfAwarenessPrompt({
     lines.push(`Git local (${gitStatus.target || 'usami'}): branch ${gitStatus.branch || 'HEAD'}${headHash}; ${dirtyCount} alteração(ões) pendente(s).`);
   }
 
-  lines.push(`GitHub API (GITHUB_TOKEN): ${githubConfigured ? 'configurada' : 'não configurada (falha fechado até definir no .env)'}.`);
+  const ghReady = Boolean(integrationsStatus?.github ?? githubConfigured);
+  lines.push(`GitHub API (GITHUB_TOKEN): ${ghReady ? 'configurada' : 'não configurada (falha fechado até definir no .env)'}.`);
+
+  if (integrationsStatus && typeof integrationsStatus === 'object') {
+    const statusLabel = flag => (flag ? 'pronta' : 'não configurada');
+    lines.push(
+      'Integrações externas (.env): '
+      + `Google (Calendar/Gmail)=${statusLabel(integrationsStatus.google)}, `
+      + `Open Finance (Pluggy/Belvo)=${statusLabel(integrationsStatus.openFinance)}, `
+      + `Pesquisa Web (TinyFish/Firecrawl)=${statusLabel(integrationsStatus.research)}, `
+      + `GitHub API=${statusLabel(ghReady)}.`,
+    );
+  }
+
+  lines.push('Uso das skills no chat: pedidos operacionais seguros (nível 1-3: agenda, e-mail, Open Finance, pesquisa web, código, Git, estudos, documentos, briefing) são executados antes da sua resposta; ações críticas (nível 4: commit, push, PR, envio de e-mail, criar evento) exigem confirmação humana.');
   lines.push('Regra: você conhece sua arquitetura real acima e nunca deve inventar arquivos, segredos ou tokens.');
 
   return redactSecrets(lines.join('\n'));
