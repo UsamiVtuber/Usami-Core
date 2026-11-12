@@ -41,6 +41,12 @@ const OPERATIONAL_PATTERNS = [
   /\b(?:criar|gerar|montar)\s+(?:uma?\s+)?(?:trilha\s+de\s+estudos?|rascunho|documento|nota|checklist|adr)\b/,
   /\b(?:inspecion\w*|ler|ver|mostr\w*|busc\w*|procur\w*)\b.*\b(?:arquivo|codigo|src\/|docs\/|skills\/)\b/,
   /\b(?:projet\w*|desenh\w*|blueprint)\b.*\bskill\b/,
+  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:google calendar|calendario|eventos? da agenda)\b/,
+  /\b(?:list\w*|mostr\w*|ver|checar|buscar)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/,
+  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:contas?|saldos?|open\s*finance)\b/,
+  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:transacoes|extrato|gastos)\b/,
+  /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b/,
+  /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -122,7 +128,7 @@ export function classifyDeterministic(message, { toolNames = [] } = {}) {
 export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   {
     toolName: 'memory.search',
-    matches: normalized => (
+    matches: normalized => !/\b(?:na\s+web|na\s+internet|online|tinyfish|firecrawl)\b/.test(normalized) && (
       /\b(busca\w*|procur\w*|pesquis\w*|consult\w*|lembra\w*)\b.*\b(memoria|fatos|historico|resumos?|sobre|eu)\b/.test(normalized)
       || /\bo que (?:voce|vc|tu) (?:sabe|lembra)\b/.test(normalized)
     ),
@@ -222,6 +228,73 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       return {
         name,
         description: `Skill projetada para ${name}.`,
+      };
+    },
+  },
+  {
+    toolName: 'calendar.list',
+    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:google calendar|calendario|eventos? da agenda)\b/.test(normalized),
+    buildArgs: message => {
+      const queryMatch = /\bsobre\s+(.+?)$/i.exec(collapseText(message).replace(/[?!.]+$/, ''));
+      const args = { maxResults: 10 };
+      if (queryMatch?.[1]) args.query = queryMatch[1].trim().slice(0, 120);
+      return args;
+    },
+  },
+  {
+    toolName: 'email.list',
+    matches: normalized => /\b(?:list\w*|mostr\w*|ver|checar|buscar)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/.test(normalized),
+    buildArgs: message => {
+      const queryMatch = /\b(?:de|sobre|com)\s+(.+?)$/i.exec(collapseText(message).replace(/[?!.]+$/, ''));
+      const args = { maxResults: 10 };
+      if (queryMatch?.[1]) args.query = queryMatch[1].trim().slice(0, 120);
+      return args;
+    },
+  },
+  {
+    toolName: 'finance.accounts',
+    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:contas?|saldos?|open\s*finance)\b/.test(normalized),
+    buildArgs: () => ({}),
+  },
+  {
+    toolName: 'finance.transactions',
+    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:transacoes|extrato|gastos)\b/.test(normalized),
+    buildArgs: () => ({ limit: 20 }),
+  },
+  {
+    toolName: 'research.search',
+    matches: normalized => /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b/.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
+      const provider = /\btinyfish\b/i.test(clean) && !/\bfirecrawl\b/i.test(clean)
+        ? 'tinyfish'
+        : /\bfirecrawl\b/i.test(clean) && !/\btinyfish\b/i.test(clean)
+          ? 'firecrawl'
+          : 'both';
+      const query = clean
+        .replace(/^(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\s*(?:sobre|por|de)?\s*/i, '')
+        .trim() || clean;
+      return {
+        query: query.slice(0, 200),
+        provider,
+        limit: 5,
+      };
+    },
+  },
+  {
+    toolName: 'research.fetch',
+    matches: normalized => /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/.test(normalized),
+    buildArgs: message => {
+      const urlMatch = /https?:\/\/\S+/.exec(collapseText(message));
+      const url = (urlMatch?.[0] || '').replace(/[),.;!?]+$/, '');
+      const provider = /\btinyfish\b/i.test(message)
+        ? 'tinyfish'
+        : /\bfirecrawl\b/i.test(message)
+          ? 'firecrawl'
+          : 'auto';
+      return {
+        url,
+        provider,
       };
     },
   },

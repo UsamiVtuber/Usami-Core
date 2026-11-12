@@ -243,6 +243,12 @@ As **Skills locais da Fase 3** estendem o catálogo com 4 pacotes versionados em
 - **Code Inspector** (`skills/code-inspector/`, `src/code-inspector-skill.js`): `code.inspect` e `code.search` (nível 1, somente leitura em allowlist `src/`, `skills/`, `docs/`, `tests/`, `package.json`, `server.mjs`, com redação de segredos e bloqueio de `.env`, `data/` e `vault/`).
 - **Skill Architect** (`skills/skill-architect/`, `src/skill-architect-skill.js`): `architect.blueprint` (nível 1, projeta manifestos `usami.agent.skill.v1` validados) e `architect.propose` (nível 2, registra propostas para pacotes em `data/skills/<id>/` via `skill-manager`).
 
+As **Skills externas da Fase 3** completam o roadmap de ferramentas conectadas (falham fechado quando sem credenciais no `.env` e nunca vazam tokens):
+- **Calendar Manager** (`skills/calendar-manager/`, `src/calendar-manager-skill.js`, `src/google-auth.js`): Google Calendar API v3 com `calendar.list` (nível 3), `calendar.create` (nível 3) e `calendar.delete` (nível 4, confirmação S5). Requer `GOOGLE_ACCESS_TOKEN` ou (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`).
+- **Email Assistant** (`skills/email-assistant/`, `src/email-assistant-skill.js`, `src/google-auth.js`): Gmail API v1 com `email.list` (nível 3), `email.draft` (nível 3) e `email.send` (nível 4, confirmação S5). Usa as mesmas credenciais OAuth2 Google.
+- **Finance Observer** (`skills/finance-observer/`, `src/finance-observer-skill.js`): Open Finance Brasil somente leitura (`finance.accounts` e `finance.transactions`, nível 3), compatível com agregadores Pluggy (`PLUGGY_CLIENT_ID`, `PLUGGY_CLIENT_SECRET`, `PLUGGY_ITEM_ID` ou `PLUGGY_API_KEY`) e Belvo (`BELVO_SECRET_ID`, `BELVO_SECRET_PASSWORD`, `BELVO_LINK_ID`, `BELVO_BASE_URL` opcional). `OPENFINANCE_PROVIDER` (`auto` | `pluggy` | `belvo`) seleciona o provedor.
+- **Research Agent** (`skills/research-agent/`, `src/research-agent-skill.js`): pesquisa web e extração Markdown via TinyFish (`TINYFISH_API_KEY`) e Firecrawl (`FIRECRAWL_API_KEY`), com opção de busca local no RAG do vault em `research.search` e proteção SSRF em `research.fetch` (nível 3).
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor

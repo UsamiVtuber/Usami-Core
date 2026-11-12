@@ -35,6 +35,10 @@ import { createStudyCompanionTools, publishStudyCompanionSkill } from './src/stu
 import { createDocumentCreatorTools, publishDocumentCreatorSkill } from './src/document-creator-skill.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from './src/code-inspector-skill.js';
 import { createSkillArchitectTools, publishSkillArchitectSkill } from './src/skill-architect-skill.js';
+import { createCalendarManagerTools, publishCalendarManagerSkill } from './src/calendar-manager-skill.js';
+import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/email-assistant-skill.js';
+import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/finance-observer-skill.js';
+import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
@@ -312,12 +316,18 @@ if (!briefingRegistration.ok) {
   console.error('Aviso: ferramenta briefing.build não registrada:', briefingRegistration.errors.join('; '));
 }
 
-// Skills locais da Fase 3: Study Companion, Document Creator, Code Inspector e Skill Architect.
+// Skills locais e externas da Fase 3: Study Companion, Document Creator,
+// Code Inspector, Skill Architect, Calendar Manager, Email Assistant,
+// Finance Observer e Research Agent.
 for (const [label, publishFn] of [
   ['study-companion', publishStudyCompanionSkill],
   ['document-creator', publishDocumentCreatorSkill],
   ['code-inspector', publishCodeInspectorSkill],
   ['skill-architect', publishSkillArchitectSkill],
+  ['calendar-manager', publishCalendarManagerSkill],
+  ['email-assistant', publishEmailAssistantSkill],
+  ['finance-observer', publishFinanceObserverSkill],
+  ['research-agent', publishResearchAgentSkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -334,6 +344,15 @@ for (const skillTool of [
   }),
   ...createDocumentCreatorTools({ dataDir: resolveDataDir() }),
   ...createCodeInspectorTools(),
+  ...createCalendarManagerTools(),
+  ...createEmailAssistantTools(),
+  ...createFinanceObserverTools(),
+  ...createResearchAgentTools({
+    vaultSearch: async () => {
+      const ctx = await readRagContext({ maxFiles: 3, maxCharsPerFile: 500, maxTotalChars: 1500 });
+      return ctx ? [ctx] : [];
+    },
+  }),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {

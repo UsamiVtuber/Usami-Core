@@ -321,7 +321,7 @@ export function createSelfIntrospection({
     if (!hasNamespace('finance')) {
       limitations.push('Finanças externas (Finance Observer) não conectadas.');
     }
-    if (!hasNamespace('web')) {
+    if (!hasNamespace('web') && !hasNamespace('research')) {
       limitations.push('Busca web agêntica não integrada.');
     }
 
