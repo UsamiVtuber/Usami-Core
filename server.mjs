@@ -42,6 +42,7 @@ import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
 import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique, summarizeDay } from './src/llm-router.js';
 import { summarizePendingDays } from './src/memory-summaries.js';
+import { classifyFactDurability, consolidateFacts } from './src/memory-consolidation.js';
 import { readRagContext, resolveVaultDir } from './src/rag.js';
 import { createVaultIndex } from './src/vault-index.js';
 import { createTechniqueStore, readIngestedFicha } from './src/technique-store.js';
@@ -114,8 +115,6 @@ const HEDGE_AFTER_MS = (() => {
 
 const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http://localhost:5173']);
 
-// Heurística do "remember": sinais de fato durável → núcleo; o resto é recente.
-const DURABLE_FACT = /\b(anivers[áa]rio|gosta|tem|nome)\b|\b\d{1,2}\/\d{1,2}\b/i;
 
 // Fila de comandos vindos do n8n (n8n → Usami) e do refino de animação do
 // próprio turno. O cliente (Usami.jsx) consome via GET /api/n8n/commands com
@@ -1001,8 +1000,11 @@ export function createChatHandler(options = {}) {
       try {
         const remember = parsed.remember;
         if (remember) {
-          if (DURABLE_FACT.test(remember.fact)) memoryStore.addCoreFact(remember.fact, remember.section);
-          else memoryStore.addRecentFact(remember.fact, 7, remember.section);
+          if (classifyFactDurability(remember.fact, remember.section) === 'core') {
+            memoryStore.addCoreFact(remember.fact, remember.section);
+          } else {
+            memoryStore.addRecentFact(remember.fact, 7, remember.section);
+          }
         }
         const turnTimestamp = new Date().toISOString();
         const historyReply = stripLeakedJson(parsed.reply)
@@ -1040,6 +1042,13 @@ export function createChatHandler(options = {}) {
         // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
         // sem relançar para nunca derrubar o turno que já foi respondido.
         console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
+      });
+
+      void consolidateFacts({
+        store: memoryStore,
+        today,
+      }).catch(error => {
+        console.warn('[memoria] consolidação de fatos falhou: ' + (error?.message || error));
       });
 
       const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
