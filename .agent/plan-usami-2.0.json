@@ -235,6 +235,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "Gerar o briefing do dia lista apenas dados reais e marca o que está pendente.",
       "scopeNotes": "Sem integrações externas; não inventar compromissos quando a base está vazia.",
+      "status": "done",
       "blockedBy": ["S10", "S3"],
       "techGuidance": "Saída determinística primeiro para o teste não depender de rede; o teto de ~220 caracteres vale para o chat, não para o briefing."
     },
