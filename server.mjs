@@ -41,7 +41,7 @@ import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/f
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
-import { createAgentCore } from './src/agent-core.js';
+import { createAgentCore, formatAgentTurnPromptContext } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -780,6 +780,23 @@ export function createChatHandler(options = {}) {
       .catch(() => {})
       .finally(() => { gitRefreshInFlight = null; });
   };
+  const readIntegrationsStatus = () => {
+    if (options.integrationsStatus && typeof options.integrationsStatus === 'object') {
+      return options.integrationsStatus;
+    }
+    const github = typeof gitClient?.isGitHubConfigured === 'function' ? gitClient.isGitHubConfigured() : false;
+    const google = Boolean(
+      readEnvValue('GOOGLE_ACCESS_TOKEN')
+      || (readEnvValue('GOOGLE_CLIENT_ID') && readEnvValue('GOOGLE_CLIENT_SECRET') && readEnvValue('GOOGLE_REFRESH_TOKEN')),
+    );
+    const openFinance = Boolean(
+      readEnvValue('PLUGGY_API_KEY')
+      || (readEnvValue('PLUGGY_CLIENT_ID') && readEnvValue('PLUGGY_CLIENT_SECRET'))
+      || (readEnvValue('BELVO_SECRET_ID') && readEnvValue('BELVO_SECRET_PASSWORD')),
+    );
+    const research = Boolean(readEnvValue('TINYFISH_API_KEY') || readEnvValue('FIRECRAWL_API_KEY'));
+    return { google, openFinance, research, github };
+  };
   const readSelfAwareness = options.readSelfAwareness || (() => {
     if (options.includeSelfAwareness === false) return null;
     if (typeof options.selfAwareness === 'string') return options.selfAwareness;
@@ -791,10 +808,12 @@ export function createChatHandler(options = {}) {
       if (!cachedGitStatus || t >= cachedAwareness.expiresAt) {
         refreshGitStatusInBackground();
       }
+      const integrationsStatus = readIntegrationsStatus();
       const text = formatSelfAwarenessPrompt({
         snapshot,
         gitStatus: fallbackGit,
-        githubConfigured: typeof gitClient?.isGitHubConfigured === 'function' ? gitClient.isGitHubConfigured() : false,
+        githubConfigured: integrationsStatus.github,
+        integrationsStatus,
       });
       cachedAwareness = { expiresAt: t + 15_000, text };
       return text;
@@ -903,6 +922,28 @@ export function createChatHandler(options = {}) {
         spoken: parsedBody.input?.spoken === true,
         message: parsedBody.message,
       });
+
+      let agentTurn = null;
+      if (agentCore && options.syncAgentInChat !== false && typeof agentCore.runOperationalForChat === 'function') {
+        try {
+          const executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
+            timeoutMs: options.agentChatTimeoutMs ?? 8000,
+          });
+          if (executedTurn) {
+            agentTurn = {
+              id: executedTurn.id,
+              kind: executedTurn.intent?.kind || 'operational',
+              route: executedTurn.route || 'tool',
+              status: executedTurn.status,
+              ...(executedTurn.tool ? { tool: executedTurn.tool } : {}),
+            };
+            const toolPromptContext = formatAgentTurnPromptContext(executedTurn);
+            if (toolPromptContext) system += toolPromptContext;
+          }
+        } catch {
+          agentTurn = null;
+        }
+      }
 
       let parsed;
       let classification = null;
@@ -1188,7 +1229,9 @@ export function createChatHandler(options = {}) {
         + (hedged ? ' (hedge: OpenRouter entrou em paralelo)' : '')
         + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
-      const agentTurn = agentCore ? agentCore.dispatchAsync(parsedBody.message) : null;
+      if (!agentTurn && agentCore) {
+        agentTurn = agentCore.dispatchAsync(parsedBody.message);
+      }
 
       let moodPayload = null;
       try {

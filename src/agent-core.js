@@ -9,6 +9,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { AGENT_LIMITS, AGENT_SCHEMAS, INTENT_KINDS, validateIntent } from './agent-contracts.js';
+import { redactSecrets } from './self-introspection.js';
 
 export const DEFAULT_TURN_LIMIT = 50;
 export const DEFAULT_TURN_DEADLINE_MS = 40_000;
@@ -21,6 +22,13 @@ const normalizeText = value => collapseText(value)
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase();
+
+const CALENDAR_LIST_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|quais|tenho)\b.*\b(?:google calendar|calendario|eventos?(?:\s+da\s+agenda)?|compromissos?(?:\s+(?:na|da)\s+agenda|\s+hoje|\s+amanha|\s+essa\s+semana)?|minha\s+agenda)\b/;
+const EMAIL_LIST_RE = /\b(?:list\w*|mostr\w*|ver|chec\w*|ler|olh\w*|busc\w*|procur\w*|chegou|tem|tenho)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/;
+const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|qual|quanto)\b.*\b(?:contas?|saldos?|open\s*finance|pluggy|belvo)\b|\b(?:meu\s+saldo|quanto\s+tenho\s+(?:no\s+banco|na\s+conta|de\s+saldo))\b/;
+const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|consult\w*|chec\w*|olh\w*|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei)\b/;
+const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b/;
+const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/;
 
 const COMPLEX_PATTERNS = [
   /\b(planej\w*|cronograma|roteiro|plano|etapas?|passo a passo|checklist|decompor|roadmap)\b/,
@@ -45,12 +53,12 @@ const OPERATIONAL_PATTERNS = [
   /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?git\b|\bultimos?\s+commits?\b/,
   /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?git\b/,
   /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:repositorios?|github)\b/,
-  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:google calendar|calendario|eventos? da agenda)\b/,
-  /\b(?:list\w*|mostr\w*|ver|checar|buscar)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/,
-  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:contas?|saldos?|open\s*finance)\b/,
-  /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:transacoes|extrato|gastos)\b/,
-  /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b/,
-  /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/,
+  CALENDAR_LIST_RE,
+  EMAIL_LIST_RE,
+  FINANCE_ACCOUNTS_RE,
+  FINANCE_TX_RE,
+  RESEARCH_SEARCH_RE,
+  RESEARCH_FETCH_RE,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -240,7 +248,7 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'calendar.list',
-    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:google calendar|calendario|eventos? da agenda)\b/.test(normalized),
+    matches: normalized => CALENDAR_LIST_RE.test(normalized),
     buildArgs: message => {
       const queryMatch = /\bsobre\s+(.+?)$/i.exec(collapseText(message).replace(/[?!.]+$/, ''));
       const args = { maxResults: 10 };
@@ -250,7 +258,7 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'email.list',
-    matches: normalized => /\b(?:list\w*|mostr\w*|ver|checar|buscar)\b.*\b(?:e-?mails?|gmail|caixa de entrada)\b/.test(normalized),
+    matches: normalized => EMAIL_LIST_RE.test(normalized),
     buildArgs: message => {
       const queryMatch = /\b(?:de|sobre|com)\s+(.+?)$/i.exec(collapseText(message).replace(/[?!.]+$/, ''));
       const args = { maxResults: 10 };
@@ -260,17 +268,17 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'finance.accounts',
-    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:contas?|saldos?|open\s*finance)\b/.test(normalized),
+    matches: normalized => FINANCE_ACCOUNTS_RE.test(normalized),
     buildArgs: () => ({}),
   },
   {
     toolName: 'finance.transactions',
-    matches: normalized => /\b(?:list\w*|mostr\w*|ver|consult\w*)\b.*\b(?:transacoes|extrato|gastos)\b/.test(normalized),
+    matches: normalized => FINANCE_TX_RE.test(normalized),
     buildArgs: () => ({ limit: 20 }),
   },
   {
     toolName: 'research.search',
-    matches: normalized => /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b/.test(normalized),
+    matches: normalized => RESEARCH_SEARCH_RE.test(normalized),
     buildArgs: message => {
       const clean = collapseText(message).replace(/[?!.]+$/, '').trim();
       const provider = /\btinyfish\b/i.test(clean) && !/\bfirecrawl\b/i.test(clean)
@@ -290,7 +298,7 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'research.fetch',
-    matches: normalized => /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/.test(normalized),
+    matches: normalized => RESEARCH_FETCH_RE.test(normalized),
     buildArgs: message => {
       const urlMatch = /https?:\/\/\S+/.exec(collapseText(message));
       const url = (urlMatch?.[0] || '').replace(/[),.;!?]+$/, '');
@@ -672,6 +680,66 @@ export function createAgentCore({
     };
   }
 
+  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000 } = {}) {
+    const clean = collapseText(message);
+    if (!clean) return null;
+    const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
+    if (deterministic.kind !== 'operational') return null;
+
+    const resolved = resolveToolCall(clean, registry, toolMatchers, deterministic.matchedToolName || null, isToolActive);
+    if (!resolved) return null;
+
+    const spec = registry.get(resolved.toolName);
+    if (!spec || spec.permissionLevel > 3) return null;
+
+    const startedMs = now();
+    const turnId = `trn-${randomBytes(6).toString('hex')}`;
+    const intent = buildIntent({
+      kind: 'operational',
+      goal: clean,
+      confidence: deterministic.confidence,
+      origin: 'classifier',
+      now,
+    });
+
+    let execution;
+    let timerId = null;
+    try {
+      const timeoutPromise = new Promise(resolve => {
+        timerId = setTimeout(
+          () => resolve({ ok: false, errors: ['tempo limite da ferramenta atingido no chat'] }),
+          Math.max(500, timeoutMs),
+        );
+      });
+      execution = await Promise.race([
+        executor.execute(resolved.toolName, resolved.args, { origin }),
+        timeoutPromise,
+      ]);
+    } catch (error) {
+      execution = { ok: false, errors: [String(error?.message || error)] };
+    } finally {
+      if (timerId) clearTimeout(timerId);
+    }
+
+    const status = execution?.ok
+      ? 'executed'
+      : (execution?.denied ? 'awaiting_confirmation' : 'failed');
+    const turn = {
+      id: turnId,
+      intent,
+      route: 'tool',
+      status,
+      tool: resolved.toolName,
+      ...(execution?.record ? { execution: execution.record } : {}),
+      ...(execution?.ok ? { result: execution.result } : {}),
+      ...(!execution?.ok && execution?.errors ? { errors: execution.errors } : {}),
+      createdAt: intent.createdAt,
+      durationMs: Math.max(0, now() - startedMs),
+    };
+    recordTurn(turn);
+    return cloneTurn(turn);
+  }
+
   function listTurns({ limit = 20 } = {}) {
     const max = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), turnLimit) : 20;
     return turns.slice(-max).reverse().map(cloneTurn);
@@ -687,8 +755,27 @@ export function createAgentCore({
   return {
     classifyIntent,
     processTurn,
+    runOperationalForChat,
     dispatchAsync,
     listTurns,
     getTurn,
   };
+}
+
+export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
+  if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
+  if (turn.status === 'executed') {
+    let serialized = '';
+    try {
+      serialized = JSON.stringify(turn.result ?? {});
+    } catch {
+      serialized = String(turn.result ?? '');
+    }
+    const clean = redactSecrets(serialized).slice(0, maxChars);
+    return `\n\n=== RESULTADO DA SKILL EXECUTADA AGORA (${turn.tool}) ===\nDados reais obtidos:\n${clean}\nInstrução: responda diretamente usando esses dados reais obtidos agora (sem inventar números ou fatos ausentes), mantendo seu jeito natural e conciso (1 a 2 frases objetivas em "reply").`;
+  }
+  const errDetail = redactSecrets(
+    String(turn.execution?.reason || (Array.isArray(turn.errors) ? turn.errors.join('; ') : 'falha ao executar ferramenta')).slice(0, 300),
+  );
+  return `\n\n=== FALHA NA SKILL EXECUTADA AGORA (${turn.tool}) ===\nMotivo: ${errDetail}\nInstrução: seja honesta e diga ao usuário que tentou usar ${turn.tool}, mas ocorreu esse erro — nunca invente dados.`;
 }
