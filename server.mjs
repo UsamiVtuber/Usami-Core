@@ -41,7 +41,7 @@ import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/f
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
-import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply } from './src/agent-core.js';
+import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -76,6 +76,8 @@ import { analyzeMedia } from './src/media-analyzer.js';
 import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
 import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-paths.js';
 import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
+import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpan } from './src/telemetry.js';
+import { LanceMemoryStore } from './src/lancedb-store.js';
 
 // Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
 // e chamadores antigos; a implementação agora é o módulo puro de src/.
@@ -864,6 +866,12 @@ export function createChatHandler(options = {}) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
 
+    const chatTrace = startChatTrace({
+      input: parsedBody.message,
+      metadata: { endpoint: '/api/chat', spoken: Boolean(parsedBody.spoken) },
+      tags: ['usami-core', 'chat'],
+    });
+
     proactive?.markUserActivity();
     activeTurns += 1;
     if (activeTurns === 1) proactive?.setBusy(true);
@@ -911,6 +919,10 @@ export function createChatHandler(options = {}) {
         ragContext = null;
       }
       if (ragContext) {
+        recordRetrievalSpan(chatTrace, {
+          query: parsedBody.message,
+          results: [{ file: 'obsidian_vault', content: ragContext }],
+        });
         system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
       }
 
@@ -943,6 +955,11 @@ export function createChatHandler(options = {}) {
             };
             const toolPromptContext = formatAgentTurnPromptContext(executedTurn);
             if (toolPromptContext) system += toolPromptContext;
+            recordToolSpan(chatTrace, {
+              toolName: executedTurn.tool?.name || executedTurn.intent?.kind,
+              parameters: executedTurn.tool?.parameters,
+              result: executedTurn.status,
+            });
           }
         } catch {
           agentTurn = null;
@@ -1100,6 +1117,39 @@ export function createChatHandler(options = {}) {
               onHedge: () => { hedged = true; },
             })
             : await startNvidia();
+
+          if (parsed?.ok && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function' && isDeferredToolPromise(parsed.reply)) {
+            try {
+              const lateTurn = await agentCore.runOperationalForChat(parsed.reply, {
+                history: [
+                  ...todayHistory,
+                  { role: 'user', content: parsedBody.message },
+                  { role: 'assistant', content: parsed.reply },
+                ],
+                timeoutMs: options.agentChatTimeoutMs ?? 8000,
+              });
+              if (lateTurn) {
+                executedAgentTurn = lateTurn;
+                agentTurn = {
+                  id: lateTurn.id,
+                  kind: lateTurn.intent?.kind || 'operational',
+                  route: lateTurn.route || 'tool',
+                  status: lateTurn.status,
+                  ...(lateTurn.tool ? { tool: lateTurn.tool } : {}),
+                };
+                const toolPromptContext = formatAgentTurnPromptContext(lateTurn);
+                if (toolPromptContext && !turn.signal.aborted && !nvidiaAbort.signal.aborted) {
+                  system += toolPromptContext;
+                  const lateReply = await invokeNvidia(system, { temperature: 0.3, skipBlurt: true });
+                  if (lateReply?.ok && lateReply.reply) {
+                    parsed = lateReply;
+                  }
+                }
+              }
+            } catch {
+              // não bloqueia o fluxo principal
+            }
+          }
 
           // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
           // background e o refino chega pela fila de comandos. Nunca bloqueia a
@@ -1274,6 +1324,15 @@ export function createChatHandler(options = {}) {
       } catch {
         moodPayload = null;
       }
+
+      recordLlmGeneration(chatTrace, {
+        model: parsed.source,
+        prompt: parsedBody.message,
+        output: parsed.reply,
+        latencyMs: stageTimes.llm,
+      });
+      chatTrace.update({ output: parsed.reply });
+      chatTrace.end();
 
       return send(200, {
         reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
@@ -1623,6 +1682,48 @@ export function createMemoryHandler(options = {}) {
 
     if (req.method === 'GET' && req.url === '/api/memory') {
       return send(200, { ok: true, memory: memorySnapshot(store) });
+    }
+
+    if (req.method === 'POST' && req.url === '/api/memory/maintenance') {
+      const today = new Date().toISOString().slice(0, 10);
+      try {
+        await summarizePendingDays({
+          store,
+          today,
+          summarize: useNvidia() ? summarizeDay : undefined,
+        });
+      } catch (err) {
+        console.warn('[maintenance] summarizePendingDays falhou:', err?.message || err);
+      }
+
+      try {
+        await consolidateFacts({ store, today });
+      } catch (err) {
+        console.warn('[maintenance] consolidateFacts falhou:', err?.message || err);
+      }
+
+      try {
+        getVaultIndex().refresh();
+      } catch (err) {
+        console.warn('[maintenance] getVaultIndex refresh falhou:', err?.message || err);
+      }
+
+      let lanceDbCount = 0;
+      try {
+        const lanceStore = options.lanceStore || new LanceMemoryStore({ dataDir: resolveDataDir() });
+        await lanceStore.init();
+        lanceDbCount = await lanceStore.count();
+      } catch (err) {
+        console.warn('[maintenance] LanceDB check falhou:', err?.message || err);
+      }
+
+      return send(200, {
+        ok: true,
+        maintenanceAt: new Date().toISOString(),
+        today,
+        lanceDbChunks: lanceDbCount,
+        memory: memorySnapshot(store),
+      });
     }
 
     if (req.method !== 'POST' || req.url !== '/api/memory/forget') {
@@ -4102,7 +4203,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
     if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
     if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
-    if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
+    if (req.url === '/api/memory' || req.url === '/api/memory/forget' || req.url === '/api/memory/maintenance') return handleMemory(req, res);
     if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
     if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
     if (req.url === '/api/personality') return handlePersonality(req, res);
