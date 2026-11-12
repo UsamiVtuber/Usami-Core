@@ -253,6 +253,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "A usuária vê as skills por estado e o histórico real de execuções, sem placeholders.",
       "scopeNotes": "Sem novo design system; reutilizar tokens e anatomia de painel. Sem dados inventados em estado vazio.",
+      "status": "done",
       "blockedBy": ["S7", "S8", "S4"],
       "techGuidance": "Seguir `Usami.jsx`/`BondPanel.jsx` para foco e fechamento mútuo dos drawers. Testar no navegador, não só no build."
     },

@@ -220,6 +220,13 @@ determinística sem inventar dados na base vazia e sem ficar presos ao teto de
 ~220 caracteres do chat; redação por LLM entra apenas como adapter opcional e
 injetável.
 
+A **Central de Skills e Histórico de Execuções** (S14) foi entregue no cliente
+nativo `usami-desktop/` (`src/agent_center.rs`, `src/api.rs`, `src/main.rs` via
+`ActiveDrawer::Skills` e botão `#top-skills-btn`), consumindo
+`GET /api/agent/skills`, `POST /api/agent/skills/:id/enable|disable` e
+`GET /api/agent/executions?limit=50` com exclusividade entre drawers e sem
+placeholders.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
