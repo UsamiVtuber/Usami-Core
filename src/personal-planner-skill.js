@@ -8,9 +8,7 @@
  * Tool Executor (S4) e pelo gate de permissões (S5) — sem acessar `data/` direto.
  */
 import { randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { publishSkillPackage } from './skill-package.js';
 import {
   AGENT_LIMITS,
   AGENT_SCHEMAS,
@@ -33,31 +31,9 @@ export const PLANNER_TOOLS = Object.freeze([
   'planner.schedule',
 ]);
 
-const BUNDLED_SKILL_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'skills',
-  PLANNER_SKILL_ID,
-);
-
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const stepId = () => `st-${randomBytes(6).toString('hex')}`;
 const truncate = (text, max) => (text.length <= max ? text : text.slice(0, max));
-
-function copyPlainDirectory(srcDir, destDir) {
-  mkdirSync(destDir, { recursive: true });
-  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
-    const srcPath = join(srcDir, entry.name);
-    const destPath = join(destDir, entry.name);
-    const stat = lstatSync(srcPath);
-    if (stat.isSymbolicLink()) continue;
-    if (stat.isDirectory()) {
-      copyPlainDirectory(srcPath, destPath);
-    } else if (stat.isFile()) {
-      writeFileSync(destPath, readFileSync(srcPath));
-    }
-  }
-}
 
 /**
  * Publica o pacote versionado `skills/personal-planner` dentro de `dataDir/skills`
@@ -66,21 +42,9 @@ function copyPlainDirectory(srcDir, destDir) {
  */
 export function publishPersonalPlannerSkill({
   dataDir,
-  bundledDir = BUNDLED_SKILL_DIR,
+  bundledDir,
 } = {}) {
-  if (!dataDir || typeof dataDir !== 'string') {
-    throw new Error('publishPersonalPlannerSkill: dataDir é obrigatório.');
-  }
-  const targetDir = join(dataDir, 'skills', PLANNER_SKILL_ID);
-  const targetManifest = join(targetDir, 'skill.json');
-  if (existsSync(targetManifest)) {
-    return { published: false, alreadyPresent: true, skillDir: targetDir };
-  }
-  if (!existsSync(join(bundledDir, 'skill.json'))) {
-    throw new Error(`publishPersonalPlannerSkill: pacote base ausente em ${bundledDir}`);
-  }
-  copyPlainDirectory(bundledDir, targetDir);
-  return { published: true, alreadyPresent: false, skillDir: targetDir };
+  return publishSkillPackage({ skillId: PLANNER_SKILL_ID, dataDir, bundledDir });
 }
 
 function buildPlanSteps({ prioritized, conflicts }) {

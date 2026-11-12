@@ -6,10 +6,8 @@
  * o briefing do dia a partir da memória operacional (S3), Planner (S6) e
  * execuções (S4) com template determinístico e redação LLM opcional/injetável.
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { AGENT_SCHEMAS } from './agent-contracts.js';
+import { publishSkillPackage } from './skill-package.js';
 import {
   BRIEFING_SCHEMA,
   buildDailyBriefing,
@@ -21,29 +19,7 @@ export { BRIEFING_SCHEMA, isValidCalendarDate };
 export const DAILY_BRIEFING_SKILL_ID = 'daily-briefing';
 export const DAILY_BRIEFING_TOOLS = Object.freeze(['briefing.build']);
 
-const BUNDLED_SKILL_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'skills',
-  DAILY_BRIEFING_SKILL_ID,
-);
-
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-
-function copyPlainDirectory(srcDir, destDir) {
-  mkdirSync(destDir, { recursive: true });
-  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
-    const srcPath = join(srcDir, entry.name);
-    const destPath = join(destDir, entry.name);
-    const stat = lstatSync(srcPath);
-    if (stat.isSymbolicLink()) continue;
-    if (stat.isDirectory()) {
-      copyPlainDirectory(srcPath, destPath);
-    } else if (stat.isFile()) {
-      writeFileSync(destPath, readFileSync(srcPath));
-    }
-  }
-}
 
 /**
  * Publica o pacote `skills/daily-briefing` em `dataDir/skills` apenas quando o
@@ -51,21 +27,9 @@ function copyPlainDirectory(srcDir, destDir) {
  */
 export function publishDailyBriefingSkill({
   dataDir,
-  bundledDir = BUNDLED_SKILL_DIR,
+  bundledDir,
 } = {}) {
-  if (!dataDir || typeof dataDir !== 'string') {
-    throw new Error('publishDailyBriefingSkill: dataDir é obrigatório.');
-  }
-  const targetDir = join(dataDir, 'skills', DAILY_BRIEFING_SKILL_ID);
-  const targetManifest = join(targetDir, 'skill.json');
-  if (existsSync(targetManifest)) {
-    return { published: false, alreadyPresent: true, skillDir: targetDir };
-  }
-  if (!existsSync(join(bundledDir, 'skill.json'))) {
-    throw new Error(`publishDailyBriefingSkill: pacote base ausente em ${bundledDir}`);
-  }
-  copyPlainDirectory(bundledDir, targetDir);
-  return { published: true, alreadyPresent: false, skillDir: targetDir };
+  return publishSkillPackage({ skillId: DAILY_BRIEFING_SKILL_ID, dataDir, bundledDir });
 }
 
 function readRecordsSafely(fn, fallback = []) {
