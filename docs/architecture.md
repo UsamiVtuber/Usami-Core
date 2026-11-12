@@ -178,6 +178,18 @@ permanece intacto (persona, hedge e latência do balão preservados): conversas
 normais saem idênticas, enquanto pedidos operacionais/complexos disparam em
 fire-and-forget pós-resposta e devolvem o campo opcional `agentTurn`.
 
+A primeira skill operacional da Fase A é o **Personal Planner** (S10), versionado
+em `skills/personal-planner/` (`skill.json`, `planner-core.mjs` e teste isolado
+próprio) e ligado ao runtime em `src/personal-planner-skill.js`. No startup do
+servidor, `publishPersonalPlannerSkill` copia o pacote para
+`data/skills/personal-planner/` se ausente (sem tocar `data/` nos testes) e
+registra as ferramentas `planner.upsert_task` (nível 2), `planner.prioritize`
+(nível 2) e `planner.schedule` (nível 3), todas com `verify()`. A skill consome
+exclusivamente `operational-memory-store` (S3) e `task-planner` (S6) via
+`tool-executor` (S4) e `permission-gate` (S5), priorizando pendências e
+apontando conflitos de horário; pedidos de organização semanal no `agent-core`
+acionam `planner.schedule` quando a skill está ativa.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor

@@ -23,6 +23,7 @@ import { CONFIRMATION_WORD, createPermissionGate } from './src/permission-gate.j
 import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseBriefingThreshold } from './src/task-planner.js';
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
+import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
@@ -251,6 +252,24 @@ try {
   console.error('Aviso: planner de tarefas indisponível:', error?.message || error);
 }
 
+// Skill Personal Planner (S10): publica manifesto versionado no diretório de
+// skills do runtime (sem tocar data/ em testes) e registra suas ferramentas
+// conectando S3 (memória operacional) e S6 (Task Planner) via S4/S5.
+try {
+  publishPersonalPlannerSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto personal-planner falhou:', error?.message || error);
+}
+for (const plannerTool of createPersonalPlannerTools({
+  operationalStore: installOperationalStore,
+  taskPlanner: installTaskPlanner,
+})) {
+  const registered = toolRegistry.register(plannerTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${plannerTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
 // Catálogo de Skills (data/skills/<id>/skill.json): descoberta somente leitura.
 // A ativação é derivada do estado do manifesto, do registry e das dependências;
 // o código da skill nunca é importado.
@@ -273,6 +292,7 @@ const installAgentCore = createAgentCore({
   registry: toolRegistry,
   executor: installToolExecutor,
   planner: installTaskPlanner,
+  skillCatalog: installSkillCatalog,
   turnDeadlineMs: TURN_DEADLINE_MS,
 });
 

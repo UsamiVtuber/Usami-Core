@@ -181,7 +181,7 @@ export function createTaskPlanner({
     return { summary, missingInfo, risks };
   }
 
-  function create({ goal, origin = 'user', replanOf } = {}) {
+  function create({ goal, origin = 'user', replanOf, steps, missingInfo, risks } = {}) {
     let existing = [];
     let nextVersion = 1;
     let id;
@@ -203,10 +203,21 @@ export function createTaskPlanner({
     }
 
     let generated;
-    try {
-      generated = generatePlan({ goal, planId: id, version: nextVersion, now: now() });
-    } catch (error) {
-      return { ok: false, errors: [`generatePlan: ${error?.message || error}`] };
+    if (steps !== undefined) {
+      if (!Array.isArray(steps)) {
+        return { ok: false, errors: ['steps: deve ser uma lista de passos'] };
+      }
+      generated = {
+        steps,
+        ...(missingInfo !== undefined ? { missingInfo } : {}),
+        ...(risks !== undefined ? { risks } : {}),
+      };
+    } else {
+      try {
+        generated = generatePlan({ goal, planId: id, version: nextVersion, now: now() });
+      } catch (error) {
+        return { ok: false, errors: [`generatePlan: ${error?.message || error}`] };
+      }
     }
     if (!isPlainObject(generated) || !Array.isArray(generated.steps)) {
       return { ok: false, errors: ['generatePlan: deve devolver { steps: [...] }'] };

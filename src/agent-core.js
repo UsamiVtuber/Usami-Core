@@ -32,7 +32,7 @@ const OPERATIONAL_PATTERNS = [
   /\b(bus(?:c|qu)\w*|procur\w*|pesquis\w*|consult\w*)\b.*\b(memoria|fatos|historico|resumos?)\b/,
   /\bo que (?:voce|vc|tu) (?:sabe|lembra)\b/,
   /\b(lembr\w*|record\w*)\b.*\b(te falei|eu disse|eu gosto|sobre mim|memoria)\b/,
-  /\b(list\w*|mostr\w*|quais|adicion\w*|cri\w*|anot\w*|registr\w*|mar(?:c|qu)\w*|atualiz\w*|conclu\w*)\b.*\b(tarefas?|pendencias?|compromissos?|projetos?|prazos?)\b/,
+  /\b(list\w*|mostr\w*|quais|adicion\w*|cri\w*|anot\w*|registr\w*|mar(?:c|qu)\w*|atualiz\w*|conclu\w*|prioriz\w*|orden\w*)\b.*\b(tarefas?|pendencias?|compromissos?|projetos?|prazos?|agenda)\b/,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -120,12 +120,19 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     ),
     buildArgs: message => ({ query: extractMemoryQuery(message) }),
   },
+  {
+    toolName: 'planner.prioritize',
+    matches: normalized => /\b(prioriz\w*|orden\w*)\b.*\b(tarefas?|pendencias?|compromissos?|agenda)\b/.test(normalized),
+    buildArgs: () => ({}),
+  },
 ]);
 
-function resolveToolCall(message, registry, toolMatchers, hintedToolName) {
+const isScheduleGoal = normalized => /\b(semana|agenda|cronograma|tarefas?|compromissos?|prioriz\w*|conflit\w*|rotina)\b/.test(normalized);
+
+function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
   const normalized = normalizeText(message);
 
-  if (hintedToolName && registry.has(hintedToolName)) {
+  if (hintedToolName && registry.has(hintedToolName) && isToolActive(hintedToolName)) {
     const matcher = toolMatchers.find(item => item.toolName === hintedToolName);
     if (matcher) return { toolName: hintedToolName, args: matcher.buildArgs(message) };
     const clean = collapseText(message).replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || collapseText(message);
@@ -138,7 +145,7 @@ function resolveToolCall(message, registry, toolMatchers, hintedToolName) {
   }
 
   for (const matcher of toolMatchers) {
-    if (!registry.has(matcher.toolName)) continue;
+    if (!registry.has(matcher.toolName) || !isToolActive(matcher.toolName)) continue;
     if (matcher.matches(normalized)) {
       return { toolName: matcher.toolName, args: matcher.buildArgs(message) };
     }
@@ -150,6 +157,7 @@ export function createAgentCore({
   registry,
   executor,
   planner,
+  skillCatalog = null,
   classifyWithLlm = null,
   toolMatchers = DEFAULT_TOOL_MATCHERS,
   turnDeadlineMs = DEFAULT_TURN_DEADLINE_MS,
@@ -165,6 +173,23 @@ export function createAgentCore({
   }
   if (!planner || typeof planner.create !== 'function') {
     throw new Error('createAgentCore: planner é obrigatório.');
+  }
+
+  function isToolActive(toolName) {
+    if (!registry.has(toolName)) return false;
+    if (!skillCatalog || typeof skillCatalog.list !== 'function' || typeof skillCatalog.get !== 'function') {
+      return true;
+    }
+    const items = skillCatalog.list();
+    for (const item of items) {
+      if (!item.valid) continue;
+      const detailed = skillCatalog.get(item.id);
+      const tools = detailed?.ok ? detailed.skill?.manifest?.tools : null;
+      if (Array.isArray(tools) && tools.includes(toolName)) {
+        return detailed.skill.activation?.canActivate === true;
+      }
+    }
+    return true;
   }
 
   const turns = [];
@@ -256,7 +281,7 @@ export function createAgentCore({
     }
 
     if (intent.kind === 'operational') {
-      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName);
+      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName, isToolActive);
       if (!resolved) {
         return {
           id: turnId,
@@ -282,6 +307,43 @@ export function createAgentCore({
         tool: resolved.toolName,
         ...(execution.record ? { execution: execution.record } : {}),
         ...(execution.ok ? { result: execution.result } : {}),
+        ...(!execution.ok && execution.errors ? { errors: execution.errors } : {}),
+        createdAt: intent.createdAt,
+        durationMs: Math.max(0, now() - startedMs),
+      };
+    }
+
+    if (isToolActive('planner.schedule') && isScheduleGoal(normalizeText(intent.goal || message))) {
+      const execution = await executor.execute(
+        'planner.schedule',
+        { goal: intent.goal },
+        { origin, confirmation },
+      );
+      if (execution.ok) {
+        return {
+          id: turnId,
+          intent,
+          route: 'plan',
+          status: 'planned',
+          tool: 'planner.schedule',
+          ...(execution.record ? { execution: execution.record } : {}),
+          ...(execution.result.plan ? { plan: execution.result.plan } : {}),
+          ...(execution.result.plan?.briefing ? { briefing: execution.result.plan.briefing } : {}),
+          schedule: execution.result.schedule,
+          conflicts: execution.result.conflicts,
+          tasks: execution.result.tasks,
+          summary: execution.result.summary,
+          createdAt: intent.createdAt,
+          durationMs: Math.max(0, now() - startedMs),
+        };
+      }
+      return {
+        id: turnId,
+        intent,
+        route: 'plan',
+        status: execution.denied ? 'denied' : 'failed',
+        tool: 'planner.schedule',
+        ...(execution.record ? { execution: execution.record } : {}),
         ...(!execution.ok && execution.errors ? { errors: execution.errors } : {}),
         createdAt: intent.createdAt,
         durationMs: Math.max(0, now() - startedMs),

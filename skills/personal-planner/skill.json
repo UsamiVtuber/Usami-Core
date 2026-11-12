@@ -1,0 +1,42 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "personal-planner",
+  "name": "Personal Planner",
+  "version": "1.0.0",
+  "description": "Organiza tarefas, compromissos e cronograma semanal na memória operacional local, priorizando pendências e apontando conflitos de horário.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "planner.upsert_task",
+    "planner.prioritize",
+    "planner.schedule"
+  ],
+  "permissions": [2, 3],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "goal",
+      "type": "string",
+      "required": false,
+      "description": "Objetivo ou contexto do cronograma."
+    },
+    {
+      "name": "from",
+      "type": "string",
+      "required": false,
+      "description": "Data inicial da janela (YYYY-MM-DD ou ISO-8601)."
+    },
+    {
+      "name": "to",
+      "type": "string",
+      "required": false,
+      "description": "Data final da janela (YYYY-MM-DD ou ISO-8601)."
+    }
+  ],
+  "instructions": "Gerencie tarefas e compromissos exclusivamente via memória operacional local e Planner Engine. Detecte conflitos de horário antes de confirmar o cronograma e devolva resumo verificável sem acessar agenda ou e-mail externos.",
+  "tests": {
+    "files": ["test/personal-planner.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
