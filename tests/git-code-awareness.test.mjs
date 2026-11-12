@@ -606,6 +606,30 @@ test('perguntas naturais sobre skills novas acionam self.describe sem truncar sk
   });
   registry.register({
     schema: AGENT_SCHEMAS.tool,
+    name: 'email.list',
+    version: '1.0.0',
+    description: 'Lista e-mails.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [{ name: 'maxResults', type: 'number', required: false }],
+    verify: () => true,
+    execute: () => ({ messages: [{ subject: 'Fatura' }] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'finance.accounts',
+    version: '1.0.0',
+    description: 'Contas bancárias.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [],
+    verify: () => true,
+    execute: () => ({ accounts: [{ name: 'Nubank', balance: 50 }] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
     name: 'memory.search',
     version: '1.0.0',
     description: 'Busca memória.',
@@ -970,6 +994,30 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
   });
   registry.register({
     schema: AGENT_SCHEMAS.tool,
+    name: 'email.list',
+    version: '1.0.0',
+    description: 'Lista e-mails.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [{ name: 'maxResults', type: 'number', required: false }],
+    verify: () => true,
+    execute: () => ({ messages: [{ subject: 'Fatura' }] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'finance.accounts',
+    version: '1.0.0',
+    description: 'Contas bancárias.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [],
+    verify: () => true,
+    execute: () => ({ accounts: [{ name: 'Nubank', balance: 50 }] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
     name: 'memory.search',
     version: '1.0.0',
     description: 'Busca na memória.',
@@ -1019,6 +1067,12 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
   });
   assert.equal(laterNewsFollowUp?.tool, 'research.search');
   assert.match(lastResearchQuery || '', /principais noticias de IA/i);
+
+  const multiTurn = await agentCore.runOperationalForChat('ve meus e-mails e tambem meu saldo bancario');
+  assert.ok(multiTurn);
+  assert.equal(multiTurn.status, 'executed');
+  assert.deepEqual(multiTurn.tools, ['email.list', 'finance.accounts']);
+  assert.equal(multiTurn.multi?.length, 2);
 
   const memFallback = formatExecutedTurnFallbackReply({
     status: 'executed',
