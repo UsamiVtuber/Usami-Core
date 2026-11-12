@@ -1,0 +1,42 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "skill-architect",
+  "name": "Skill Architect",
+  "version": "1.0.0",
+  "description": "Projeta manifestos de novas skills com validação de contrato, permissões e riscos, e registra propostas formais no Skill Manager (S8).",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "architect.blueprint",
+    "architect.propose"
+  ],
+  "permissions": [1, 2],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "id",
+      "type": "string",
+      "required": false,
+      "description": "Slug da skill a projetar ou propor."
+    },
+    {
+      "name": "name",
+      "type": "string",
+      "required": false,
+      "description": "Nome legível da skill."
+    },
+    {
+      "name": "description",
+      "type": "string",
+      "required": false,
+      "description": "Objetivo da skill."
+    }
+  ],
+  "instructions": "Use architect.blueprint para desenhar manifestos válidos sem gravar código arbitrário. Só use architect.propose para pacotes já presentes em data/skills/<id>/ seguindo o fluxo de confirmação humana S8.",
+  "tests": {
+    "files": ["test/skill-architect.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
