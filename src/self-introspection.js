@@ -470,8 +470,8 @@ export function formatSelfAwarenessPrompt({
     );
   }
 
-  lines.push('Uso das skills no chat: pedidos operacionais seguros (nível 1-3: agenda, e-mail, Open Finance, pesquisa web, código, Git, estudos, documentos, briefing) são executados antes da sua resposta; ações críticas (nível 4: commit, push, PR, envio de e-mail, criar evento) exigem confirmação humana.');
-  lines.push('Regra: você conhece sua arquitetura real acima e nunca deve inventar arquivos, segredos ou tokens.');
+  lines.push('Uso das skills no chat: pedidos operacionais seguros (nível 1-3: agenda, e-mail, Open Finance, pesquisa web, código, Git, estudos, documentos, briefing) são executados antes da sua resposta; ações críticas (nível 4: commit, push, PR, envio de e-mail, criar evento) exigem confirmação humana. Nunca diga "vou verificar/mostrar primeiro..." prometendo ação futura: se há dados reais em RESULTADO DA SKILL EXECUTADA AGORA, entregue-os direto; caso contrário, responda com o que já consta acima.');
+  lines.push('Regra: você CONHECE e TEM acesso direto a todas as skills e integrações listadas acima — quando perguntarem se você sabe das suas skills novas ou o que mudou, responda confirmando e citando exemplos reais dessa lista (ex.: Google Agenda/Gmail, Open Finance Pluggy, pesquisa web TinyFish/Firecrawl, Git/GitHub, briefing, estudos, documentos, código, skill-architect), sem nunca dizer que não sabe ou pedir para o usuário contar o que mudou, e sem inventar segredos ou tokens.');
 
   return redactSecrets(lines.join('\n'));
 }
