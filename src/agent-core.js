@@ -35,6 +35,8 @@ const OPERATIONAL_PATTERNS = [
   /\b(list\w*|mostr\w*|quais|adicion\w*|cri\w*|anot\w*|registr\w*|mar(?:c|qu)\w*|atualiz\w*|conclu\w*|prioriz\w*|orden\w*)\b.*\b(tarefas?|pendencias?|compromissos?|projetos?|prazos?|agenda)\b/,
   /\b(quais|lista\w*|mostr\w*|descrev\w*|resum\w*)\b.*\b(ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|erros?\s+recentes?)\b/,
   /\b(?:o que (?:voce|vc|tu) (?:tem|faz|consegue fazer)|suas? limitacoes?|seu status)\b/,
+  /\bbriefing\b/,
+  /\bresumo\s+(?:do\s+dia|diario)\b/,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -141,6 +143,17 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       if (/\bmodulos?\b/.test(normalized)) return { focus: 'modules' };
       if (/\bferramentas?\b/.test(normalized)) return { focus: 'tools' };
       return { focus: 'all' };
+    },
+  },
+  {
+    toolName: 'briefing.build',
+    matches: normalized => (
+      /\bbriefing\b/.test(normalized)
+      || /\bresumo\s+(?:do\s+dia|diario)\b/.test(normalized)
+    ),
+    buildArgs: message => {
+      const dateMatch = String(message ?? '').match(/\b(\d{4}-\d{2}-\d{2})\b/);
+      return dateMatch ? { date: dateMatch[1] } : {};
     },
   },
 ]);

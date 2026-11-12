@@ -209,6 +209,17 @@ throttle escalado por relevância. As rotas `GET /api/agent/suggestions` e
 `POST /api/agent/suggestions/:id/accept|dismiss` exigem token + Host/Origin;
 aceitar cria e aprova um plano em `task-planner` sem executar ferramentas.
 
+A skill operacional **Daily Briefing** (S13) vive em `skills/daily-briefing/` e
+`src/daily-briefing-skill.js`. Seu manifesto declara permissão nível 1
+(leitura local) e o teste isolado `test/daily-briefing.test.mjs`, expondo a
+ferramenta `briefing.build` (também acionável pelo `agent-core`) e a rota
+`GET /api/agent/briefing` com borda Host/Origin + token. Compromissos,
+tarefas prioritárias, pendências (itens atrasados/bloqueados, planos ativos e
+falhas recentes de execução) e projetos em andamento são montados de forma
+determinística sem inventar dados na base vazia e sem ficar presos ao teto de
+~220 caracteres do chat; redação por LLM entra apenas como adapter opcional e
+injetável.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor

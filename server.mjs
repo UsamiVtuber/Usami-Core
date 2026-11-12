@@ -25,6 +25,12 @@ import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseB
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
 import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
+import {
+  createDailyBriefingService,
+  createDailyBriefingTool,
+  isValidCalendarDate,
+  publishDailyBriefingSkill,
+} from './src/daily-briefing-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
@@ -286,6 +292,22 @@ for (const plannerTool of createPersonalPlannerTools({
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${plannerTool.name} não registrada:`, registered.errors.join('; '));
   }
+}
+
+// Skill Daily Briefing (S13): publica manifesto (nível 1) em dataDir/skills
+// quando ausente e registra a ferramenta somente leitura `briefing.build`.
+try {
+  publishDailyBriefingSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto daily-briefing falhou:', error?.message || error);
+}
+const briefingRegistration = toolRegistry.register(createDailyBriefingTool({
+  operationalStore: installOperationalStore,
+  taskPlanner: installTaskPlanner,
+  toolExecutor: installToolExecutor,
+}));
+if (!briefingRegistration.ok) {
+  console.error('Aviso: ferramenta briefing.build não registrada:', briefingRegistration.errors.join('; '));
 }
 
 // Catálogo de Skills (data/skills/<id>/skill.json): descoberta somente leitura.
@@ -2513,6 +2535,96 @@ export function createSuggestionsHandler(options = {}) {
   };
 }
 
+// --- Skill Daily Briefing (S13): GET /api/agent/briefing --------------------
+export function createBriefingHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const toolExecutor = options.toolExecutor || installToolExecutor;
+  const catalog = 'skillCatalog' in options ? options.skillCatalog : installSkillCatalog;
+  const useCustomService = Boolean(
+    options.briefingService
+    || ((options.operationalStore || options.taskPlanner || options.rewriteWithLlm || options.executionProvider || options.now)
+      && !options.toolExecutor),
+  );
+  const service = options.briefingService || createDailyBriefingService({
+    operationalStore: options.operationalStore || installOperationalStore,
+    taskPlanner: options.taskPlanner || installTaskPlanner,
+    toolExecutor,
+    executionProvider: options.executionProvider || null,
+    rewriteWithLlm: options.rewriteWithLlm || null,
+    now: options.now || (() => Date.now()),
+  });
+
+  return async function handleBriefing(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/briefing', 'http://127.0.0.1:8787');
+    if (req.method !== 'GET' || url.pathname !== '/api/agent/briefing') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const rawDate = url.searchParams.get('date');
+    if (rawDate !== null && !isValidCalendarDate(rawDate)) {
+      return send(400, { error: 'date inválido (use YYYY-MM-DD).' });
+    }
+
+    const rawUseLlm = url.searchParams.get('useLlm');
+    let useLlm = false;
+    if (rawUseLlm !== null) {
+      const lowered = rawUseLlm.trim().toLowerCase();
+      if (lowered === 'true' || lowered === '1') useLlm = true;
+      else if (lowered === 'false' || lowered === '0') useLlm = false;
+      else return send(400, { error: 'useLlm inválido (use true|false).' });
+    }
+
+    if (catalog && typeof catalog.get === 'function') {
+      const skillEntry = catalog.get('daily-briefing');
+      if (skillEntry?.ok && !skillEntry.skill?.activation?.canActivate) {
+        return send(409, {
+          ok: false,
+          error: 'Skill daily-briefing não está ativa.',
+          reasons: skillEntry.skill?.activation?.reasons || [],
+        });
+      }
+    }
+
+    if (useCustomService) {
+      try {
+        const briefing = await service.build({ date: rawDate, useLlm });
+        return send(200, { ok: true, briefing });
+      } catch (error) {
+        console.error('Aviso: falha ao montar daily briefing:', error?.message || error);
+        return send(500, { error: 'Não foi possível montar o briefing diário.' });
+      }
+    }
+
+    let outcome;
+    try {
+      outcome = await toolExecutor.execute(
+        'briefing.build',
+        { ...(rawDate !== null ? { date: rawDate } : {}), ...(useLlm ? { useLlm: true } : {}) },
+        { origin: 'user' },
+      );
+    } catch (error) {
+      console.error('Aviso: execução de briefing.build falhou:', error?.message || error);
+      return send(500, { error: 'Não foi possível montar o briefing diário.' });
+    }
+
+    if (outcome.notFound) return send(500, { error: 'Ferramenta briefing.build indisponível.' });
+    if (outcome.denied) return send(403, { ok: false, error: outcome.record?.reason || 'Permissão negada.', execution: outcome.record });
+    if (!outcome.ok) return send(500, { ok: false, error: outcome.record?.reason || 'Falha ao montar briefing.', execution: outcome.record });
+    return send(200, { ok: true, briefing: outcome.result, execution: outcome.record });
+  };
+}
+
 // Conquistas (data/achievements.json): leitura para a aba "Conquistas" do
 // desktop. Mesma borda das rotas do vínculo (origem + token) e mesmo estilo de
 // erro; antes de responder, reavalia o catálogo contra o vínculo para recuperar
@@ -3764,6 +3876,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleAgentTurn = createAgentTurnHandler();
   const handleSelf = createSelfHandler();
   const handleSuggestions = createSuggestionsHandler();
+  const handleBriefing = createBriefingHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
   const handleMediaAnalyze = createMediaAnalyzeHandler();
@@ -3819,6 +3932,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
         || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
       if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
       if (req.url === '/api/agent/suggestions' || req.url.startsWith('/api/agent/suggestions/') || req.url.startsWith('/api/agent/suggestions?')) return handleSuggestions(req, res);
+      if (req.url === '/api/agent/briefing' || req.url.startsWith('/api/agent/briefing?')) return handleBriefing(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

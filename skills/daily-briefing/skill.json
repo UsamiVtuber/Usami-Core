@@ -1,0 +1,35 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "daily-briefing",
+  "name": "Daily Briefing",
+  "version": "1.0.0",
+  "description": "Monta o briefing diário com compromissos, tarefas prioritárias, pendências e projetos em andamento a partir da memória operacional, planos e execuções locais.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "briefing.build"
+  ],
+  "permissions": [1],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "date",
+      "type": "string",
+      "required": false,
+      "description": "Data de referência do briefing (YYYY-MM-DD)."
+    },
+    {
+      "name": "useLlm",
+      "type": "boolean",
+      "required": false,
+      "description": "Permite usar redação opcional por LLM mantendo todos os dados determinísticos."
+    }
+  ],
+  "instructions": "Leia apenas a memória operacional local, planos de tarefas e histórico de execuções verificáveis. Gere o briefing determinístico sem inventar compromissos ou pendências quando a base estiver vazia e sem acessar integrações externas.",
+  "tests": {
+    "files": ["test/daily-briefing.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
