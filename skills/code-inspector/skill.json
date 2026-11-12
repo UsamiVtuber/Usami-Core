@@ -1,0 +1,36 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "code-inspector",
+  "name": "Code Inspector",
+  "version": "1.0.0",
+  "description": "Inspeciona e pesquisa arquivos do runtime em allowlist estrita (src/, skills/, docs/, package.json) em modo somente leitura, sem ler segredos ou vault.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "code.inspect",
+    "code.search"
+  ],
+  "permissions": [1],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "path",
+      "type": "string",
+      "required": false,
+      "description": "Caminho relativo na allowlist (ex.: src/agent-core.js)."
+    },
+    {
+      "name": "query",
+      "type": "string",
+      "required": false,
+      "description": "Termo ou símbolo para busca somente leitura."
+    }
+  ],
+  "instructions": "Use apenas caminhos dentro da allowlist de código e documentação. Nunca tente ler .env, chaves, data/ ou vault/, nem exponha credenciais.",
+  "tests": {
+    "files": ["test/code-inspector.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
