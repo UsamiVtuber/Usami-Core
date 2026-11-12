@@ -1,0 +1,43 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "email-assistant",
+  "name": "Email Assistant",
+  "version": "1.0.0",
+  "description": "Lista mensagens, cria rascunhos e envia e-mails via Gmail API (Google OAuth2), exigindo confirmação humana nível 4 para envio.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "email.list",
+    "email.draft",
+    "email.send"
+  ],
+  "permissions": [3, 4],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "query",
+      "type": "string",
+      "required": false,
+      "description": "Filtro de busca Gmail (ex.: is:unread)."
+    },
+    {
+      "name": "to",
+      "type": "string",
+      "required": false,
+      "description": "Destinatário do rascunho ou envio."
+    },
+    {
+      "name": "subject",
+      "type": "string",
+      "required": false,
+      "description": "Assunto da mensagem."
+    }
+  ],
+  "instructions": "Prefira listar e criar rascunhos (nível 3) antes de enviar. O envio definitivo (email.send) é nível 4 e exige confirmação humana de uso único.",
+  "tests": {
+    "files": ["test/email-assistant.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
