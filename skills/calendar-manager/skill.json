@@ -1,0 +1,43 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "calendar-manager",
+  "name": "Calendar Manager",
+  "version": "1.0.0",
+  "description": "Consulta, cria e remove eventos no Google Calendar via OAuth2, respeitando permissões nível 3 (leitura/criação) e nível 4 (exclusão confirmada).",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "calendar.list",
+    "calendar.create",
+    "calendar.delete"
+  ],
+  "permissions": [3, 4],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "calendarId",
+      "type": "string",
+      "required": false,
+      "description": "ID da agenda Google (padrão primary)."
+    },
+    {
+      "name": "timeMin",
+      "type": "string",
+      "required": false,
+      "description": "Início da janela ISO-8601."
+    },
+    {
+      "name": "timeMax",
+      "type": "string",
+      "required": false,
+      "description": "Fim da janela ISO-8601."
+    }
+  ],
+  "instructions": "Use calendar.list para consultar compromissos antes de agendar. Criar evento (calendar.create) é nível 3; excluir evento (calendar.delete) é nível 4 e exige confirmação humana de uso único.",
+  "tests": {
+    "files": ["test/calendar-manager.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
