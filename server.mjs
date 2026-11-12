@@ -4229,5 +4229,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
   proactiveEngine.start(60000);
-  server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
+  const bindHost = process.env.USAMI_API_HOST || readEnvValue('USAMI_API_HOST') || '0.0.0.0';
+  server.listen(8787, bindHost, () => console.log(`Usami API escutando em ${bindHost}:8787`));
 }

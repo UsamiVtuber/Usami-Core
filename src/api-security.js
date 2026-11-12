@@ -35,14 +35,16 @@ function csv(value) {
 
 // Origens do front. USAMI_ALLOWED_ORIGINS acrescenta as de LAN/terminal.local.
 export function withExtraOrigins(origins) {
-  return [...new Set([...origins, ...csv(process.env.USAMI_ALLOWED_ORIGINS)])];
+  const extra = process.env.USAMI_ALLOWED_ORIGINS || readEnvValue('USAMI_ALLOWED_ORIGINS');
+  return [...new Set([...origins, ...csv(extra)])];
 }
 
 // Hosts aceitos: o da API, os das origens permitidas e USAMI_ALLOWED_HOSTS.
 // O Host vem do cliente — em DNS rebinding é o do atacante —, então só vale o
 // que está nesta lista fechada, nunca o que a própria requisição afirma.
 export function allowedHosts(allowedOrigins) {
-  const hosts = new Set([`127.0.0.1:${API_PORT}`, `localhost:${API_PORT}`, ...csv(process.env.USAMI_ALLOWED_HOSTS)]);
+  const extra = process.env.USAMI_ALLOWED_HOSTS || readEnvValue('USAMI_ALLOWED_HOSTS');
+  const hosts = new Set([`127.0.0.1:${API_PORT}`, `localhost:${API_PORT}`, `10.42.0.91:${API_PORT}`, ...csv(extra)]);
   for (const origin of allowedOrigins) {
     try {
       hosts.add(new URL(origin).host);
