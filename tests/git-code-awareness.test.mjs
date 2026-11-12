@@ -12,6 +12,9 @@ import { createToolExecutor } from '../src/tool-executor.js';
 import { createSkillCatalog } from '../src/skill-catalog.js';
 import { defaultRunSkillTests } from '../src/skill-manager.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from '../src/code-inspector-skill.js';
+import { createAgentCore } from '../src/agent-core.js';
+import { createTaskPlanner } from '../src/task-planner.js';
+import { AGENT_SCHEMAS } from '../src/agent-contracts.js';
 import {
   createGitAssistantClient,
   createGitAssistantTools,
@@ -384,5 +387,169 @@ test('buildPersona e /api/chat injetam consciência real de código, skills e Gi
     assert.equal(turn.data.turn.tool, expectedTool, `${msg} -> ${expectedTool}`);
     assert.equal(turn.data.turn.route, 'tool');
   }
+});
+
+test('formatSelfAwarenessPrompt lista todas as skills/ferramentas sem corte e status booleano de integrações sem vazar segredos', () => {
+  const tools = Array.from({ length: 35 }, (_, i) => ({
+    name: `skill.tool_${String(i + 1).padStart(2, '0')}`,
+    active: true,
+  }));
+  const prompt = formatSelfAwarenessPrompt({
+    snapshot: {
+      runtime: { name: 'usami', version: '2.0.0' },
+      modules: ['server.mjs'],
+      tools,
+      skills: [
+        { id: 'finance-observer', description: 'Open Finance Pluggy e Belvo sk-tinyfish-shouldnotleak123', activation: { canActivate: true } },
+        { id: 'calendar-manager', description: 'Agenda no Google Calendar', activation: { canActivate: true } },
+      ],
+    },
+    gitStatus: { target: 'usami', branch: 'main', staged: [], modified: [], untracked: [] },
+    integrationsStatus: { google: true, openFinance: true, research: true, github: false },
+  });
+
+  assert.match(prompt, /- finance-observer: Open Finance Pluggy e Belvo/);
+  assert.match(prompt, /- calendar-manager: Agenda no Google Calendar/);
+  assert.equal(prompt.includes('shouldnotleak123'), false);
+  assert.match(prompt, /skill\.tool_35/);
+  assert.match(prompt, /Google \(Calendar\/Gmail\)=pronta/);
+  assert.match(prompt, /Open Finance \(Pluggy\/Belvo\)=pronta/);
+  assert.match(prompt, /Pesquisa Web \(TinyFish\/Firecrawl\)=pronta/);
+  assert.match(prompt, /GitHub API=não configurada/);
+});
+
+test('/api/chat executa ferramenta operacional segura (nível <= 3) antes do LLM e preserva bloqueio S5 para nível 4', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-chat-agent-bridge-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const memoryStore = createMemoryStore({ dataDir: dir, now: () => '2026-11-12T00:00:00.000Z', today: () => '2026-11-12' });
+  memoryStore.load();
+  const personalityStore = createPersonalityStore({ dataDir: dir });
+  personalityStore.load();
+
+  const registry = createToolRegistry();
+  let accountsCalls = 0;
+  let commitCalls = 0;
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'finance.accounts',
+    version: '1.0.0',
+    description: 'Lista contas e saldos.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 2000,
+    parameters: [],
+    verify: r => r?.ok === true,
+    execute: () => {
+      accountsCalls += 1;
+      return {
+        ok: true,
+        provider: 'pluggy',
+        readOnly: true,
+        accounts: [{ id: 'acc-real-1', name: 'Conta Real', balance: 4321.5, currency: 'BRL', institution: 'Nubank' }],
+      };
+    },
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'git.commit',
+    version: '1.0.0',
+    description: 'Cria commit local.',
+    origin: 'skill',
+    permissionLevel: 4,
+    timeoutMs: 2000,
+    parameters: [{ name: 'message', type: 'string', required: false }],
+    verify: r => r?.ok === true,
+    execute: () => {
+      commitCalls += 1;
+      return { ok: true };
+    },
+  });
+
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  let capturedSystem = '';
+  const chatHandler = createChatHandler({
+    agentCore,
+    memoryStore,
+    personalityStore,
+    moodStore: null,
+    vaultSearch: async () => null,
+    integrationsStatus: { google: true, openFinance: true, research: true, github: true },
+    getKey: async () => 'mock-openrouter-key',
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      capturedSystem = body.messages?.[0]?.content || '';
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  reply: 'Você tem 4321,50 reais na Conta Real do Nubank!',
+                  gesture: 'nod',
+                  actions: [],
+                  remember: null,
+                }),
+              },
+            }],
+          };
+        },
+      };
+    },
+  });
+
+  const turnHandler = createAgentTurnHandler({ agentCore, apiToken: TEST_TOKEN });
+  const makeReq = (method, url, body = '') => ({
+    method,
+    url,
+    headers: {
+      host: '127.0.0.1:8787',
+      'x-usami-token': TEST_TOKEN,
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    async *[Symbol.asyncIterator]() {
+      if (body) yield Buffer.from(body);
+    },
+  });
+  const call = async (handler, req) => {
+    const res = { statusCode: null, body: '' };
+    res.writeHead = (s) => { res.statusCode = s; };
+    res.end = (b) => { res.body = b; };
+    await handler(req, res);
+    return { status: res.statusCode, data: JSON.parse(res.body) };
+  };
+
+  // 1) Ferramenta nível 3 executa antes do LLM e alimenta o prompt.
+  const financeRes = await call(chatHandler, makeReq('POST', '/api/chat', JSON.stringify({ message: 'Quanto tenho no banco no Pluggy?' })));
+  assert.equal(financeRes.status, 200);
+  assert.equal(accountsCalls, 1);
+  assert.equal(financeRes.data.agentTurn.status, 'executed');
+  assert.equal(financeRes.data.agentTurn.tool, 'finance.accounts');
+  assert.match(capturedSystem, /RESULTADO DA SKILL EXECUTADA AGORA \(finance\.accounts\)/);
+  assert.match(capturedSystem, /4321\.5/);
+  assert.match(capturedSystem, /Open Finance \(Pluggy\/Belvo\)=pronta/);
+
+  const stored = await call(turnHandler, makeReq('GET', `/api/agent/turns/${financeRes.data.agentTurn.id}`));
+  assert.equal(stored.status, 200);
+  assert.equal(stored.data.turn.result.accounts[0].name, 'Conta Real');
+
+  // 2) Ferramenta nível 4 nunca auto-executa no chat.
+  const lvl4Res = await call(chatHandler, makeReq('POST', '/api/chat', JSON.stringify({ message: 'Executa a ferramenta git.commit agora' })));
+  assert.equal(lvl4Res.status, 200);
+  assert.equal(commitCalls, 0);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const lvl4Turn = await call(turnHandler, makeReq('GET', `/api/agent/turns/${lvl4Res.data.agentTurn.id}`));
+  assert.equal(lvl4Turn.status, 200);
+  assert.equal(lvl4Turn.data.turn.status, 'awaiting_confirmation');
 });
 

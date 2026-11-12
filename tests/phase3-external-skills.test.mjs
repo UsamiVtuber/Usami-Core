@@ -507,9 +507,14 @@ test('server.mjs registra as 4 skills externas, limpa limitações no /api/agent
 
   const routingCases = [
     ['Listar eventos do google calendar', 'calendar.list'],
+    ['O que tenho na minha agenda hoje?', 'calendar.list'],
     ['Listar emails recentes do gmail', 'email.list'],
+    ['Chegou algum email novo?', 'email.list'],
     ['Consultar contas do open finance', 'finance.accounts'],
+    ['Quanto tenho no banco no pluggy?', 'finance.accounts'],
+    ['Ver meus gastos do mes', 'finance.transactions'],
     ['Pesquisar na web via tinyfish sobre AgentCore', 'research.search'],
+    ['Pesquise sobre Rust na internet', 'research.search'],
     ['Extrair conteudo de https://example.org/docs via firecrawl', 'research.fetch'],
   ];
 
@@ -519,4 +524,51 @@ test('server.mjs registra as 4 skills externas, limpa limitações no /api/agent
     assert.equal(res.data.turn.tool, expectedTool, `mensagem "${message}" deveria rotear para ${expectedTool}`);
     assert.equal(res.data.turn.route, 'tool');
   }
+});
+
+test('Pluggy aceita múltiplos itemIds em PLUGGY_ITEM_ID e resolve accountId automaticamente em finance.transactions', async t => {
+  const seenUrls = [];
+  const pluggyFetch = async (url, init = {}) => {
+    seenUrls.push(url);
+    if (url === 'https://api.pluggy.ai/auth') {
+      assert.equal(init.method, 'POST');
+      return jsonResponse(200, { apiKey: 'pluggy-api-key' });
+    }
+    if (url === 'https://api.pluggy.ai/accounts?itemId=item-a') {
+      return jsonResponse(200, { results: [{ id: 'acc-a1', name: 'NuConta', subtype: 'CHECKING_ACCOUNT', balance: 1500.25, currencyCode: 'BRL', institution: { name: 'Nubank' } }] });
+    }
+    if (url === 'https://api.pluggy.ai/accounts?itemId=item-b') {
+      return jsonResponse(200, { results: [{ id: 'acc-b1', name: 'Inter', subtype: 'CHECKING_ACCOUNT', balance: 320, currencyCode: 'BRL', institution: { name: 'Banco Inter' } }] });
+    }
+    if (url.startsWith('https://api.pluggy.ai/transactions?accountId=acc-a1')) {
+      return jsonResponse(200, {
+        results: [
+          { id: 'tx-10', date: '2026-11-11', description: 'Mercado', amount: 120.5, type: 'DEBIT', currencyCode: 'BRL', category: 'Supermarket' },
+        ],
+      });
+    }
+    throw new Error(`URL inesperada: ${url}`);
+  };
+
+  const client = createOpenFinanceClient({
+    envProvider: createMapEnv({
+      OPENFINANCE_PROVIDER: 'pluggy',
+      PLUGGY_CLIENT_ID: 'pid',
+      PLUGGY_CLIENT_SECRET: 'psec',
+      PLUGGY_ITEM_ID: 'item-a, item-b',
+    }),
+    fetchImpl: pluggyFetch,
+  });
+
+  const runtime = setupRuntime(t, { openFinanceClient: client });
+  const accRes = await runtime.executor.execute('finance.accounts', {});
+  assert.equal(accRes.ok, true);
+  assert.equal(accRes.result.count, 2);
+  assert.deepEqual(accRes.result.accounts.map(a => a.id), ['acc-a1', 'acc-b1']);
+
+  const txRes = await runtime.executor.execute('finance.transactions', { limit: 10 });
+  assert.equal(txRes.ok, true);
+  assert.equal(txRes.result.transactions[0].description, 'Mercado');
+  assert.equal(txRes.result.summary.totalOutflow, 120.5);
+  assert.ok(seenUrls.some(u => u.includes('accountId=acc-a1')));
 });
