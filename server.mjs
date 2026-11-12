@@ -41,7 +41,7 @@ import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/f
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
-import { createAgentCore, formatAgentTurnPromptContext } from './src/agent-core.js';
+import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -458,7 +458,7 @@ export const proactiveEngine = createProactiveEngine({
         reason: cmd.type === 'idle_nudge' ? 'Ficou sentindo sua falta depois de um tempo em silêncio.' : 'Resolveu puxar assunto por conta própria.',
         affinity: installMemoryStore.getAll()?.affinity?.score ?? 0,
       });
-    } catch {}
+    } catch { }
     queueAvatarCommand({
       type: 'proactive_say',
       message: cmd.message,
@@ -777,7 +777,7 @@ export function createChatHandler(options = {}) {
         cachedGitStatus = st;
         cachedAwareness.expiresAt = 0;
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => { gitRefreshInFlight = null; });
   };
   const readIntegrationsStatus = () => {
@@ -886,11 +886,12 @@ export function createChatHandler(options = {}) {
       } catch {
         selfAwareness = null;
       }
+      const todayHistory = memoryStore.getTodayHistory(today);
       let system = buildPersona({
         affinity: mem.affinity.score,
         sections: memoryStore.getSections(),
         recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
-        history: memoryStore.getTodayHistory(today),
+        history: todayHistory,
         summaries: memoryStore.getSummaries().slice(-3),
         username: mem.user.nickname || 'você',
         date: today,
@@ -924,12 +925,15 @@ export function createChatHandler(options = {}) {
       });
 
       let agentTurn = null;
+      let executedAgentTurn = null;
       if (agentCore && options.syncAgentInChat !== false && typeof agentCore.runOperationalForChat === 'function') {
         try {
           const executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
-            timeoutMs: options.agentChatTimeoutMs ?? 8000,
+            history: todayHistory,
+            timeoutMs: options.agentChatTimeoutMs ?? 10000,
           });
           if (executedTurn) {
+            executedAgentTurn = executedTurn;
             agentTurn = {
               id: executedTurn.id,
               kind: executedTurn.intent?.kind || 'operational',
@@ -1048,19 +1052,38 @@ export function createChatHandler(options = {}) {
 
           const nvidiaAbort = new AbortController();
           const routerAbort = new AbortController();
-          const startNvidia = () => timeStage('llm', () => generateReply(
-            withCapabilities(system, capabilities),
+          const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', () => generateReply(
+            withCapabilities(promptOverride ?? system, capabilities),
             parsedBody.message,
             {
-              temperature: 0.7,
+              temperature,
               signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
-              blurtReply: surface.mode === 'say+think' ? surface.reply : null,
+              blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
             },
           )).then(rawReply => {
             const parsedReply = parseProviderRaw(rawReply);
-            if (!parsedReply.ok) throw new Error(parsedReply.error);
+            if (!parsedReply.ok) {
+              throw Object.assign(new Error(parsedReply.error), {
+                invalidModelReply: true,
+                rawLen: typeof rawReply === 'string' ? rawReply.length : 0,
+              });
+            }
             return { ...parsedReply, source: 'nvidia' };
           });
+          const startNvidia = async () => {
+            try {
+              return await invokeNvidia();
+            } catch (err) {
+              if (!routerKey && err?.invalidModelReply && !turn.signal.aborted && !nvidiaAbort.signal.aborted) {
+                console.warn(`NVIDIA devolveu resposta inválida (len=${err.rawLen}); tentando 1x novamente com formato estrito.`);
+                return invokeNvidia(
+                  system + '\n\nIMPORTANTE: responda EXCLUSIVAMENTE um JSON válido com a chave "reply" preenchida em português curto, exemplo: {"reply":"Sua resposta objetiva aqui.","gesture":"nod","actions":[],"remember":null}',
+                  { temperature: 0.2, skipBlurt: true },
+                );
+              }
+              throw err;
+            }
+          };
 
           // Sem chave do OpenRouter não há corrida: correr sozinho não acelera.
           parsed = routerKey
@@ -1109,8 +1132,9 @@ export function createChatHandler(options = {}) {
           return send(502, { error: 'Não foi possível acessar a configuração.' });
         }
         if (!key) {
-          // Sem nenhuma chave: resposta offline simples baseada no classificador local
-          classification = await classifyUserMessage(parsedBody.message);
+          // Sem nenhuma chave de fallback: usa classificador local (sem gastar rede)
+          // e aproveita dados reais caso uma skill operacional já tenha executado.
+          classification = await classifyUserMessage(parsedBody.message, { local: true });
           const offlineReplies = {
             neutral: 'Oi! Estou aqui, mas ainda não configurei uma chave de LLM. Quer conversar mesmo assim?',
             happy: 'Oi! Estou bem feliz de te ver!',
@@ -1122,10 +1146,11 @@ export function createChatHandler(options = {}) {
             doubtful: 'Oi... você tem certeza que quer conversar comigo?',
           };
           const emotion = classification?.emotion || 'neutral';
+          const skillFallback = executedAgentTurn ? formatExecutedTurnFallbackReply(executedAgentTurn) : null;
           parsed = {
             ok: true,
-            reply: offlineReplies[emotion] || offlineReplies.neutral,
-            gesture: 'neutral',
+            reply: skillFallback || offlineReplies[emotion] || offlineReplies.neutral,
+            gesture: skillFallback ? 'nod' : 'neutral',
             actions: [],
             remember: null,
             classification,
@@ -1237,14 +1262,14 @@ export function createChatHandler(options = {}) {
       try {
         moodPayload = moodStore
           ? moodStore.recordChatTurn({
-              userMessage: parsedBody.message,
-              reply: parsed.reply,
-              gesture: parsed.gesture,
-              actions,
-              speechTags: parsed.speechTags,
-              emotion: classification?.emotion,
-              affinity: affinityPayload?.affinity ?? mem.affinity.score,
-            })
+            userMessage: parsedBody.message,
+            reply: parsed.reply,
+            gesture: parsed.gesture,
+            actions,
+            speechTags: parsed.speechTags,
+            emotion: classification?.emotion,
+            affinity: affinityPayload?.affinity ?? mem.affinity.score,
+          })
           : null;
       } catch {
         moodPayload = null;
@@ -3001,7 +3026,7 @@ export async function streamGeminiPcm({
   };
 
   const onAbort = () => {
-    try { reader.cancel().catch(() => {}); } catch {}
+    try { reader.cancel().catch(() => { }); } catch { }
   };
   if (signal?.aborted) onAbort();
   else signal?.addEventListener('abort', onAbort, { once: true });
@@ -4059,49 +4084,49 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
-    const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
-    const server = createServer(async (req, res) => {
-      // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
-      if ((req.method === 'GET' || req.method === 'HEAD') && (
-        req.url.startsWith('/models/') || req.url.startsWith('/animations/') || req.url.startsWith('/live2d/')
-      )) {
-        const served = await handleAvatarStatic(req, res);
-        if (served) return;
-      }
-      if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
-      if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
-      if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
-      if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
-      if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
-      if (req.method === 'GET' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
-      if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
-      if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
-      if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
-      if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
-      if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
-      if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
-      if (req.url === '/api/personality') return handlePersonality(req, res);
-      if (req.url === '/api/mood' || req.url === '/api/mood/event' || req.url === '/api/mood/reset') return handleMood(req, res);
-      if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
-        || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
-      if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
-        || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
-      if (req.url === '/api/agent/memory' || req.url.startsWith('/api/agent/memory/') || req.url.startsWith('/api/agent/memory?')) return handleOperationalMemory(req, res);
-      if (req.url === '/api/agent/executions' || req.url.startsWith('/api/agent/executions?')
-        || req.url === '/api/agent/confirmations' || req.url.startsWith('/api/agent/confirmations?')
-        || req.url === '/api/agent/permissions' || req.url.startsWith('/api/agent/permissions?')
-        || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
-      if (req.url === '/api/agent/plans' || req.url.startsWith('/api/agent/plans/') || req.url.startsWith('/api/agent/plans?')) return handlePlans(req, res);
-      if (req.url === '/api/agent/skills' || req.url.startsWith('/api/agent/skills/') || req.url.startsWith('/api/agent/skills?')) return handleSkills(req, res);
-      if (req.url === '/api/agent/turn' || req.url === '/api/agent/turns'
-        || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
-      if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
-      if (req.url === '/api/agent/suggestions' || req.url.startsWith('/api/agent/suggestions/') || req.url.startsWith('/api/agent/suggestions?')) return handleSuggestions(req, res);
-      if (req.url === '/api/agent/briefing' || req.url.startsWith('/api/agent/briefing?')) return handleBriefing(req, res);
-      if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify({ error: 'Não encontrado.' }));
-    });
-    proactiveEngine.start(60000);
-    server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
-  }
+  const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
+  const server = createServer(async (req, res) => {
+    // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
+    if ((req.method === 'GET' || req.method === 'HEAD') && (
+      req.url.startsWith('/models/') || req.url.startsWith('/animations/') || req.url.startsWith('/live2d/')
+    )) {
+      const served = await handleAvatarStatic(req, res);
+      if (served) return;
+    }
+    if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
+    if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
+    if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
+    if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
+    if (req.method === 'POST' && req.url === '/api/n8n/command') return handleN8nCommand(req, res);
+    if (req.method === 'GET' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+    if (req.method === 'DELETE' && (req.url === '/api/n8n/commands' || req.url.startsWith('/api/n8n/commands?'))) return handleN8nCommand(req, res);
+    if (req.method === 'POST' && req.url === '/api/n8n/commands/ack') return handleN8nCommand(req, res);
+    if (req.method === 'GET' && req.url === '/api/rag/context') return handleRagContext(req, res);
+    if (req.url === '/api/memory' || req.url === '/api/memory/forget') return handleMemory(req, res);
+    if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
+    if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
+    if (req.url === '/api/personality') return handlePersonality(req, res);
+    if (req.url === '/api/mood' || req.url === '/api/mood/event' || req.url === '/api/mood/reset') return handleMood(req, res);
+    if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
+      || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
+    if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
+      || req.url.startsWith('/api/learning?')) return handlePlan(req, res);
+    if (req.url === '/api/agent/memory' || req.url.startsWith('/api/agent/memory/') || req.url.startsWith('/api/agent/memory?')) return handleOperationalMemory(req, res);
+    if (req.url === '/api/agent/executions' || req.url.startsWith('/api/agent/executions?')
+      || req.url === '/api/agent/confirmations' || req.url.startsWith('/api/agent/confirmations?')
+      || req.url === '/api/agent/permissions' || req.url.startsWith('/api/agent/permissions?')
+      || req.url.startsWith('/api/agent/tools/')) return handleTools(req, res);
+    if (req.url === '/api/agent/plans' || req.url.startsWith('/api/agent/plans/') || req.url.startsWith('/api/agent/plans?')) return handlePlans(req, res);
+    if (req.url === '/api/agent/skills' || req.url.startsWith('/api/agent/skills/') || req.url.startsWith('/api/agent/skills?')) return handleSkills(req, res);
+    if (req.url === '/api/agent/turn' || req.url === '/api/agent/turns'
+      || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
+    if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
+    if (req.url === '/api/agent/suggestions' || req.url.startsWith('/api/agent/suggestions/') || req.url.startsWith('/api/agent/suggestions?')) return handleSuggestions(req, res);
+    if (req.url === '/api/agent/briefing' || req.url.startsWith('/api/agent/briefing?')) return handleBriefing(req, res);
+    if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.end(JSON.stringify({ error: 'Não encontrado.' }));
+  });
+  proactiveEngine.start(60000);
+  server.listen(8787, '127.0.0.1', () => console.log('Usami API local em 127.0.0.1:8787'));
+}
