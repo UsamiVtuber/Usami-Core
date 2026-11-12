@@ -1,0 +1,42 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "study-companion",
+  "name": "Study Companion",
+  "version": "1.0.0",
+  "description": "Cria trilhas de estudo estruturadas e sessões de revisão espaçada usando planos locais, memória operacional e contexto do usuário.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-11T00:00:00.000Z",
+  "tools": [
+    "study.plan",
+    "study.review"
+  ],
+  "permissions": [1, 2],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "topic",
+      "type": "string",
+      "required": true,
+      "description": "Tema ou disciplina a estudar ou revisar."
+    },
+    {
+      "name": "level",
+      "type": "string",
+      "required": false,
+      "description": "Nível inicial: beginner, intermediate ou advanced."
+    },
+    {
+      "name": "hoursPerWeek",
+      "type": "number",
+      "required": false,
+      "description": "Carga horária semanal estimada (1 a 40 horas)."
+    }
+  ],
+  "instructions": "Construa planos de estudo e revisões exclusivamente com base no tema pedido, na memória local e nos planos registrados. Não invente referências externas nem acesse a rede.",
+  "tests": {
+    "files": ["test/study-companion.test.mjs"],
+    "timeoutMs": 10000
+  }
+}
+
