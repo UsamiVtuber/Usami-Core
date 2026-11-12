@@ -958,6 +958,7 @@ export function createChatHandler(options = {}) {
               route: executedTurn.route || 'tool',
               status: executedTurn.status,
               ...(executedTurn.tool ? { tool: executedTurn.tool } : {}),
+              ...(Array.isArray(executedTurn.tools) ? { tools: executedTurn.tools } : {}),
             };
             const toolPromptContext = formatAgentTurnPromptContext(executedTurn);
             if (toolPromptContext) system += toolPromptContext;
