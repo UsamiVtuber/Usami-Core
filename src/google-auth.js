@@ -9,6 +9,7 @@
  *    (renovação automática via `https://oauth2.googleapis.com/token`).
  */
 import { readEnvValue } from './api-security.js';
+import { withRetryJitter } from './n8n-queue.js';
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const EXPIRY_SKEW_MS = 60_000;
@@ -43,24 +44,34 @@ export function createGoogleAuthClient({
     return Boolean(creds.directToken || creds.hasRefreshTuple || isN8nConfigured());
   }
 
-  async function callN8nAssistant({ action, params = {}, signal } = {}) {
+  async function callN8nAssistant({ action, params = {}, signal, maxRetries = 3 } = {}) {
     const webhookUrl = getN8nWebhookUrl();
     if (!webhookUrl) {
       throw new Error('N8N_GOOGLE_WEBHOOK_URL não configurado.');
     }
 
-    const response = await fetchImpl(webhookUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action, params }),
-      signal,
+    return await withRetryJitter(async () => {
+      const response = await fetchImpl(webhookUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action, params }),
+        signal,
+      });
+
+      if (!response.ok) {
+        const err = new Error(`n8n Google Assistant falhou (HTTP ${response.status}).`);
+        err.status = response.status;
+        err.isTransient = response.status >= 500 || response.status === 429;
+        throw err;
+      }
+
+      return await response.json();
+    }, {
+      maxRetries,
+      baseMs: 150,
+      maxMs: 2000,
+      isRetryable: err => err?.isTransient !== false,
     });
-
-    if (!response.ok) {
-      throw new Error(`n8n Google Assistant falhou (HTTP ${response.status}).`);
-    }
-
-    return await response.json();
   }
 
   async function refreshAccessToken({ signal, force = false } = {}) {

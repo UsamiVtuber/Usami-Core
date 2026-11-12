@@ -212,3 +212,41 @@ test('B6: POST não sobrescreve id/timestamp forjados', async () => {
   assert.notEqual(command.timestamp, '1999-01-01T00:00:00.000Z');
   assert.match(command.timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
+
+test('calculateJitterDelay e withRetryJitter executam retries com jitter e tratam erros transitórios', async () => {
+  const { calculateJitterDelay, withRetryJitter } = await import('../src/n8n-queue.js');
+
+  // 1. Testa cálculo de jitter
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const delay = calculateJitterDelay(attempt, { baseMs: 100, maxMs: 1000 });
+    assert.ok(delay >= 0 && delay <= 1000);
+  }
+
+  // 2. Testa sucesso na segunda tentativa com retry
+  let attempts = 0;
+  const result = await withRetryJitter(async (att) => {
+    attempts++;
+    if (att === 0) {
+      const err = new Error('Erro transitório');
+      err.isTransient = true;
+      throw err;
+    }
+    return 'sucesso';
+  }, { maxRetries: 3, baseMs: 5, maxMs: 20 });
+
+  assert.equal(result, 'sucesso');
+  assert.equal(attempts, 2);
+
+  // 3. Testa desistência imediata em erro não transitório
+  let nonTransientCalls = 0;
+  await assert.rejects(async () => {
+    await withRetryJitter(async () => {
+      nonTransientCalls++;
+      const err = new Error('Erro 400 permanente');
+      err.isTransient = false;
+      throw err;
+    }, { maxRetries: 3, baseMs: 5, isRetryable: err => err.isTransient });
+  }, /Erro 400 permanente/);
+
+  assert.equal(nonTransientCalls, 1);
+});

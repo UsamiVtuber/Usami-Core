@@ -20,6 +20,44 @@ const DEFAULT_DELIVERED_TTL_MS = 120000;
 const DEFAULT_PENDING_TTL_MS = 300000;
 const DEFAULT_ACTIVE_WINDOW_MS = 60000;
 
+/**
+ * Calcula tempo de espera com backoff exponencial e full jitter.
+ * delay = random(0, min(maxMs, baseMs * 2^attempt))
+ */
+export function calculateJitterDelay(attempt, { baseMs = 200, maxMs = 5000, factor = 2 } = {}) {
+  const safeAttempt = Math.max(0, Number(attempt) || 0);
+  const exponentialDelay = Math.min(maxMs, baseMs * Math.pow(factor, safeAttempt));
+  return Math.floor(Math.random() * exponentialDelay);
+}
+
+/**
+ * Executa uma função assíncrona com retry automático e jitter.
+ */
+export async function withRetryJitter(fn, {
+  maxRetries = 3,
+  baseMs = 200,
+  maxMs = 5000,
+  isRetryable = () => true,
+  onRetry = null,
+} = {}) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn(attempt);
+    } catch (error) {
+      if (attempt >= maxRetries || !isRetryable(error)) {
+        throw error;
+      }
+      const delay = calculateJitterDelay(attempt, { baseMs, maxMs });
+      if (typeof onRetry === 'function') {
+        onRetry({ attempt, error, delay });
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+      attempt += 1;
+    }
+  }
+}
+
 // Id de cliente vindo do navegador: string curta, sem lixo. Ausente/inválido
 // cai no cliente legado (o formato antigo, sem header, continua funcionando).
 export function normalizeClientId(value) {
