@@ -6,15 +6,14 @@
 // null quando o objeto não fecha — payload cortado no max_tokens, que tem
 // tratamento próprio (salvagem do campo "reply").
 
-export function extractJsonCandidate(text) {
+export function extractAllJsonCandidates(text) {
   const source = String(text ?? '');
-  const start = source.indexOf('{');
-  if (start < 0) return null;
-
+  const candidates = [];
   let depth = 0;
+  let start = -1;
   let inString = false;
   let escaped = false;
-  for (let index = start; index < source.length; index += 1) {
+  for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
     if (inString) {
       if (escaped) escaped = false;
@@ -22,12 +21,22 @@ export function extractJsonCandidate(text) {
       else if (char === '"') inString = false;
       continue;
     }
-    if (char === '"') inString = true;
-    else if (char === '{') depth += 1;
-    else if (char === '}') {
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (char === '}' && depth > 0) {
       depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
+      if (depth === 0 && start >= 0) {
+        candidates.push(source.slice(start, index + 1));
+        start = -1;
+      }
     }
   }
-  return null;
+  return candidates;
+}
+
+export function extractJsonCandidate(text) {
+  return extractAllJsonCandidates(text)[0] ?? null;
 }

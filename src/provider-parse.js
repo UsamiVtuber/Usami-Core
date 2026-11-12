@@ -10,7 +10,7 @@
 
 import { DIRECTOR_VERBS, GESTURE_NAMES, SHAPE_NAMES } from './motion-director.js';
 import { extractSpeechTags } from './speech-tags.js';
-import { extractJsonCandidate } from './json-salvage.js';
+import { extractAllJsonCandidates, extractJsonCandidate } from './json-salvage.js';
 import { MEMORY_SECTIONS } from './memory-store.js';
 
 export const SPEECH_TRIGGERS = ['start', 'middle', 'end'];
@@ -223,6 +223,17 @@ export function normalizeRemember(value) {
   return { fact, section };
 }
 
+const REPLY_KEY_ALIASES = ['resposta', 'response', 'answer', 'fala', 'message', 'text'];
+
+function extractReplyField(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return '';
+  if (typeof result.reply === 'string') return result.reply;
+  for (const key of REPLY_KEY_ALIASES) {
+    if (typeof result[key] === 'string' && result[key].trim()) return result[key];
+  }
+  return '';
+}
+
 export function parseProviderRaw(raw) {
   if (typeof raw !== 'string' || raw.length > 10000) {
     return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
@@ -232,15 +243,17 @@ export function parseProviderRaw(raw) {
     result = JSON.parse(stripCodeFence(raw));
   } catch {
     const trimmed = raw.trim();
-    // Preâmbulo de raciocínio antes do JSON: o primeiro objeto balanceado ainda
-    // é a resposta. Sem isto o texto do "pensamento" inteiro viria no balão.
-    const embedded = extractJsonCandidate(trimmed);
-    if (embedded) {
+    // Preâmbulo de raciocínio antes do JSON: procura um candidato JSON válido com reply.
+    const candidates = extractAllJsonCandidates(trimmed);
+    for (let i = candidates.length - 1; i >= 0; i -= 1) {
       try {
-        result = JSON.parse(embedded);
-      } catch {
-        result = null;
-      }
+        const parsed = JSON.parse(candidates[i]);
+        if (parsed && typeof parsed === 'object' && extractReplyField(parsed).trim()) {
+          result = parsed;
+          break;
+        }
+        if (!result) result = parsed;
+      } catch {}
     }
     if (!result) {
       // Se a resposta parece JSON de erro ({"error": ...}), tenta extrair a mensagem
@@ -271,14 +284,15 @@ export function parseProviderRaw(raw) {
       result = { reply: trimmed, gesture: 'neutral' };
     }
   }
+  const replyText = extractReplyField(result);
   // A rubrica sai ANTES das validações: reply que era só descrição de ação não
   // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente. As tags
   // não-verbais também saem do texto exibido e voltam em `speechTags`.
-  if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 2000) {
+  if (typeof replyText !== 'string' || !replyText.trim() || replyText.length > 2000) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
-  const salvagedFromReply = salvageLeakedGesture(result.reply);
-  const cleaned = cleanReply(result.reply);
+  const salvagedFromReply = salvageLeakedGesture(replyText);
+  const cleaned = cleanReply(replyText);
   if (!cleaned.display) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }

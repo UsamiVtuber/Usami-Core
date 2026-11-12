@@ -14,7 +14,7 @@
 // a geração cai para o fluxo OpenRouter atual do server.mjs.
 
 import { classifyEmotion } from './emotion-classifier.js';
-import { extractJsonCandidate } from './json-salvage.js';
+import { extractAllJsonCandidates } from './json-salvage.js';
 import { parseJsonLoosely } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
@@ -252,15 +252,29 @@ async function keyExists() {
 // ele contém um objeto JSON com a chave esperada — o raciocínio do modelo
 // reescreve o system prompt, e devolvê-lo como texto faria a Usami "falar o
 // próprio prompt" em vez de responder.
+const REPLY_ALIASES = ['reply', 'resposta', 'response', 'answer', 'fala', 'message', 'text'];
+
 export function jsonText({ content = '', reasoning = '' } = {}, requiredKey = null) {
   const texts = [String(content ?? ''), String(reasoning ?? '')];
-  for (const text of texts) {
+  for (let sourceIdx = 0; sourceIdx < texts.length; sourceIdx += 1) {
+    const text = texts[sourceIdx];
     if (!text.includes('{')) continue;
     if (!requiredKey) return text;
-    const candidate = extractJsonCandidate(text);
-    if (candidate && candidate.includes(`"${requiredKey}"`)) {
+    const candidates = extractAllJsonCandidates(text);
+    // Em reasoning o modelo pode citar JSONs de exemplo/skill antes da resposta final:
+    // prefira o último candidato válido quando vier de reasoning.
+    const ordered = sourceIdx === 1 ? [...candidates].reverse() : candidates;
+    const keysToCheck = requiredKey === 'reply' ? REPLY_ALIASES : [requiredKey];
+    for (const candidate of ordered) {
       try {
-        if (JSON.parse(candidate)[requiredKey] !== undefined) return text;
+        const parsed = JSON.parse(candidate);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        for (const key of keysToCheck) {
+          const val = parsed[key];
+          if (val !== undefined && (typeof val !== 'string' || val.trim().length > 0)) {
+            return text;
+          }
+        }
       } catch {}
     }
   }
