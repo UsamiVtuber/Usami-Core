@@ -40,6 +40,7 @@ import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/ema
 import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/finance-observer-skill.js';
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
+import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
@@ -82,6 +83,7 @@ import { LanceMemoryStore } from './src/lancedb-store.js';
 // Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
 // e chamadores antigos; a implementação agora é o módulo puro de src/.
 export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
+export { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
 // USE_NVIDIA=false desliga a rota NVIDIA mesmo com chave presente (isolamento de testes);
@@ -320,6 +322,10 @@ if (!briefingRegistration.ok) {
 }
 
 const installGitClient = createGitAssistantClient();
+const installCodeBridge = createCodeAgentBridge({
+  dataDir: resolveDataDir(),
+  gitClient: installGitClient,
+});
 
 // Skills locais e externas da Fase 3: Study Companion, Document Creator,
 // Code Inspector, Skill Architect, Calendar Manager, Email Assistant,
@@ -359,7 +365,7 @@ for (const skillTool of [
       return ctx ? [ctx] : [];
     },
   }),
-  ...createGitAssistantTools({ gitClient: installGitClient }),
+  ...createGitAssistantTools({ gitClient: installGitClient, codeBridge: installCodeBridge }),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {
@@ -4185,6 +4191,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
+  const handleBridge = createAgentBridgeHandler({
+    bridge: options.codeBridge || installCodeBridge,
+    allowedOrigins: withExtraOrigins(allowedHostsOrigins.origins),
+  });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
   const server = createServer(async (req, res) => {
     // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
@@ -4224,6 +4234,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
     if (req.url === '/api/agent/suggestions' || req.url.startsWith('/api/agent/suggestions/') || req.url.startsWith('/api/agent/suggestions?')) return handleSuggestions(req, res);
     if (req.url === '/api/agent/briefing' || req.url.startsWith('/api/agent/briefing?')) return handleBriefing(req, res);
+    if (req.url === '/api/agent/presence' || req.url.startsWith('/api/agent/presence?')
+      || req.url === '/api/agent/proposals' || req.url.startsWith('/api/agent/proposals/')
+      || req.url.startsWith('/api/agent/proposals?')) return handleBridge(req, res);
     if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));

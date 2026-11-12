@@ -15,7 +15,8 @@
     "git.push",
     "github.repos",
     "github.pr",
-    "github.issue"
+    "github.issue",
+    "code.propose"
   ],
   "permissions": [1, 3, 4],
   "dependencies": [],

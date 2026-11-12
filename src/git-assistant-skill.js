@@ -49,6 +49,7 @@ export const GIT_ASSISTANT_TOOLS = Object.freeze([
   'github.repos',
   'github.pr',
   'github.issue',
+  'code.propose',
 ]);
 
 const GITHUB_API_BASE = 'https://api.github.com';
@@ -409,6 +410,7 @@ export function createGitAssistantClient({
 
 export function createGitAssistantTools({
   gitClient = createGitAssistantClient(),
+  codeBridge = null,
 } = {}) {
   const statusTool = {
     schema: AGENT_SCHEMAS.tool,
@@ -625,6 +627,56 @@ export function createGitAssistantTools({
     },
   };
 
-  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool];
+  const proposeTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'code.propose',
+    version: '1.0.0',
+    description: 'Propõe uma alteração de código ou melhoria. Se um Code Agent (Antigravity/Claude Code) estiver online via MCP, envia diretamente para ele; caso contrário, abre uma Issue no GitHub.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 15000,
+    parameters: [
+      { name: 'title', type: 'string', required: true, description: 'Título claro da proposta de código.' },
+      { name: 'description', type: 'string', required: false, description: 'Descrição detalhada com contexto e instruções para o Code Agent.' },
+      { name: 'files', type: 'array', required: false, description: 'Lista de arquivos sugeridos para criação ou alteração.' },
+      { name: 'suggestedAction', type: 'string', required: false, description: 'Tipo da ação (feature, bugfix, refactor, doc).' },
+      { name: 'repo', type: 'string', required: false, description: 'Repositório GitHub de destino (padrão UsamiVtuber/Usami-Core).' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === GIT_ASSISTANT_SCHEMA
+        && (result.routedTo === 'code_agent' || result.routedTo === 'github_issue')
+        && isPlainObject(result.proposal);
+    },
+    async execute(args = {}) {
+      if (codeBridge && typeof codeBridge.dispatchProposal === 'function') {
+        const data = await codeBridge.dispatchProposal({
+          title: args.title,
+          description: args.description || args.body || '',
+          files: args.files || [],
+          suggestedAction: args.suggestedAction || args.action || 'feature',
+          repo: args.repo || 'UsamiVtuber/Usami-Core',
+        });
+        return { ok: true, schema: GIT_ASSISTANT_SCHEMA, ...data };
+      }
+      const data = await gitClient.createIssue({
+        repo: args.repo,
+        title: `[Usami Proposal] ${args.title}`,
+        body: args.description || args.body || '',
+        labels: ['usami-proposal'],
+      });
+      return {
+        ok: true,
+        schema: GIT_ASSISTANT_SCHEMA,
+        routedTo: 'github_issue',
+        proposal: { id: `prop-issue-${data.number}`, title: data.title, status: 'pending' },
+        issue: data,
+        message: `Issue #${data.number} criada no GitHub.`,
+      };
+    },
+  };
+
+  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool, proposeTool];
 }
 
