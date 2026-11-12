@@ -271,6 +271,7 @@
       "executionFit": "fits-one-run",
       "demoBoundary": "A usuária autoriza uma ação sensível, vê a execução no histórico e revoga o acesso depois.",
       "scopeNotes": "Depende de S5/S12/S13. Não expor token nem credencial na UI; confirmação é ação explícita.",
+      "status": "done",
       "blockedBy": ["S5", "S12", "S13"],
       "techGuidance": "Reutilizar o padrão de confirmação escrita da aba Memória quando a ação for irreversível."
     }

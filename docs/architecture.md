@@ -227,6 +227,16 @@ nativo `usami-desktop/` (`src/agent_center.rs`, `src/api.rs`, `src/main.rs` via
 `GET /api/agent/executions?limit=50` com exclusividade entre drawers e sem
 placeholders.
 
+A **Central de Permissões, Confirmações e Sugestões/Briefing** (S15) estendeu o
+mesmo drawer (`ActiveDrawer::Skills`) com as abas **Permissões**,
+**Confirmações** e **Sugestões**, consumindo `GET /api/agent/self?focus=tools`,
+`GET / POST /api/agent/permissions`, `GET /api/agent/skills/proposals`,
+`POST /api/agent/confirmations`, `POST /api/agent/skills/:id/install`,
+`GET /api/agent/plans`, `GET / POST /api/agent/suggestions` e
+`GET /api/agent/briefing`, com armamento em 2 passos para confirmações de uso
+único (sem expor tokens), respeito a DND (`23:30–08:30`) e throttle (`unansweredCount`),
+e indicador discreto no botão `#top-skills-btn`.
+
 ## Módulos extraídos na auditoria de 2026-11-08
 
 - `src/provider-parse.js` concentra limpeza/parse da resposta do provedor
