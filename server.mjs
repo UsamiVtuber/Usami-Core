@@ -14,6 +14,8 @@ import { extractSpeechTags } from './src/speech-tags.js';
 import { createMemoryStore, MEMORY_SECTIONS } from './src/memory-store.js';
 import { calculateGain, applyGain, getStage, DAILY_CAP } from './src/affinity.js';
 import { createBondStore } from './src/bond-store.js';
+import { createMoodStore } from './src/mood-store.js';
+import { createMoodStore } from './src/mood-store.js';
 import { createOperationalMemoryStore, OPERATIONAL_DEFAULT_LIMIT, OPERATIONAL_MAX_LIMIT } from './src/operational-memory-store.js';
 import { EXECUTION_ORIGINS, OPERATIONAL_KINDS, OPERATIONAL_STATUSES, PLAN_ORIGINS } from './src/agent-contracts.js';
 import { createToolRegistry } from './src/tool-registry.js';
@@ -24,6 +26,7 @@ import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseB
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
 import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
+import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createAgentCore } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
@@ -213,6 +216,15 @@ try {
   console.error('Aviso: conquistas locais indisponíveis — a lista volta vazia.');
 }
 
+// Humor contínuo da Usami (data/mood.json): evolui com as interações e
+// alimenta o prompt + o monitor de humor no desktop.
+const installMoodStore = createMoodStore({ dataDir: resolveDataDir() });
+try {
+  installMoodStore.load();
+} catch {
+  console.error('Aviso: humor local indisponível — usando estado padrão.');
+}
+
 // Memória operacional do domínio agêntico (data/operational-memory.json):
 // projetos, tarefas e compromissos. Separada de memory.json; rotas em
 // /api/agent/memory com a mesma borda Host/Origin + token.
@@ -288,6 +300,21 @@ try {
   console.error('Aviso: gerenciador de skills indisponível:', error?.message || error);
 }
 
+// Self-Introspection somente leitura (S11): allowlist de fontes (docs,
+// package.json, módulos, registry, skills, execuções e gate), sem ler segredos.
+const installSelfIntrospection = createSelfIntrospection({
+  registry: toolRegistry,
+  skillCatalog: installSkillCatalog,
+  executor: installToolExecutor,
+  permissionGate: installToolGate,
+});
+const selfDescribeRegistration = toolRegistry.register(
+  createSelfDescribeTool({ introspection: installSelfIntrospection }),
+);
+if (!selfDescribeRegistration.ok) {
+  console.error('Aviso: ferramenta self.describe não registrada:', selfDescribeRegistration.errors.join('; '));
+}
+
 const installAgentCore = createAgentCore({
   registry: toolRegistry,
   executor: installToolExecutor,
@@ -316,6 +343,14 @@ export const proactiveEngine = createProactiveEngine({
       gesture: cmd.gesture,
       dedupeKey: `auto_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     });
+    try {
+      installMoodStore.recordEvent({
+        emotion: cmd.emotion,
+        gesture: cmd.gesture,
+        reason: cmd.type === 'idle_nudge' ? 'Ficou sentindo sua falta depois de um tempo em silêncio.' : 'Resolveu puxar assunto por conta própria.',
+        affinity: installMemoryStore.getAll()?.affinity?.score ?? 0,
+      });
+    } catch {}
     queueAvatarCommand({
       type: 'proactive_say',
       message: cmd.message,
@@ -595,6 +630,7 @@ export function createChatHandler(options = {}) {
   // em data/memory.json de verdade a cada npm test.
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
+  const moodStore = 'moodStore' in options ? options.moodStore : installMoodStore;
   const proactive = options.proactiveEngine || proactiveEngine;
   const agentCore = options.agentCore ?? null;
   // Fila de comandos do refino: o comando do chat vai para a MESMA aba que
@@ -671,6 +707,12 @@ export function createChatHandler(options = {}) {
       const today = new Date().toISOString().slice(0, 10);
       const hour = new Date().getHours();
       const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      let currentMood = null;
+      try {
+        currentMood = moodStore ? moodStore.getAll(mem.affinity.score) : null;
+      } catch {
+        currentMood = null;
+      }
       let system = buildPersona({
         affinity: mem.affinity.score,
         sections: memoryStore.getSections(),
@@ -681,6 +723,7 @@ export function createChatHandler(options = {}) {
         date: today,
         timeOfDay,
         personality: personalityStore.get(),
+        mood: currentMood,
       });
 
       // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
@@ -982,11 +1025,29 @@ export function createChatHandler(options = {}) {
 
       const agentTurn = agentCore ? agentCore.dispatchAsync(parsedBody.message) : null;
 
+      let moodPayload = null;
+      try {
+        moodPayload = moodStore
+          ? moodStore.recordChatTurn({
+              userMessage: parsedBody.message,
+              reply: parsed.reply,
+              gesture: parsed.gesture,
+              actions,
+              speechTags: parsed.speechTags,
+              emotion: classification?.emotion,
+              affinity: affinityPayload?.affinity ?? mem.affinity.score,
+            })
+          : null;
+      } catch {
+        moodPayload = null;
+      }
+
       return send(200, {
         reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
         surface,
         ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
         ...(agentTurn ? { agentTurn } : {}),
+        ...(moodPayload ? { mood: moodPayload } : {}),
         // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
         // renomear. contextMs é adição. animationMs é o que a animação custou
         // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
@@ -1522,6 +1583,80 @@ export function createBondHandler(options = {}) {
       const reset = store.reset();
       mirrorBond(reset);
       return send(200, { ok: true, bond: reset });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
+  };
+}
+
+// Humor contínuo (GET /api/mood, POST /api/mood/event, POST /api/mood/reset).
+// Mesma borda de segurança das demais rotas locais (Host/Origin + x-usami-token).
+export function createMoodHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.moodStore || installMoodStore;
+  const memoryStore = 'memoryStore' in options ? options.memoryStore : installMemoryStore;
+
+  const currentAffinity = () => {
+    try {
+      return memoryStore?.getAll?.()?.affinity?.score ?? 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  return async function handleMood(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const route = new URL(req.url || '/api/mood', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/mood') {
+      return send(200, { ok: true, mood: store.getAll(currentAffinity()) });
+    }
+
+    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
+
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+    if (contentType !== 'application/json') {
+      return send(403, { error: 'Content-Type inválido.' });
+    }
+
+    const read = await readRequestBody(req, { limit: 4096 });
+    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+    let payload = {};
+    if (read.body.trim()) {
+      try {
+        payload = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'JSON inválido.' });
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return send(400, { error: 'Corpo inválido.' });
+      }
+    }
+
+    if (route === '/api/mood/event') {
+      const mood = store.recordEvent({
+        emotion: typeof payload.emotion === 'string' ? payload.emotion : 'neutral',
+        gesture: typeof payload.gesture === 'string' ? payload.gesture : '',
+        reason: typeof payload.reason === 'string' ? payload.reason : '',
+        affinity: currentAffinity(),
+      });
+      return send(200, { ok: true, mood });
+    }
+
+    if (route === '/api/mood/reset') {
+      const mood = store.reset(currentAffinity());
+      return send(200, { ok: true, mood });
     }
 
     return send(404, { error: 'Não encontrado.' });
@@ -2190,6 +2325,56 @@ export function createAgentTurnHandler(options = {}) {
     }
     if (result.invalidInput) return send(400, { error: result.error });
     return send(200, { ok: true, turn: result.turn });
+  };
+}
+
+// --- Self-Introspection somente leitura (S11): GET /api/agent/self ----------
+const SELF_FOCUS_VALUES = Object.freeze(['all', 'tools', 'skills', 'modules', 'errors', 'limitations']);
+
+export function createSelfHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const introspection = options.introspection || installSelfIntrospection;
+
+  return async function handleSelf(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/api/agent/self', 'http://127.0.0.1:8787');
+    if (req.method !== 'GET' || url.pathname !== '/api/agent/self') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const focusParam = url.searchParams.get('focus');
+    const focus = focusParam === null ? 'all' : focusParam;
+    if (!SELF_FOCUS_VALUES.includes(focus)) {
+      return send(400, { error: `focus inválido (use ${SELF_FOCUS_VALUES.join('|')}).` });
+    }
+
+    const rawErrorLimit = url.searchParams.get('errorLimit');
+    let errorLimit = DEFAULT_ERROR_LIMIT;
+    if (rawErrorLimit !== null) {
+      const parsed = Number(rawErrorLimit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_ERROR_LIMIT) {
+        return send(400, { error: `errorLimit inválido (inteiro entre 1 e ${MAX_ERROR_LIMIT}).` });
+      }
+      errorLimit = parsed;
+    }
+
+    try {
+      const self = introspection.describe({ focus, errorLimit });
+      return send(200, { ok: true, self });
+    } catch (error) {
+      console.error('Aviso: self-introspection falhou:', error?.message || error);
+      return send(500, { error: 'Não foi possível montar o retrato do sistema.' });
+    }
   };
 }
 
@@ -3442,6 +3627,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // finalizada, sem trocar comportamento real por um pipeline parcial.
   const handleChat = createChatHandler({ agentCore: installAgentCore });
   const handleAgentTurn = createAgentTurnHandler();
+  const handleSelf = createSelfHandler();
   const handleTts = createTtsHandler({ cache: true });
   const handleStt = createSttHandler();
   const handleMediaAnalyze = createMediaAnalyzeHandler();
@@ -3455,6 +3641,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleSkills = createSkillsHandler();
   const handleAchievements = createAchievementsHandler();
   const handlePersonality = createPersonalityHandler();
+  const handleMood = createMoodHandler();
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
@@ -3480,6 +3667,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
       if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
       if (req.url === '/api/personality') return handlePersonality(req, res);
+      if (req.url === '/api/mood' || req.url === '/api/mood/event' || req.url === '/api/mood/reset') return handleMood(req, res);
       if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
         || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
       if (req.url === '/api/plan' || req.url === '/api/learning' || req.url === '/api/learning/verdict'
@@ -3493,6 +3681,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (req.url === '/api/agent/skills' || req.url.startsWith('/api/agent/skills/') || req.url.startsWith('/api/agent/skills?')) return handleSkills(req, res);
       if (req.url === '/api/agent/turn' || req.url === '/api/agent/turns'
         || req.url.startsWith('/api/agent/turns/') || req.url.startsWith('/api/agent/turns?')) return handleAgentTurn(req, res);
+      if (req.url === '/api/agent/self' || req.url.startsWith('/api/agent/self?')) return handleSelf(req, res);
       if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(JSON.stringify({ error: 'Não encontrado.' }));

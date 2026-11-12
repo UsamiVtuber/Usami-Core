@@ -62,6 +62,7 @@ const FACT_SECTIONS = [
  * @param {string} opts.username         como chamar o usuário (ex.: "você", apelido)
  * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
  * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
+ * @param {Object|null} [opts.mood]      estado contínuo de humor (opcional)
  */
 export function buildPersona({
   affinity = 0,
@@ -75,6 +76,7 @@ export function buildPersona({
   personality = null,
   dailyContext = null,
   currentScene = null,
+  mood = null,
 }) {
   const stage = getAffinityStage(affinity);
 
@@ -94,6 +96,13 @@ export function buildPersona({
     ? `\n\n=== CONTEXTO DO SEU DIA ===\n` +
       (effectiveDailyContext ? `${effectiveDailyContext}\n` : '') +
       (effectiveCurrentScene ? `Cena atual: ${effectiveCurrentScene}\n` : '')
+    : '';
+
+  const moodLabel = mood && typeof mood === 'object' ? (mood.label || mood.id) : null;
+  const moodBlock = moodLabel
+    ? `\n\n=== HUMOR ATUAL ===\nAgora você está se sentindo: ${moodLabel}` +
+      (mood.reason ? ` (${mood.reason})` : '') +
+      `. Deixe esse estado emocional colorir naturalmente suas palavras, expressões e gestos neste turno — sem mencionar números ou explicar nenhum monitor.`
     : '';
 
   // Ajustes do usuário (sliders + instruções): refinam o tom, mas as regras de
@@ -192,7 +201,7 @@ ${summariesBlock}
 ${historyBlock}
 
 === CONTEXTO AGORA ===
-Data: ${date} (${timeOfDay}).${dailySceneBlock}
+Data: ${date} (${timeOfDay}).${dailySceneBlock}${moodBlock}
 
 ${username} acabou de falar com você.`;
 }
