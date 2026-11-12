@@ -228,8 +228,8 @@ async function handleToolCall(name, args) {
       const res = await apiRequest('/api/n8n/command', {
         method: 'POST',
         body: {
-          text: `[Mensagem do Code Agent ${AGENT_NAME}]: ${args.message}`,
-          author: AGENT_NAME,
+          type: 'say',
+          text: `[Code Agent]: ${args.message}`,
         },
       });
       return res.data || { ok: true, sent: true };
