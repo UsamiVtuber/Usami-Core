@@ -553,3 +553,273 @@ test('/api/chat executa ferramenta operacional segura (nível <= 3) antes do LLM
   assert.equal(lvl4Turn.data.turn.status, 'awaiting_confirmation');
 });
 
+test('perguntas naturais sobre skills novas acionam self.describe sem truncar skills/tools por módulos', async t => {
+  const { formatAgentTurnPromptContext } = await import('../src/agent-core.js');
+  const dir = mkdtempSync(join(tmpdir(), 'usami-self-chat-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const registry = createToolRegistry();
+  const manyModules = Array.from({ length: 120 }, (_, i) => ({
+    name: `modulo-${i}`,
+    file: `src/modulo-${i}.js`,
+    area: 'runtime',
+  }));
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'self.describe',
+    version: '1.0.0',
+    description: 'Descreve runtime e skills.',
+    origin: 'runtime',
+    permissionLevel: 1,
+    timeoutMs: 2000,
+    parameters: [{ name: 'focus', type: 'string', required: false }],
+    verify: r => Array.isArray(r?.skills) && Array.isArray(r?.tools),
+    execute: () => ({
+      summary: '11 skills ativas e 31 ferramentas.',
+      modules: manyModules,
+      tools: [{ name: 'finance.accounts', active: true }, { name: 'calendar.list', active: true }],
+      skills: [{ id: 'finance-observer', description: 'Consulta contas via Pluggy.', state: 'installed', activation: { canActivate: true } }],
+      integrations: [{ id: 'pluggy', status: 'pronta' }],
+      limitations: ['Modo somente leitura.'],
+      recentErrors: { totalFailures: 0, items: [] },
+    }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'memory.search',
+    version: '1.0.0',
+    description: 'Busca memória.',
+    origin: 'runtime',
+    permissionLevel: 1,
+    timeoutMs: 2000,
+    parameters: [{ name: 'query', type: 'string', required: true }],
+    verify: r => Boolean(r?.query),
+    execute: args => ({ query: args.query }),
+  });
+
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const tSkills = await agentCore.runOperationalForChat('Você sabe sobre as suas skills novas?');
+  assert.equal(tSkills?.tool, 'self.describe');
+  assert.equal(tSkills?.status, 'executed');
+
+  const promptBlock = formatAgentTurnPromptContext(tSkills);
+  assert.match(promptBlock, /finance-observer/);
+  assert.match(promptBlock, /calendar\.list/);
+  assert.doesNotMatch(promptBlock, /modulo-50/);
+
+  const tWhatKnow = await agentCore.runOperationalForChat('O que você sabe fazer agora?');
+  assert.equal(tWhatKnow?.tool, 'self.describe');
+
+  const tMemory = await agentCore.runOperationalForChat('O que você sabe sobre o meu café?');
+  assert.equal(tMemory?.tool, 'memory.search');
+
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'git.status',
+    version: '1.0.0',
+    description: 'Status Git.',
+    origin: 'skill',
+    permissionLevel: 1,
+    timeoutMs: 2000,
+    parameters: [{ name: 'target', type: 'string', required: false }],
+    verify: r => typeof r?.branch === 'string',
+    execute: args => ({ target: args.target || 'usami', branch: 'main', modified: ['src/agent-core.js'], staged: [], untracked: [] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'git.log',
+    version: '1.0.0',
+    description: 'Log Git.',
+    origin: 'skill',
+    permissionLevel: 1,
+    timeoutMs: 2000,
+    parameters: [{ name: 'target', type: 'string', required: false }, { name: 'limit', type: 'number', required: false }],
+    verify: r => Array.isArray(r?.commits),
+    execute: () => ({ commits: [{ hash: 'abc1234', subject: 'fix' }] }),
+  });
+
+  const tRepoStatus = await agentCore.runOperationalForChat('Mostra o status do repositório local');
+  assert.equal(tRepoStatus?.tool, 'git.status');
+  const tGitAssistant = await agentCore.runOperationalForChat('Quero ver o git-assistant em ação');
+  assert.equal(tGitAssistant?.tool, 'git.status');
+  const tRepoCommits = await agentCore.runOperationalForChat('Quais os últimos commits do repositório?');
+  assert.equal(tRepoCommits?.tool, 'git.log');
+});
+
+test('jsonText, parseProviderRaw e retry/fallback preservam resposta real pós-skill na rota NVIDIA', async t => {
+  const { jsonText } = await import('../src/llm-router.js');
+  const { parseProviderRaw } = await import('../src/provider-parse.js');
+  const { formatExecutedTurnFallbackReply } = await import('../src/agent-core.js');
+
+  const extracted = jsonText({
+    content: '',
+    reasoning: 'Analisando ferramenta {"accounts":[{"name":"Nubank"}]} e montando resposta: {"reply":"Você tem R$ 100 na conta.","gesture":"nod"}',
+  }, 'reply');
+  assert.equal(parseProviderRaw(extracted).reply, 'Você tem R$ 100 na conta.');
+
+  assert.equal(parseProviderRaw('{"resposta":"Tudo certo por aqui!","gesture":"tilt"}').reply, 'Tudo certo por aqui!');
+  assert.equal(parseProviderRaw('{"tool":"finance.accounts"} {"reply":"Seu saldo é 50 reais."}').reply, 'Seu saldo é 50 reais.');
+
+  const prevNvidia = process.env.USE_NVIDIA;
+  process.env.USE_NVIDIA = 'true';
+  t.after(() => {
+    if (prevNvidia === undefined) delete process.env.USE_NVIDIA;
+    else process.env.USE_NVIDIA = prevNvidia;
+  });
+
+  const dir = mkdtempSync(join(tmpdir(), 'usami-retry-skill-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const memoryStore = createMemoryStore({ dataDir: dir });
+  memoryStore.load();
+  const personalityStore = createPersonalityStore({ dataDir: dir });
+  personalityStore.load();
+
+  const registry = createToolRegistry();
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'finance.accounts',
+    version: '1.0.0',
+    description: 'Lista contas.',
+    origin: 'skill',
+    permissionLevel: 2,
+    timeoutMs: 2000,
+    parameters: [],
+    verify: r => Array.isArray(r?.accounts),
+    execute: () => ({ accounts: [{ name: 'Nubank Real', balance: 777, currencyCode: 'BRL' }] }),
+  });
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const makeReq = body => ({
+    method: 'POST',
+    url: '/api/chat',
+    headers: { host: '127.0.0.1:8787', 'content-type': 'application/json' },
+    async *[Symbol.asyncIterator]() { yield Buffer.from(body); },
+  });
+  const callChat = async handler => {
+    const res = { statusCode: null, body: '' };
+    res.writeHead = s => { res.statusCode = s; };
+    res.end = b => { res.body = b; };
+    await handler(makeReq(JSON.stringify({ message: 'Qual meu saldo no Pluggy?' })), res);
+    return { status: res.statusCode, data: JSON.parse(res.body) };
+  };
+
+  let attempts = 0;
+  const retryHandler = createChatHandler({
+    agentCore,
+    memoryStore,
+    personalityStore,
+    moodStore: null,
+    vaultSearch: async () => null,
+    getKey: async () => null,
+    generateReply: async () => {
+      attempts += 1;
+      if (attempts === 1) return '{"reply":""}';
+      return '{"reply":"Seu saldo no Nubank Real é 777 BRL!","gesture":"nod"}';
+    },
+  });
+  const retried = await callChat(retryHandler);
+  assert.equal(attempts, 2);
+  assert.equal(retried.status, 200);
+  assert.equal(retried.data.source, 'nvidia');
+  assert.equal(retried.data.reply, 'Seu saldo no Nubank Real é 777 BRL!');
+
+  const fallbackHandler = createChatHandler({
+    agentCore,
+    memoryStore,
+    personalityStore,
+    moodStore: null,
+    vaultSearch: async () => null,
+    getKey: async () => null,
+    generateReply: async () => '{"reply":""}',
+  });
+  const fallenBack = await callChat(fallbackHandler);
+  assert.equal(fallenBack.status, 200);
+  assert.match(fallenBack.data.reply, /Nubank Real: 777 BRL/);
+  assert.match(formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'finance.accounts',
+    result: { accounts: [{ name: 'Nubank Real', balance: 777, currencyCode: 'BRL' }] },
+  }) || '', /Nubank Real: 777 BRL/);
+});
+
+test('research.search dispara em pedidos naturais de notícias e confirmações do histórico', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-research-followup-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const queries = [];
+  const registry = createToolRegistry();
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'research.search',
+    version: '1.0.0',
+    description: 'Pesquisa web.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 5000,
+    parameters: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'provider', type: 'string', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ],
+    verify: r => Array.isArray(r?.results),
+    execute: ({ query }) => {
+      queries.push(query);
+      return {
+        query,
+        count: 1,
+        results: [{ title: `Manchete sobre ${query}`, url: 'https://example.com/news', snippet: 'Resumo breve.' }],
+      };
+    },
+  });
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const direct = await agentCore.runOperationalForChat('pesquise notícias de IA');
+  assert.equal(direct?.tool, 'research.search');
+  assert.equal(direct?.status, 'executed');
+  assert.equal(direct?.args?.query, undefined);
+  assert.equal(queries.at(-1), 'notícias de IA');
+
+  const followup = await agentCore.runOperationalForChat('e ai o que achou de noticias?', {
+    history: [
+      { role: 'assistant', content: 'Hmph, quer que eu pesquise notícias de IA pra você? Vou dar uma olhada...' },
+    ],
+  });
+  assert.equal(followup?.tool, 'research.search');
+  assert.equal(queries.at(-1), 'notícias de IA');
+
+  const confirmed = await agentCore.runOperationalForChat('sim, por favor', {
+    history: [
+      { role: 'assistant', content: 'Hmph, quer que eu pesquise notícias de IA pra você? Vou dar uma olhada...' },
+      { role: 'user', content: 'e ai o que achou de noticias?' },
+      { role: 'assistant', content: 'Ah... acabei me distraindo! Quer que eu pesquise agora de verdade?' },
+    ],
+  });
+  assert.equal(confirmed?.tool, 'research.search');
+  assert.equal(confirmed?.status, 'executed');
+  assert.equal(queries.at(-1), 'notícias de IA');
+
+  const casual = await agentCore.runOperationalForChat('sim', {
+    history: [{ role: 'assistant', content: 'Você gosta de café?' }],
+  });
+  assert.equal(casual, null);
+});
+
