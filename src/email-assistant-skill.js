@@ -49,6 +49,21 @@ export function createEmailAssistantTools({
         && Array.isArray(result.messages);
     },
     async execute(args = {}) {
+      if (typeof googleAuth.callN8nAssistant === 'function' && googleAuth.isN8nConfigured?.()) {
+        const res = await googleAuth.callN8nAssistant({
+          action: 'list_emails',
+          params: { query: args.query, maxResults: args.maxResults },
+        });
+        if (res && res.ok && Array.isArray(res.messages)) {
+          return {
+            ok: true,
+            schema: EMAIL_SCHEMA,
+            provider: 'gmail-n8n',
+            count: res.messages.length,
+            messages: res.messages,
+          };
+        }
+      }
       const limit = Number.isInteger(args.maxResults) ? Math.min(Math.max(args.maxResults, 1), 20) : 10;
       const params = new URLSearchParams({ maxResults: String(limit) });
       if (typeof args.query === 'string' && args.query.trim()) {

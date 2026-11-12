@@ -55,6 +55,28 @@ export function createCalendarManagerTools({
         && Array.isArray(result.events);
     },
     async execute(args = {}) {
+      if (typeof googleAuth.callN8nAssistant === 'function' && googleAuth.isN8nConfigured?.()) {
+        const res = await googleAuth.callN8nAssistant({
+          action: 'list_events',
+          params: {
+            timeMin: args.timeMin,
+            timeMax: args.timeMax,
+            maxResults: args.maxResults,
+            calendarId: args.calendarId,
+            query: args.query,
+          },
+        });
+        if (res && res.ok && Array.isArray(res.events)) {
+          return {
+            ok: true,
+            schema: CALENDAR_SCHEMA,
+            provider: 'google-calendar-n8n',
+            calendarId: args.calendarId || 'primary',
+            count: res.events.length,
+            events: res.events,
+          };
+        }
+      }
       const calId = sanitizeCalendarId(args.calendarId);
       const qs = buildListEventsQuery({
         timeMin: args.timeMin ?? null,

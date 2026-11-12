@@ -30,9 +30,37 @@ export function createGoogleAuthClient({
     return { directToken, clientId, clientSecret, refreshToken, hasRefreshTuple };
   }
 
+  function getN8nWebhookUrl() {
+    return String(envProvider('N8N_GOOGLE_WEBHOOK_URL') || '').trim();
+  }
+
+  function isN8nConfigured() {
+    return Boolean(getN8nWebhookUrl());
+  }
+
   function isConfigured() {
     const creds = readCredentials();
-    return Boolean(creds.directToken || creds.hasRefreshTuple);
+    return Boolean(creds.directToken || creds.hasRefreshTuple || isN8nConfigured());
+  }
+
+  async function callN8nAssistant({ action, params = {}, signal } = {}) {
+    const webhookUrl = getN8nWebhookUrl();
+    if (!webhookUrl) {
+      throw new Error('N8N_GOOGLE_WEBHOOK_URL não configurado.');
+    }
+
+    const response = await fetchImpl(webhookUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action, params }),
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`n8n Google Assistant falhou (HTTP ${response.status}).`);
+    }
+
+    return await response.json();
   }
 
   async function refreshAccessToken({ signal, force = false } = {}) {
@@ -62,7 +90,9 @@ export function createGoogleAuthClient({
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || typeof payload?.access_token !== 'string' || !payload.access_token) {
-      throw new Error(`Falha ao renovar token Google OAuth (HTTP ${response.status}).`);
+      const detail = payload?.error_description || payload?.error || '';
+      const suffix = detail ? `: ${String(detail).slice(0, 120)}` : '';
+      throw new Error(`Falha ao renovar token Google OAuth (HTTP ${response.status}${suffix}).`);
     }
 
     cachedToken = payload.access_token;
@@ -111,6 +141,8 @@ export function createGoogleAuthClient({
 
   return {
     isConfigured,
+    isN8nConfigured,
+    callN8nAssistant,
     refreshAccessToken,
     requestJson,
   };
