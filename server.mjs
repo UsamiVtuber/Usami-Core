@@ -79,6 +79,29 @@ import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-pa
 import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
 import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpan } from './src/telemetry.js';
 import { LanceMemoryStore } from './src/lancedb-store.js';
+import {
+  isAllowedOrigin as routeIsAllowedOrigin,
+  denyWithoutToken as routeDenyWithoutToken,
+  readBodyBuffer as routeReadBodyBuffer,
+  readRequestBody as routeReadRequestBody,
+  sendJsonResponse,
+} from './src/routes/http-helpers.js';
+import {
+  createAgentTurnHandler as modularCreateAgentTurnHandler,
+  createSelfHandler as modularCreateSelfHandler,
+  createSuggestionsHandler as modularCreateSuggestionsHandler,
+  createBriefingHandler as modularCreateBriefingHandler,
+} from './src/routes/agent-routes.js';
+import {
+  clampRagNumber as modularClampRagNumber,
+  createRagContextHandler as modularCreateRagContextHandler,
+  createPersonalityHandler as modularCreatePersonalityHandler,
+  createMemoryHandler as modularCreateMemoryHandler,
+  createBondHandler as modularCreateBondHandler,
+  createMoodHandler as modularCreateMoodHandler,
+  createOperationalMemoryHandler as modularCreateOperationalMemoryHandler,
+  memorySnapshot,
+} from './src/routes/memory-routes.js';
 
 // Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
 // e chamadores antigos; a implementação agora é o módulo puro de src/.
@@ -557,52 +580,23 @@ export async function sendToN8nWebhook(eventType, payload) {
   }
 }
 
-// Host e Origin precisam estar na allowlist fechada (src/api-security.js). A
-// regra antiga "Origin == Host" aceitava DNS rebinding: o atacante controla os
-// dois. Origens/hosts extras (LAN, terminal.local): USAMI_ALLOWED_ORIGINS e
-// USAMI_ALLOWED_HOSTS.
+// Host e Origin precisam estar na allowlist fechada (src/api-security.js).
 export function isAllowedOrigin(origin, host, allowedOrigins = DEFAULT_ALLOWED_ORIGINS) {
-  return isAllowedRequest(origin, host, allowedOrigins);
+  return routeIsAllowedOrigin(origin, host, allowedOrigins);
 }
 
 // Rotas sensíveis (memória, vault, fila do n8n) exigem também o token.
 function denyWithoutToken(req, options, send) {
-  const configuredToken = options && 'apiToken' in options ? options.apiToken : readApiToken();
-  const denied = checkApiToken(req, configuredToken);
-  if (!denied) return false;
-  send(denied.status, { error: denied.error });
-  return true;
+  return routeDenyWithoutToken(req, options, send);
 }
 
-// Leitor de body único das rotas /api. Acumula Buffers (`body += chunk`
-// decodifica cada pedaço isolado e um multibyte partido na fronteira vira U+FFFD)
-// e decodifica UMA vez no fim. Ao exceder o limite, drena o restante com
-// req.resume() em vez de `break`: `break` num for-await fecha o IncomingMessage e
-// o 413/queixa morre no socket, então o cliente nunca recebe a resposta.
+// Leitor de body único das rotas /api.
 export async function readBodyBuffer(req, { limit = 8192 } = {}) {
-  const chunks = [];
-  let total = 0;
-  let tooLarge = false;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    if (tooLarge) continue;
-    total += buffer.length;
-    if (total > limit) {
-      tooLarge = true;
-      chunks.length = 0; // o excesso já decidiu; não guarda o corpo
-      req.resume?.();
-      continue;
-    }
-    chunks.push(buffer);
-  }
-  if (tooLarge) return { ok: false, status: 413 };
-  return { ok: true, buffer: Buffer.concat(chunks) };
+  return routeReadBodyBuffer(req, { limit });
 }
 
 export async function readRequestBody(req, { limit = 8192 } = {}) {
-  const result = await readBodyBuffer(req, { limit });
-  if (!result.ok) return result;
-  return { ok: true, body: result.buffer.toString('utf8') };
+  return routeReadRequestBody(req, { limit });
 }
 
 export function parseChatBody(body) {
@@ -1531,610 +1525,53 @@ export function createN8nCommandHandler(options = {}) {
   };
 }
 
-// --- RAG: contexto do vault Obsidian ---------------------------------------
-
-// Headers de tuning do RAG (B18): `Number()` cru aceitava Infinity, negativo e
-// 1e9 — o mesmo clamp do vault-index, com teto por grandeza.
+// --- RAG & Memória (modularizados em src/routes/memory-routes.js) ------------
 export function clampRagNumber(value, fallback, max) {
-  const number = Math.floor(Number(value));
-  if (!Number.isFinite(number) || number < 1) return fallback;
-  return Math.min(number, max);
+  return modularClampRagNumber(value, fallback, max);
 }
 
 export function createRagContextHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const vaultRelative = options.vaultRelative || process.env.USAMI_RAG_VAULT;
-
-  return async function handleRagContext(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    const origin = req.headers.origin;
-    const host = req.headers.host;
-    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    if (req.method !== 'GET' || req.url !== '/api/rag/context') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const maxFiles = clampRagNumber(req.headers['x-rag-max-files'], 10, 50);
-    const maxCharsPerFile = clampRagNumber(req.headers['x-rag-max-chars'], 2000, 20000);
-    const maxTotalChars = clampRagNumber(req.headers['x-rag-max-total'], 6000, 60000);
-
-    let context;
-    try {
-      context = await readRagContext({
-        vaultRelative,
-        maxFiles,
-        maxCharsPerFile,
-        maxTotalChars,
-      });
-    } catch (error) {
-      return send(500, { error: 'Erro ao ler contexto RAG: ' + error.message });
-    }
-
-    return send(200, {
-      ok: true,
-      context: context || '',
-      hasContext: Boolean(context),
-      source: 'vault-obsidian',
-    });
-  };
+  return modularCreateRagContextHandler(options);
 }
 
-// --- Memória: inspeção e exclusão granular ---------------------------------
-
-// Snapshot para a UI: fatos por seção, recentes, resumos, dias de histórico e
-// afinidade. O conteúdo das mensagens não sai daqui — a aba só precisa do que
-// dá para apagar.
-function memorySnapshot(store, nowIso = new Date().toISOString()) {
-  const data = store.getAll();
-  return {
-    version: data.version,
-    user: { name: data.user.name, nickname: data.user.nickname, createdAt: data.user.createdAt },
-    sections: store.getSections(),
-    recentFacts: data.recentFacts.map((item) => ({ ...item, expired: item.expiresAt <= nowIso })),
-    summaries: store.getSummaries(),
-    history: Object.entries(data.dailyHistory)
-      .filter(([, messages]) => messages.length)
-      .map(([date, messages]) => ({ date, count: messages.length }))
-      .sort((a, b) => (a.date < b.date ? -1 : 1)),
-    affinity: store.getAffinity(),
-    // Cópia dos medidores do vínculo guardada no memory.json; a fonte segue
-    // sendo o bond.json, exposta em /api/bond.
-    bond: store.getBondMirror(),
-  };
-}
-
-const FORGET_CONFIRMATION = 'APAGAR';
-const FORGET_KINDS = new Set(['fact', 'recent', 'section', 'summary', 'history', 'all']);
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-// GET devolve os ajustes e o catálogo de traços; POST grava (traços 0–100 e
-// instruções extras) ou, com `reset: true`, volta ao padrão. Mesma borda da
-// memória: origem allowlisted + X-Usami-Token (fail-closed sem token no servidor).
 export function createPersonalityHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.personalityStore || installPersonalityStore;
-  const traits = Object.entries(TRAITS).map(([key, value]) => ({ key, label: value.label }));
-
-  return async function handlePersonality(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    if (req.url !== '/api/personality') return send(404, { error: 'Não encontrado.' });
-    if (req.method === 'GET') {
-      return send(200, { ok: true, personality: store.get(), traits, customPromptMax: CUSTOM_PROMPT_MAX });
-    }
-    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
-
-    const read = await readRequestBody(req, { limit: 4096 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-
-    try {
-      const saved = payload.reset === true ? store.reset() : store.save(normalizePersonality(payload));
-      return send(200, { ok: true, personality: saved });
-    } catch {
-      return send(500, { error: 'Não foi possível salvar a personalidade.' });
-    }
-  };
+  return modularCreatePersonalityHandler({
+    personalityStore: installPersonalityStore,
+    ...options,
+  });
 }
 
 export function createMemoryHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.memoryStore || installMemoryStore;
-  // Usado só depois do "apagar tudo": os medidores vivem no bond.json, então o
-  // espelho volta em seguida em vez de sumir junto com os fatos.
-  const bond = 'bondStore' in options ? options.bondStore : installBondStore;
-
-  return async function handleMemory(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    const origin = req.headers.origin;
-    const host = req.headers.host;
-    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    if (req.method === 'GET' && req.url === '/api/memory') {
-      return send(200, { ok: true, memory: memorySnapshot(store) });
-    }
-
-    if (req.method === 'POST' && req.url === '/api/memory/maintenance') {
-      const today = new Date().toISOString().slice(0, 10);
-      try {
-        await summarizePendingDays({
-          store,
-          today,
-          summarize: useNvidia() ? summarizeDay : undefined,
-        });
-      } catch (err) {
-        console.warn('[maintenance] summarizePendingDays falhou:', err?.message || err);
-      }
-
-      try {
-        await consolidateFacts({ store, today });
-      } catch (err) {
-        console.warn('[maintenance] consolidateFacts falhou:', err?.message || err);
-      }
-
-      try {
-        getVaultIndex().refresh();
-      } catch (err) {
-        console.warn('[maintenance] getVaultIndex refresh falhou:', err?.message || err);
-      }
-
-      let lanceDbCount = 0;
-      try {
-        const lanceStore = options.lanceStore || new LanceMemoryStore({ dataDir: resolveDataDir() });
-        await lanceStore.init();
-        lanceDbCount = await lanceStore.count();
-      } catch (err) {
-        console.warn('[maintenance] LanceDB check falhou:', err?.message || err);
-      }
-
-      return send(200, {
-        ok: true,
-        maintenanceAt: new Date().toISOString(),
-        today,
-        lanceDbChunks: lanceDbCount,
-        memory: memorySnapshot(store),
-      });
-    }
-
-    if (req.method !== 'POST' || req.url !== '/api/memory/forget') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') {
-      return send(403, { error: 'Content-Type inválido.' });
-    }
-
-    const read = await readRequestBody(req, { limit: 8192 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-
-    const kind = payload?.kind;
-    if (!FORGET_KINDS.has(kind)) {
-      return send(400, { error: 'Tipo inválido. Use fact, recent, section, summary, history ou all.' });
-    }
-    // Confirmação escrita: nada é apagado sem o token exato no corpo.
-    if (String(payload.confirm ?? '').trim().toUpperCase() !== FORGET_CONFIRMATION) {
-      return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
-    }
-
-    let removed = 0;
-    switch (kind) {
-      case 'fact': {
-        if (!MEMORY_SECTIONS.includes(payload.section)) return send(400, { error: 'Seção inválida.' });
-        if (typeof payload.fact !== 'string' || !payload.fact.trim()) return send(400, { error: 'Fato ausente.' });
-        removed = store.deleteFact(payload.section, payload.fact) ? 1 : 0;
-        break;
-      }
-      case 'recent': {
-        if (typeof payload.fact !== 'string' || !payload.fact.trim()) return send(400, { error: 'Fato ausente.' });
-        removed = store.deleteRecentFact(payload.fact) ? 1 : 0;
-        break;
-      }
-      case 'section': {
-        if (!MEMORY_SECTIONS.includes(payload.section)) return send(400, { error: 'Seção inválida.' });
-        removed = store.clearSection(payload.section);
-        break;
-      }
-      case 'summary': {
-        if (!DATE_PATTERN.test(String(payload.date ?? ''))) return send(400, { error: 'Data inválida (YYYY-MM-DD).' });
-        removed = store.deleteSummary(payload.date) ? 1 : 0;
-        break;
-      }
-      case 'history': {
-        if (payload.date !== undefined) {
-          if (!DATE_PATTERN.test(String(payload.date))) return send(400, { error: 'Data inválida (YYYY-MM-DD).' });
-          removed = (store.getAll().dailyHistory[payload.date] || []).length;
-          store.clearTodayHistory(payload.date);
-        } else {
-          removed = store.clearAllHistory();
-        }
-        break;
-      }
-      case 'all': {
-        store.reset();
-        if (bond) {
-          try {
-            store.setBondMirror(bond.getAll());
-          } catch (error) {
-            console.error('Aviso: espelho do vínculo falhou após limpar a memória:', error?.message || error);
-          }
-        }
-        break;
-      }
-    }
-
-    return send(200, { ok: true, forgotten: kind, removed, memory: memorySnapshot(store) });
-  };
+  return modularCreateMemoryHandler({
+    memoryStore: installMemoryStore,
+    bondStore: installBondStore,
+    useNvidia,
+    ...options,
+  });
 }
 
-// Vínculo do VN: leitura, ganho por resposta, importação única do
-// localStorage antigo e reset. A regra do XP vive no core (bond-store.js),
-// não no cliente — por isso web e desktop chegam ao mesmo número.
 export function createBondHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.bondStore || installBondStore;
-  // Espelho em memory.json: a aba Memória lê os mesmos medidores por
-  // /api/memory, sem precisar consultar duas rotas. Falha aqui nunca derruba a
-  // resposta do vínculo — o bond.json continua sendo a fonte.
-  const memory = 'memoryStore' in options ? options.memoryStore : installMemoryStore;
-  const mirrorBond = (snapshot) => {
-    if (!memory || typeof memory.setBondMirror !== 'function') return;
-    try {
-      memory.setBondMirror(snapshot);
-    } catch (error) {
-      console.error('Aviso: espelho do vínculo na memória falhou:', error?.message || error);
-    }
-  };
-  // Reavaliação pós-evento: o desbloqueio nasce da atividade do vínculo, mas
-  // nunca derruba a resposta do bond se a gravação das conquistas falhar.
-  const achievements = 'achievementsStore' in options ? options.achievementsStore : installAchievementsStore;
-  const reevaluateAchievements = () => {
-    if (!achievements) return;
-    try {
-      achievements.reevaluate(store.getAll());
-    } catch (error) {
-      console.error('Aviso: reavaliação de conquistas falhou:', error?.message || error);
-    }
-  };
-
-  return async function handleBond(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    const origin = req.headers.origin;
-    const host = req.headers.host;
-    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const route = new URL(req.url || '/api/bond', 'http://127.0.0.1:8787').pathname;
-
-    if (req.method === 'GET' && route === '/api/bond') {
-      return send(200, { ok: true, bond: store.getAll() });
-    }
-
-    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') {
-      return send(403, { error: 'Content-Type inválido.' });
-    }
-
-    const read = await readRequestBody(req, { limit: 16384 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-
-    if (route === '/api/bond/event') {
-      // Fim de chamada de voz: companhia por minuto inteiro.
-      if (payload.kind === 'call') {
-        const minutes = Number(payload.minutes);
-        if (!Number.isFinite(minutes) || minutes < 1) {
-          return send(400, { error: 'Minutos inválidos.' });
-        }
-        const called = store.awardCall(minutes);
-        if (called.changed) {
-          reevaluateAchievements();
-          mirrorBond(called);
-        }
-        return send(200, { ok: true, bond: called });
-      }
-      if (typeof payload.content !== 'string' || !payload.content.trim()) {
-        return send(400, { error: 'Conteúdo ausente.' });
-      }
-      const spoken = payload.spoken === true;
-      const awarded = store.awardChat(payload.content, { spoken });
-      if (awarded.changed) {
-        reevaluateAchievements();
-        mirrorBond(awarded);
-      }
-      return send(200, { ok: true, bond: awarded });
-    }
-
-    if (route === '/api/bond/import') {
-      const imported = store.importState({ intimacy: payload.intimacy, log: payload.log });
-      if (imported.imported) {
-        reevaluateAchievements();
-        mirrorBond(imported);
-      }
-      return send(200, { ok: true, bond: imported });
-    }
-
-    if (route === '/api/bond/reset') {
-      // Mesma confirmação escrita da memória: nada é apagado sem o token no corpo.
-      if (String(payload.confirm ?? '').trim().toUpperCase() !== FORGET_CONFIRMATION) {
-        return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
-      }
-      const reset = store.reset();
-      mirrorBond(reset);
-      return send(200, { ok: true, bond: reset });
-    }
-
-    return send(404, { error: 'Não encontrado.' });
-  };
+  return modularCreateBondHandler({
+    bondStore: installBondStore,
+    memoryStore: installMemoryStore,
+    achievementsStore: installAchievementsStore,
+    ...options,
+  });
 }
 
-// Humor contínuo (GET /api/mood, POST /api/mood/event, POST /api/mood/reset).
-// Mesma borda de segurança das demais rotas locais (Host/Origin + x-usami-token).
 export function createMoodHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.moodStore || installMoodStore;
-  const memoryStore = 'memoryStore' in options ? options.memoryStore : installMemoryStore;
-
-  const currentAffinity = () => {
-    try {
-      return memoryStore?.getAll?.()?.affinity?.score ?? 0;
-    } catch {
-      return 0;
-    }
-  };
-
-  return async function handleMood(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const route = new URL(req.url || '/api/mood', 'http://127.0.0.1:8787').pathname;
-
-    if (req.method === 'GET' && route === '/api/mood') {
-      return send(200, { ok: true, mood: store.getAll(currentAffinity()) });
-    }
-
-    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') {
-      return send(403, { error: 'Content-Type inválido.' });
-    }
-
-    const read = await readRequestBody(req, { limit: 4096 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload = {};
-    if (read.body.trim()) {
-      try {
-        payload = JSON.parse(read.body);
-      } catch {
-        return send(400, { error: 'JSON inválido.' });
-      }
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        return send(400, { error: 'Corpo inválido.' });
-      }
-    }
-
-    if (route === '/api/mood/event') {
-      const mood = store.recordEvent({
-        emotion: typeof payload.emotion === 'string' ? payload.emotion : 'neutral',
-        gesture: typeof payload.gesture === 'string' ? payload.gesture : '',
-        reason: typeof payload.reason === 'string' ? payload.reason : '',
-        affinity: currentAffinity(),
-      });
-      return send(200, { ok: true, mood });
-    }
-
-    if (route === '/api/mood/reset') {
-      const mood = store.reset(currentAffinity());
-      return send(200, { ok: true, mood });
-    }
-
-    return send(404, { error: 'Não encontrado.' });
-  };
-}
-
-// Memória operacional: projetos, tarefas e compromissos. É a camada que o
-// Memory Engine não tinha; `/api/memory` continua sendo fatos semânticos.
-// Consulta por status/projeto/tipo/janela de dueAt e trilha append-only.
-const OPERATIONAL_RECORD_PATH_RE = /^\/api\/agent\/memory\/(op-[0-9a-f]{12})$/;
-
-function parseOperationalQuery(searchParams, { forList }) {
-  const limitValue = searchParams.get('limit');
-  let limit = forList ? OPERATIONAL_DEFAULT_LIMIT : 100;
-  if (limitValue !== null) {
-    const parsed = Number(limitValue);
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > OPERATIONAL_MAX_LIMIT) {
-      return { ok: false, error: `limit inválido (inteiro entre 1 e ${OPERATIONAL_MAX_LIMIT}).` };
-    }
-    limit = parsed;
-  }
-  if (!forList) return { ok: true, limit };
-
-  const filters = { limit };
-  const status = searchParams.get('status');
-  if (status !== null) {
-    if (!OPERATIONAL_STATUSES.includes(status)) {
-      return { ok: false, error: `status inválido (use ${OPERATIONAL_STATUSES.join('|')}).` };
-    }
-    filters.status = status;
-  }
-  const kind = searchParams.get('kind');
-  if (kind !== null) {
-    if (!OPERATIONAL_KINDS.includes(kind)) {
-      return { ok: false, error: `kind inválido (use ${OPERATIONAL_KINDS.join('|')}).` };
-    }
-    filters.kind = kind;
-  }
-  const projectId = searchParams.get('projectId');
-  if (projectId !== null) {
-    if (!/^op-[0-9a-f]{12}$/.test(projectId)) return { ok: false, error: 'projectId inválido.' };
-    filters.projectId = projectId;
-  }
-  for (const key of ['from', 'to']) {
-    const value = searchParams.get(key);
-    if (value === null) continue;
-    if (Number.isNaN(Date.parse(value))) return { ok: false, error: `${key} inválido (data ISO-8601).` };
-    filters[key] = value;
-  }
-  return { ok: true, filters };
+  return modularCreateMoodHandler({
+    moodStore: installMoodStore,
+    memoryStore: installMemoryStore,
+    ...options,
+  });
 }
 
 export function createOperationalMemoryHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.operationalStore || installOperationalStore;
-
-  return async function handleOperationalMemory(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const url = new URL(req.url || '/api/agent/memory', 'http://127.0.0.1:8787');
-    const path = url.pathname;
-
-    if (req.method === 'GET') {
-      if (path === '/api/agent/memory/trail') {
-        const query = parseOperationalQuery(url.searchParams, { forList: false });
-        if (!query.ok) return send(400, { error: query.error });
-        const trail = store.trail({ limit: query.limit });
-        return send(200, { ok: true, trail, count: trail.length });
-      }
-      if (path === '/api/agent/memory') {
-        const query = parseOperationalQuery(url.searchParams, { forList: true });
-        if (!query.ok) return send(400, { error: query.error });
-        const records = store.list(query.filters);
-        return send(200, { ok: true, records, count: records.length });
-      }
-      const match = path.match(OPERATIONAL_RECORD_PATH_RE);
-      if (!match) return send(404, { error: 'Não encontrado.' });
-      const record = store.get(match[1]);
-      if (!record) return send(404, { error: 'Registro não encontrado.' });
-      return send(200, { ok: true, record });
-    }
-
-    if (req.method !== 'POST' && req.method !== 'PATCH') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
-
-    const read = await readRequestBody(req, { limit: 16384 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-
-    if (req.method === 'POST') {
-      if (path !== '/api/agent/memory') return send(404, { error: 'Não encontrado.' });
-      let created;
-      try {
-        created = store.create({ ...payload, origin: payload.origin ?? 'user' });
-      } catch {
-        return send(500, { error: 'Não foi possível salvar o registro.' });
-      }
-      if (!created.ok) return send(400, { error: 'Registro inválido.', details: created.errors });
-      return send(201, { ok: true, record: created.record });
-    }
-
-    const match = path.match(OPERATIONAL_RECORD_PATH_RE);
-    if (!match) return send(404, { error: 'Não encontrado.' });
-    let updated;
-    try {
-      updated = store.update(match[1], payload);
-    } catch {
-      return send(500, { error: 'Não foi possível atualizar o registro.' });
-    }
-    if (!updated.ok) {
-      if (updated.notFound) return send(404, { error: 'Registro não encontrado.' });
-      return send(400, { error: 'Atualização inválida.', details: updated.errors });
-    }
-    return send(200, { ok: true, record: updated.record, changed: updated.changed });
-  };
+  return modularCreateOperationalMemoryHandler({
+    operationalStore: installOperationalStore,
+    ...options,
+  });
 }
 
 // Ferramentas do domínio agêntico: execução verificada e histórico. O executor
@@ -2576,351 +2013,38 @@ export function createSkillsHandler(options = {}) {
   };
 }
 
-// Orquestração de turno do Usami Core (/api/agent/turn e /api/agent/turns):
-// classifica a mensagem e roteia para conversa, Tool Registry ou Planner,
-// mantendo a mesma borda Host/Origin + x-usami-token.
-const AGENT_TURN_ID_RE = /^\/api\/agent\/turns\/(trn-[0-9a-f]{12})$/;
-
+// --- Rotas Agênticas (modularizadas em src/routes/agent-routes.js) ----------
 export function createAgentTurnHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const agentCore = options.agentCore || installAgentCore;
-
-  return async function handleAgentTurn(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const url = new URL(req.url || '/api/agent/turn', 'http://127.0.0.1:8787');
-    const path = url.pathname;
-
-    if (req.method === 'GET') {
-      if (path === '/api/agent/turns') {
-        const rawLimit = url.searchParams.get('limit');
-        let limit = 20;
-        if (rawLimit !== null) {
-          const parsed = Number(rawLimit);
-          if (!Number.isInteger(parsed) || parsed < 1 || parsed > 50) {
-            return send(400, { error: 'limit inválido (inteiro entre 1 e 50).' });
-          }
-          limit = parsed;
-        }
-        const turns = agentCore.listTurns({ limit });
-        return send(200, { ok: true, turns, count: turns.length });
-      }
-      const match = path.match(AGENT_TURN_ID_RE);
-      if (!match) return send(404, { error: 'Não encontrado.' });
-      const found = agentCore.getTurn(match[1]);
-      if (!found.ok) return send(404, { error: 'Turno não encontrado.' });
-      return send(200, { ok: true, turn: found.turn });
-    }
-
-    if (req.method !== 'POST' || path !== '/api/agent/turn') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
-    const read = await readRequestBody(req, { limit: 16384 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-    const unknown = Object.keys(payload).filter(key => !['message', 'confirmation', 'origin'].includes(key));
-    if (unknown.length) {
-      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
-    }
-    if (typeof payload.message !== 'string') {
-      return send(400, { error: 'message: deve ser texto.' });
-    }
-    const origin = payload.origin ?? 'agent';
-    if (!EXECUTION_ORIGINS.includes(origin)) {
-      return send(400, { error: `origin inválido (use ${EXECUTION_ORIGINS.join('|')}).` });
-    }
-    if (payload.confirmation !== undefined && (typeof payload.confirmation !== 'string' || payload.confirmation.length > 128)) {
-      return send(400, { error: 'confirmation: deve ser texto de até 128 caracteres.' });
-    }
-
-    let result;
-    try {
-      result = await agentCore.processTurn(payload.message, {
-        confirmation: payload.confirmation,
-        origin,
-      });
-    } catch (error) {
-      console.error('Aviso: falha ao processar turno agêntico:', error?.message || error);
-      return send(500, { error: 'Não foi possível processar o turno.' });
-    }
-    if (result.invalidInput) return send(400, { error: result.error });
-    return send(200, { ok: true, turn: result.turn });
-  };
+  return modularCreateAgentTurnHandler({
+    agentCore: installAgentCore,
+    ...options,
+  });
 }
-
-// --- Self-Introspection somente leitura (S11): GET /api/agent/self ----------
-const SELF_FOCUS_VALUES = Object.freeze(['all', 'tools', 'skills', 'modules', 'errors', 'limitations']);
 
 export function createSelfHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const introspection = options.introspection || installSelfIntrospection;
-
-  return async function handleSelf(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const url = new URL(req.url || '/api/agent/self', 'http://127.0.0.1:8787');
-    if (req.method !== 'GET' || url.pathname !== '/api/agent/self') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const focusParam = url.searchParams.get('focus');
-    const focus = focusParam === null ? 'all' : focusParam;
-    if (!SELF_FOCUS_VALUES.includes(focus)) {
-      return send(400, { error: `focus inválido (use ${SELF_FOCUS_VALUES.join('|')}).` });
-    }
-
-    const rawErrorLimit = url.searchParams.get('errorLimit');
-    let errorLimit = DEFAULT_ERROR_LIMIT;
-    if (rawErrorLimit !== null) {
-      const parsed = Number(rawErrorLimit);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_ERROR_LIMIT) {
-        return send(400, { error: `errorLimit inválido (inteiro entre 1 e ${MAX_ERROR_LIMIT}).` });
-      }
-      errorLimit = parsed;
-    }
-
-    try {
-      const self = introspection.describe({ focus, errorLimit });
-      return send(200, { ok: true, self });
-    } catch (error) {
-      console.error('Aviso: self-introspection falhou:', error?.message || error);
-      return send(500, { error: 'Não foi possível montar o retrato do sistema.' });
-    }
-  };
+  return modularCreateSelfHandler({
+    introspection: installSelfIntrospection,
+    ...options,
+  });
 }
-
-// --- Sugestões proativas contextuais (S12): /api/agent/suggestions ---------
-const AGENT_SUGGESTION_PATH_RE = /^\/api\/agent\/suggestions\/(sg-[0-9a-f]{12})$/;
-const AGENT_SUGGESTION_ACTION_RE = /^\/api\/agent\/suggestions\/(sg-[0-9a-f]{12})\/(accept|dismiss)$/;
 
 export function createSuggestionsHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.suggestionsStore || installSuggestionsStore;
-  const planner = options.taskPlanner || installTaskPlanner;
-  const engine = options.proactiveEngine || proactiveEngine;
-
-  return async function handleSuggestions(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const url = new URL(req.url || '/api/agent/suggestions', 'http://127.0.0.1:8787');
-    const path = url.pathname;
-
-    if (req.method === 'GET') {
-      if (path === '/api/agent/suggestions') {
-        const statusParam = url.searchParams.get('status');
-        if (statusParam !== null && !SUGGESTION_STATUSES.includes(statusParam)) {
-          return send(400, { error: `status inválido (use ${SUGGESTION_STATUSES.join('|')}).` });
-        }
-        const rawLimit = url.searchParams.get('limit');
-        let limit = SUGGESTIONS_DEFAULT_LIMIT;
-        if (rawLimit !== null) {
-          const parsed = Number(rawLimit);
-          if (!Number.isInteger(parsed) || parsed < 1 || parsed > SUGGESTIONS_MAX_LIMIT) {
-            return send(400, { error: `limit inválido (inteiro entre 1 e ${SUGGESTIONS_MAX_LIMIT}).` });
-          }
-          limit = parsed;
-        }
-        const evaluateParam = url.searchParams.get('evaluate');
-        if ((evaluateParam === '1' || evaluateParam === 'true') && typeof engine?.checkSuggestions === 'function') {
-          engine.checkSuggestions({ store });
-        }
-        const suggestions = store.list({ ...(statusParam ? { status: statusParam } : {}), limit });
-        return send(200, {
-          ok: true,
-          suggestions,
-          count: suggestions.length,
-          unansweredCount: store.countUnanswered(),
-          pending: store.getPending(),
-          unavailable: store.unavailable(),
-        });
-      }
-
-      const idMatch = path.match(AGENT_SUGGESTION_PATH_RE);
-      if (!idMatch) return send(404, { error: 'Não encontrado.' });
-      const found = store.get(idMatch[1]);
-      if (found.unavailable) return send(500, { error: 'Sugestões indisponíveis (arquivo inválido).' });
-      if (found.notFound) return send(404, { error: 'Sugestão não encontrada.' });
-      return send(200, { ok: true, suggestion: found.suggestion });
-    }
-
-    if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
-    const actionMatch = path.match(AGENT_SUGGESTION_ACTION_RE);
-    if (!actionMatch) return send(404, { error: 'Não encontrado.' });
-
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
-    if (contentType !== 'application/json') return send(403, { error: 'Content-Type inválido.' });
-    const read = await readRequestBody(req, { limit: 4096 });
-    if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
-
-    let payload;
-    try {
-      payload = JSON.parse(read.body);
-    } catch {
-      return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return send(400, { error: 'Corpo inválido.' });
-    }
-
-    const [, suggestionId, action] = actionMatch;
-    const allowedKeys = action === 'accept' ? ['goal', 'note'] : ['reason'];
-    const unknown = Object.keys(payload).filter(key => !allowedKeys.includes(key));
-    if (unknown.length) {
-      return send(400, { error: 'Corpo inválido.', details: unknown.map(key => `payload.${key}: campo desconhecido`) });
-    }
-
-    if (store.unavailable()) return send(500, { error: 'Sugestões indisponíveis (arquivo inválido).' });
-
-    let result;
-    try {
-      result = action === 'accept'
-        ? store.accept(suggestionId, { taskPlanner: planner, goal: payload.goal, note: payload.note })
-        : store.dismiss(suggestionId, { reason: payload.reason });
-    } catch (error) {
-      console.error('Aviso: falha ao responder sugestão:', error?.message || error);
-      return send(500, { error: 'Não foi possível atualizar a sugestão.' });
-    }
-
-    if (result.notFound) return send(404, { error: 'Sugestão não encontrada.' });
-    if (result.wrongState) return send(409, { error: result.error });
-    if (result.plannerUnavailable) return send(500, { error: result.error });
-    if (!result.ok) return send(400, { error: 'Pedido inválido.', details: result.errors });
-
-    return send(200, {
-      ok: true,
-      suggestion: result.suggestion,
-      ...(result.plan ? { plan: result.plan } : {}),
-    });
-  };
+  return modularCreateSuggestionsHandler({
+    suggestionsStore: installSuggestionsStore,
+    taskPlanner: installTaskPlanner,
+    proactiveEngine,
+    ...options,
+  });
 }
 
-// --- Skill Daily Briefing (S13): GET /api/agent/briefing --------------------
 export function createBriefingHandler(options = {}) {
-  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const toolExecutor = options.toolExecutor || installToolExecutor;
-  const catalog = 'skillCatalog' in options ? options.skillCatalog : installSkillCatalog;
-  const useCustomService = Boolean(
-    options.briefingService
-    || ((options.operationalStore || options.taskPlanner || options.rewriteWithLlm || options.executionProvider || options.now)
-      && !options.toolExecutor),
-  );
-  const service = options.briefingService || createDailyBriefingService({
-    operationalStore: options.operationalStore || installOperationalStore,
-    taskPlanner: options.taskPlanner || installTaskPlanner,
-    toolExecutor,
-    executionProvider: options.executionProvider || null,
-    rewriteWithLlm: options.rewriteWithLlm || null,
-    now: options.now || (() => Date.now()),
+  return modularCreateBriefingHandler({
+    toolExecutor: installToolExecutor,
+    skillCatalog: installSkillCatalog,
+    operationalStore: installOperationalStore,
+    taskPlanner: installTaskPlanner,
+    ...options,
   });
-
-  return async function handleBriefing(req, res) {
-    const send = (status, data) => {
-      if (res.headersSent) return;
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
-      return send(403, { error: 'Origem não autorizada.' });
-    }
-    if (denyWithoutToken(req, options, send)) return;
-
-    const url = new URL(req.url || '/api/agent/briefing', 'http://127.0.0.1:8787');
-    if (req.method !== 'GET' || url.pathname !== '/api/agent/briefing') {
-      return send(404, { error: 'Não encontrado.' });
-    }
-
-    const rawDate = url.searchParams.get('date');
-    if (rawDate !== null && !isValidCalendarDate(rawDate)) {
-      return send(400, { error: 'date inválido (use YYYY-MM-DD).' });
-    }
-
-    const rawUseLlm = url.searchParams.get('useLlm');
-    let useLlm = false;
-    if (rawUseLlm !== null) {
-      const lowered = rawUseLlm.trim().toLowerCase();
-      if (lowered === 'true' || lowered === '1') useLlm = true;
-      else if (lowered === 'false' || lowered === '0') useLlm = false;
-      else return send(400, { error: 'useLlm inválido (use true|false).' });
-    }
-
-    if (catalog && typeof catalog.get === 'function') {
-      const skillEntry = catalog.get('daily-briefing');
-      if (skillEntry?.ok && !skillEntry.skill?.activation?.canActivate) {
-        return send(409, {
-          ok: false,
-          error: 'Skill daily-briefing não está ativa.',
-          reasons: skillEntry.skill?.activation?.reasons || [],
-        });
-      }
-    }
-
-    if (useCustomService) {
-      try {
-        const briefing = await service.build({ date: rawDate, useLlm });
-        return send(200, { ok: true, briefing });
-      } catch (error) {
-        console.error('Aviso: falha ao montar daily briefing:', error?.message || error);
-        return send(500, { error: 'Não foi possível montar o briefing diário.' });
-      }
-    }
-
-    let outcome;
-    try {
-      outcome = await toolExecutor.execute(
-        'briefing.build',
-        { ...(rawDate !== null ? { date: rawDate } : {}), ...(useLlm ? { useLlm: true } : {}) },
-        { origin: 'user' },
-      );
-    } catch (error) {
-      console.error('Aviso: execução de briefing.build falhou:', error?.message || error);
-      return send(500, { error: 'Não foi possível montar o briefing diário.' });
-    }
-
-    if (outcome.notFound) return send(500, { error: 'Ferramenta briefing.build indisponível.' });
-    if (outcome.denied) return send(403, { ok: false, error: outcome.record?.reason || 'Permissão negada.', execution: outcome.record });
-    if (!outcome.ok) return send(500, { ok: false, error: outcome.record?.reason || 'Falha ao montar briefing.', execution: outcome.record });
-    return send(200, { ok: true, briefing: outcome.result, execution: outcome.record });
-  };
 }
 
 // Conquistas (data/achievements.json): leitura para a aba "Conquistas" do

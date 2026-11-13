@@ -19,6 +19,56 @@
 // planner de ANIMAÇÃO; plano de tarefas mora em `/api/agent/plans`.
 
 /**
+ * @typedef {'pending' | 'in_progress' | 'completed' | 'rejected' | 'failed'} ProposalStatus
+ */
+
+/**
+ * @typedef {'feature' | 'bugfix' | 'refactor' | 'doc'} ProposalAction
+ */
+
+/**
+ * @typedef {'code_agent' | 'github_issues' | 'unassigned'} ProposalRoute
+ */
+
+/**
+ * @typedef {Object} AgentProposal
+ * @property {string} id - Identificador único da proposta (ex: prop-2bae9b2fc260)
+ * @property {string} title - Título descritivo da proposta
+ * @property {string} description - Descrição detalhada do que deve ser feito
+ * @property {string[]} [files] - Lista de arquivos alvo
+ * @property {ProposalAction} [suggestedAction] - Tipo de ação sugerida
+ * @property {string} [repo] - Repositório alvo
+ * @property {string} [origin] - Origem da proposta ('usami' ou nome de agente)
+ * @property {ProposalStatus} status - Estado atual do ciclo de vida
+ * @property {ProposalRoute} [routedTo] - Canal de roteamento da proposta
+ * @property {number|null} [issueNumber] - Número do GitHub Issue (se roteado)
+ * @property {string|null} [issueUrl] - URL do GitHub Issue
+ * @property {string|null} [resolution] - Resumo da resolução ao concluir
+ * @property {string|null} [commitHash] - Hash do commit com a implementação
+ * @property {string|null} [prUrl] - URL do Pull Request
+ * @property {string|null} [note] - Notas adicionais de status
+ * @property {string} createdAt - Data de criação ISO
+ * @property {string} updatedAt - Data da última atualização ISO
+ */
+
+/**
+ * @typedef {Object} AgentPresence
+ * @property {string} agent - Identificador do agente (ex: 'antigravity')
+ * @property {number} lastSeen - Timestamp Unix em milissegundos
+ * @property {string[]} [capabilities] - Lista de capacidades do agente
+ * @property {Record<string, unknown>} [meta] - Metadados adicionais
+ */
+
+/**
+ * @typedef {Object} BridgeStatus
+ * @property {boolean} codeAgentOnline - Se há um agente de código ativo nos últimos 60s
+ * @property {string|null} lastAgent - Nome do último agente conectado
+ * @property {number} pendingProposals - Quantidade de propostas pendentes
+ * @property {number} activeProposals - Quantidade de propostas em andamento
+ * @property {number} totalProposals - Total histórico de propostas
+ */
+
+/**
  * @typedef {Object} Intent
  * @property {string} schema
  * @property {string} id `int-<12 hex>`
