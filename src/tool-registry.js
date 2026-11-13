@@ -102,5 +102,42 @@ export function createToolRegistry() {
     list() {
       return [...toolsByName.values()].map(describe);
     },
+
+    /** Converte os ToolSpecs registrados para o formato OpenAI function-calling. */
+    toOpenAiTools() {
+      return [...toolsByName.values()].map(toolToOpenAi);
+    },
   };
+}
+
+/** Converte um ToolSpec em definição OpenAI function-calling. */
+export function toolToOpenAi(tool) {
+  const properties = {};
+  const required = [];
+  for (const param of tool.parameters || []) {
+    const prop = { type: param.type };
+    if (param.description) prop.description = param.description;
+    if (param.enum) prop.enum = [...param.enum];
+    properties[param.name] = prop;
+    if (param.required) required.push(param.name);
+  }
+  return {
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description || tool.name,
+      parameters: {
+        type: 'object',
+        properties,
+        ...(required.length ? { required } : {}),
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/** Helper standalone para montar a lista a partir de um registry. */
+export function buildOpenAiTools(registry) {
+  if (!registry || typeof registry.toOpenAiTools !== 'function') return [];
+  return registry.toOpenAiTools();
 }

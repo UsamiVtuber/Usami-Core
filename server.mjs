@@ -50,7 +50,8 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL, VISION_MODEL } from './src/llm-router.js';
+import { classifyUserMessage, describeFetchError, generateReplyWithActions, generateReplyWithTools, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL, VISION_MODEL } from './src/llm-router.js';
+import { buildOpenAiTools } from './src/tool-registry.js';
 import { summarizePendingDays } from './src/memory-summaries.js';
 import { classifyFactDurability, consolidateFacts } from './src/memory-consolidation.js';
 import { readRagContext, resolveVaultDir } from './src/rag.js';
@@ -1074,16 +1075,41 @@ export function createChatHandler(options = {}) {
           // Etapa 1: seleção por papel. Ferramenta rodou (operacional/complexo) →
           // "chefão" (brain); conversa normal → modelo rápido (fast).
           const chatModel = executedAgentTurn ? BRAIN_MODEL : FAST_MODEL;
-          const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', () => generateReply(
-            withCapabilities(promptOverride ?? system, capabilities),
-            parsedBody.message,
-            {
+          // Em testes (generateReply mockado) ou sem registry, mantém o fluxo regex.
+          const useTools = !options.generateReply && chatModel === BRAIN_MODEL && toolRegistry && typeof toolRegistry.toOpenAiTools === 'function';
+          const openAiTools = useTools ? toolRegistry.toOpenAiTools() : [];
+          const executeToolForChat = async (name, args) => {
+            if (!installToolExecutor) return { ok: false, error: 'executor ausente' };
+            try {
+              const exec = await installToolExecutor.execute(name, args, { origin: 'chat' });
+              return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
+            } catch (error) {
+              return { ok: false, error: String(error?.message || error) };
+            }
+          };
+          const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', async () => {
+            const sys = withCapabilities(promptOverride ?? system, capabilities);
+            if (useTools && openAiTools.length) {
+              const res = await generateReplyWithTools(sys, parsedBody.message, {
+                model: chatModel,
+                tools: openAiTools,
+                executeTool: executeToolForChat,
+                temperature,
+                maxTokens: 1800,
+                signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+                blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
+              });
+              if (!res.ok) {
+                throw Object.assign(new Error(res.error || 'resposta inválida'), { invalidModelReply: true, rawLen: 0 });
+              }
+              return res;
+            }
+            const rawReply = await generateReply(sys, parsedBody.message, {
               temperature,
               model: chatModel,
               signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
               blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
-            },
-          )).then(rawReply => {
+            });
             const parsedReply = parseProviderRaw(rawReply);
             if (!parsedReply.ok) {
               throw Object.assign(new Error(parsedReply.error), {

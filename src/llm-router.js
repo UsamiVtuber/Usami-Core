@@ -15,7 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractAllJsonCandidates } from './json-salvage.js';
-import { parseJsonLoosely } from './provider-parse.js';
+import { parseJsonLoosely, parseProviderRaw } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -177,6 +177,96 @@ export async function generateReplyWithActions(
   });
   // Texto cru, como generateReply: parse e fallback OpenRouter são do chamador.
   return jsonText(answer, 'reply');
+}
+
+// --- Tool calling nativo (Etapa 4b) -----------------------------------------
+// Chama o provedor com `tools` no formato OpenAI function-calling. Se o modelo
+// devolver tool_calls, executa cada uma via `executeTool` e faz uma chamada de
+// follow-up para obter a resposta final. Retorna o mesmo contrato de
+// generateReplyWithActions. Limitado a `maxIterations` para evitar loop.
+export async function generateReplyWithTools(
+  systemPrompt,
+  userMessage,
+  {
+    model,
+    tools = [],
+    executeTool = async () => ({ ok: false, error: 'executor ausente' }),
+    maxIterations = 3,
+    temperature = 0.7,
+    maxTokens = 1800,
+    client = sharedClient,
+    signal,
+    blurtReply,
+  } = {},
+) {
+  if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
+
+  let finalSystem = systemPrompt;
+  if (blurtReply && typeof blurtReply === 'string' && blurtReply.trim()) {
+    finalSystem += `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${blurtReply.trim()}"\nO usuário JÁ OUVIU essa frase.\nREGRAS CRÍTICAS:\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
+  }
+
+  const messages = [
+    { role: 'system', content: finalSystem },
+    { role: 'user', content: userMessage },
+  ];
+
+  const executedTools = [];
+  const extra = tools && tools.length ? { tools, tool_choice: 'auto' } : null;
+
+  for (let iteration = 0; iteration < maxIterations; iteration++) {
+    let answer;
+    try {
+      answer = await client.chatCompletions({
+        model: model || GENERATION_MODEL,
+        messages,
+        temperature,
+        max_tokens: maxTokens,
+        extra: { ...(extra || {}), ...(llmExtra() || {}) },
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      throw error;
+    }
+
+    const msg = answer?.choices?.[0]?.message;
+    if (!msg) throw new Error('resposta inválida do provedor (sem message)');
+
+    const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    if (toolCalls.length > 0) {
+      messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
+      for (const tc of toolCalls) {
+        const name = tc?.function?.name;
+        let args = {};
+        try { args = JSON.parse(tc?.function?.arguments || '{}'); } catch { args = {}; }
+        let result;
+        try {
+          result = await executeTool(name, args);
+        } catch (error) {
+          result = { ok: false, error: String(error?.message || error) };
+        }
+        executedTools.push({ name, args, result, id: tc.id });
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result ?? {}) });
+      }
+      continue;
+    }
+
+    // Resposta final (texto). Parseia como JSON de reply.
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    const parsed = parseProviderRaw(text);
+    if (parsed.ok) {
+      return { ...parsed, source: 'nvidia', executedTools };
+    }
+    const loose = parseJsonLoosely(text);
+    if (loose.ok && loose.value && typeof loose.value === 'object' && loose.value.reply) {
+      return { ...loose.value, source: 'nvidia', executedTools };
+    }
+    // Sem JSON recuperável: devolve o texto como reply (nunca o bruto truncado).
+    return { ok: true, reply: text.slice(0, 300) || '...', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
+  }
+
+  // Esgotou iterações sem resposta final.
+  return { ok: false, reply: 'Não consegui concluir a tarefa (muitas chamadas de ferramenta).', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
 }
 
 // --- Animação (planeja ações com base na resposta) -------------------------
