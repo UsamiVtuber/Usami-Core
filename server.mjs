@@ -50,7 +50,7 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReplyWithActions, generateReplyWithTools, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL, VISION_MODEL } from './src/llm-router.js';
+import { classifyUserMessage, describeFetchError, generateReplyWithActions, generateReplyWithTools, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL } from './src/llm-router.js';
 import { buildOpenAiTools } from './src/tool-registry.js';
 import { summarizePendingDays } from './src/memory-summaries.js';
 import { classifyFactDurability, consolidateFacts } from './src/memory-consolidation.js';
@@ -720,6 +720,13 @@ export function withSpokenConciseness(system, { spoken = false, message = '' } =
 }
 
 export function createChatHandler(options = {}) {
+  // TODO (Etapa 4c): migrar gradualmente os testes de chat que simulam
+  // generateReply retornando JSON com promessa adiada para o formato
+  // OpenAI tool_calls. Quando todos estiverem migrados, remover o uso
+  // síncrono dos matchers regex (runOperationalForChat) do caminho do
+  // /api/chat e a enforcement de promessa adiada, mantendo-os apenas em
+  // /api/agent/turn e dispatchAsync. Ver: ~20 testes em
+  // tests/git-code-awareness.test.mjs (email.list, research.search, etc.).
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const getKey = options.getKey || (async () => {
     // options.envPath (testes) substitui o .env do projeto.
