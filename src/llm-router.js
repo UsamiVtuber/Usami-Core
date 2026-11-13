@@ -27,8 +27,18 @@ const DEFAULT_ANIMATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 //   FAST  — "boca"/chat rápido: saudações, perguntas simples, baixa latência.
 //   BRAIN — "chefão": código, MCP, tool calling, raciocínio estruturado.
 //   VISION — modelo VL, usado só quando a entrada contém imagem (base64).
-const DEFAULT_FAST_MODEL = 'nv-mistralai/mistral-nemo-12b-instruct';
-const DEFAULT_BRAIN_MODEL = 'mistralai/mistral-large-2-instruct';
+//
+// Defaults MEDIDOS nesta conta (2026-11-13): `GET /v1/models` lista 83
+// modelos, mas a maioria responde 404 ("Function not found for account") —
+// estar na lista não é estar disponível. Medidos com `response_format:
+// json_object` e o prompt de persona real:
+//   minimaxai/minimax-m3.1-flash  → 1,6 s / 2,0 s, JSON válido 3/3 (FAST)
+//   nvidia/nemotron-3-ultra-550b → 1,9 s / 3,2 s, JSON válido 3/3 (BRAIN)
+//   nvidia/nemotron-3.5-super-vl-120b-a12b → 1,4-2,3 s, JSON válido 3/3 (VISION)
+// O plano original (mistral-nemo-12b como FAST, mistral-large-2 como BRAIN)
+// responde 404 nesta conta — trocar exige que a "function" seja implantada.
+const DEFAULT_FAST_MODEL = 'minimaxai/minimax-m3.1-flash';
+const DEFAULT_BRAIN_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_VISION_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
 
 function envOr(name, fallback) {

@@ -5,7 +5,27 @@ import { test } from 'node:test';
 // classificadores locais, e `npm test` não faz chamada de rede.
 delete process.env.NVIDIA_API_KEY;
 
-const { classifyUserMessage, generateReplyWithActions, jsonText, planAnimation } = await import('../src/llm-router.js');
+const {
+  BRAIN_MODEL,
+  FAST_MODEL,
+  VISION_MODEL,
+  classifyUserMessage,
+  generateReplyWithActions,
+  getRoleModel,
+  jsonText,
+  planAnimation,
+} = await import('../src/llm-router.js');
+
+test('getRoleModel: mapeia fast, brain, vision e cai em fast para papel desconhecido', () => {
+  assert.equal(FAST_MODEL, process.env.NVIDIA_FAST_MODEL || 'minimaxai/minimax-m3.1-flash');
+  assert.equal(BRAIN_MODEL, process.env.NVIDIA_BRAIN_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b');
+  assert.equal(VISION_MODEL, process.env.NVIDIA_VISION_MODEL || 'nvidia/nemotron-3.5-super-vl-120b-a12b');
+  assert.equal(getRoleModel('fast'), FAST_MODEL);
+  assert.equal(getRoleModel('brain'), BRAIN_MODEL);
+  assert.equal(getRoleModel('vision'), VISION_MODEL);
+  assert.equal(getRoleModel('desconhecido'), FAST_MODEL);
+  assert.equal(getRoleModel(), FAST_MODEL);
+});
 
 test('jsonText: pega o content quando ele já é JSON', () => {
   assert.equal(jsonText({ content: '{"actions":[]}', reasoning: 'prosa de raciocínio' }), '{"actions":[]}');
