@@ -1071,17 +1071,46 @@ function formatGitStatusForPrompt(result) {
   };
 }
 
+function formatCodeProposeForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  return {
+    ok: result.ok,
+    title: result.proposal?.title || null,
+    routedTo: result.routedTo || null,
+    issueNumber: result.issue?.number || result.proposal?.issueNumber || null,
+  };
+}
+
 export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
   if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
   if (Array.isArray(turn.multi) && turn.multi.length > 1) {
-    return turn.multi.map(sub => formatAgentTurnPromptContext({
-      route: 'tool',
-      tool: sub.tool,
-      status: sub.status,
-      result: sub.result,
-      errors: sub.errors,
-      execution: sub.execution,
-    }, { maxChars: Math.floor(maxChars / turn.multi.length) })).join('\n');
+    const perToolLimit = Math.max(160, Math.floor(maxChars / turn.multi.length));
+    const entries = turn.multi.map(sub => {
+      const toolName = sub.tool;
+      if (sub.status === 'executed') {
+        const payload = toolName === 'self.describe'
+          ? (formatSelfDescribeForPrompt(sub.result) ?? sub.result ?? {})
+          : toolName === 'research.search'
+            ? (formatResearchSearchForPrompt(sub.result) ?? sub.result ?? {})
+            : toolName === 'github.repos'
+              ? (formatGithubReposForPrompt(sub.result) ?? sub.result ?? {})
+              : toolName === 'git.status'
+                ? (formatGitStatusForPrompt(sub.result) ?? sub.result ?? {})
+                : toolName === 'code.propose'
+                  ? (formatCodeProposeForPrompt(sub.result) ?? sub.result ?? {})
+                  : (sub.result ?? {});
+        let serialized = '';
+        try {
+          serialized = JSON.stringify(payload);
+        } catch {
+          serialized = String(sub.result ?? '');
+        }
+        return `- [${toolName}] Sucesso: ${redactSecrets(serialized).slice(0, perToolLimit)}`;
+      }
+      const err = redactSecrets(String(sub.execution?.reason || (Array.isArray(sub.errors) ? sub.errors.join('; ') : 'falha')).slice(0, 150));
+      return `- [${toolName}] Falha: ${err}`;
+    });
+    return `\n\n=== RESULTADO DAS SKILLS EXECUTADAS AGORA ===\n${entries.join('\n')}\nInstrução: Você acabou de executar essas ferramentas acima em paralelo com sucesso. Sintetize o resultado para o usuário em 1 a 2 frases naturais e objetivas em "reply", confirmando o que conferiu ou realizou.`;
   }
   if (turn.status === 'executed') {
     const payload = turn.tool === 'self.describe'
@@ -1092,7 +1121,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
           ? (formatGithubReposForPrompt(turn.result) ?? turn.result ?? {})
           : turn.tool === 'git.status'
             ? (formatGitStatusForPrompt(turn.result) ?? turn.result ?? {})
-            : (turn.result ?? {});
+            : turn.tool === 'code.propose'
+              ? (formatCodeProposeForPrompt(turn.result) ?? turn.result ?? {})
+              : (turn.result ?? {});
     let serialized = '';
     try {
       serialized = JSON.stringify(payload);
@@ -1113,6 +1144,20 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
 
 export function formatExecutedTurnFallbackReply(turn) {
   if (!turn) return null;
+  if (Array.isArray(turn.multi) && turn.multi.length > 1) {
+    const parts = turn.multi
+      .map(sub => formatExecutedTurnFallbackReply({
+        status: sub.status,
+        tool: sub.tool,
+        result: sub.result,
+        errors: sub.errors,
+        execution: sub.execution,
+      }))
+      .filter(Boolean);
+    if (parts.length > 0) {
+      return parts.join(' ');
+    }
+  }
   if (turn.status !== 'executed' || !turn.result) {
     const errDetail = redactSecrets(
       String(turn.execution?.reason || (Array.isArray(turn.errors) ? turn.errors.join('; ') : 'falha ao executar ferramenta')).slice(0, 180),

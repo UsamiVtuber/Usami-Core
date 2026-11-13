@@ -12,7 +12,7 @@ import { createToolExecutor } from '../src/tool-executor.js';
 import { createSkillCatalog } from '../src/skill-catalog.js';
 import { defaultRunSkillTests } from '../src/skill-manager.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from '../src/code-inspector-skill.js';
-import { createAgentCore, formatExecutedTurnFallbackReply } from '../src/agent-core.js';
+import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply } from '../src/agent-core.js';
 import { createTaskPlanner } from '../src/task-planner.js';
 import { AGENT_SCHEMAS } from '../src/agent-contracts.js';
 import {
@@ -1073,6 +1073,15 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
   assert.equal(multiTurn.status, 'executed');
   assert.deepEqual(multiTurn.tools, ['email.list', 'finance.accounts']);
   assert.equal(multiTurn.multi?.length, 2);
+
+  const multiPromptCtx = formatAgentTurnPromptContext(multiTurn);
+  assert.match(multiPromptCtx, /=== RESULTADO DAS SKILLS EXECUTADAS AGORA ===/);
+  assert.match(multiPromptCtx, /- \[email\.list\]/);
+  assert.match(multiPromptCtx, /- \[finance\.accounts\]/);
+
+  const multiFallback = formatExecutedTurnFallbackReply(multiTurn);
+  assert.match(multiFallback, /e-mail/i);
+  assert.match(multiFallback, /Open Finance/i);
 
   const memFallback = formatExecutedTurnFallbackReply({
     status: 'executed',
