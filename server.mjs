@@ -136,7 +136,7 @@ const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natu
 // vez de somar 45 s + 45 s: o pior caso do turno é TURN_DEADLINE, não ~90 s.
 const envMs = (name, fallback) => Math.max(1000, Number(process.env[name]) || fallback);
 const TURN_DEADLINE_MS = envMs('USAMI_TURN_DEADLINE_MS', 40000);
-const NVIDIA_BUDGET_MS = envMs('USAMI_NVIDIA_BUDGET_MS', 25000);
+const NVIDIA_BUDGET_MS = envMs('USAMI_NVIDIA_BUDGET_MS', 32000);
 const FALLBACK_MIN_MS = 8000;
 // Hedge: se a NVIDIA não responder neste tempo, o OpenRouter entra em paralelo
 // e vence quem responder primeiro (o perdedor é abortado). 0 desliga a corrida
@@ -1221,11 +1221,17 @@ export function createChatHandler(options = {}) {
             surprised: 'O-Oi! Não esperava você!',
             doubtful: 'Oi... você tem certeza que quer conversar comigo?',
           };
+          const timeoutReplies = {
+            neutral: 'Hmph... a conexão com o provedor de IA demorou demais e deu timeout. Me fala de novo?',
+            shy: 'D-Desculpe... a resposta demorou muito no servidor e deu timeout. Pode falar comigo de novo?',
+          };
           const emotion = classification?.emotion || 'neutral';
           const skillFallback = executedAgentTurn ? formatExecutedTurnFallbackReply(executedAgentTurn) : null;
+          const fallbackMap = nvidiaFailed ? timeoutReplies : offlineReplies;
+          const chosenReply = skillFallback || fallbackMap[emotion] || fallbackMap.neutral || offlineReplies[emotion] || offlineReplies.neutral;
           parsed = {
             ok: true,
-            reply: skillFallback || offlineReplies[emotion] || offlineReplies.neutral,
+            reply: chosenReply,
             gesture: skillFallback ? 'nod' : 'neutral',
             actions: [],
             remember: null,
