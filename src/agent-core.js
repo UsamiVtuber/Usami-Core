@@ -904,7 +904,7 @@ export function createAgentCore({
     return null;
   }
 
-  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [] } = {}) {
+  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null } = {}) {
     const clean = collapseText(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
@@ -947,6 +947,12 @@ export function createAgentCore({
     const executeOne = async (resolved) => {
       let execution;
       let timerId = null;
+      // O nome real da ferramenta é conhecido AQUI, antes da execução: é o
+      // que o cliente mostra ("executando git.log...") enquanto a chamada
+      // pode levar 10-20 s.
+      if (typeof onToolStart === 'function') {
+        try { onToolStart(resolved.toolName); } catch { /* não bloqueia */ }
+      }
       try {
         const timeoutPromise = new Promise(resolve => {
           timerId = setTimeout(
@@ -962,6 +968,9 @@ export function createAgentCore({
         execution = { ok: false, errors: [String(error?.message || error)] };
       } finally {
         if (timerId) clearTimeout(timerId);
+        if (typeof onToolEnd === 'function') {
+          try { onToolEnd(resolved.toolName); } catch { /* não bloqueia */ }
+        }
       }
       const status = execution?.ok
         ? 'executed'

@@ -76,6 +76,7 @@ import {
 import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUserPrompt } from './src/technique-schema.js';
 import { analyzeMedia } from './src/media-analyzer.js';
 import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
+import { createChatActivityRegistry } from './src/chat-activity.js';
 import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-paths.js';
 import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
 import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpan } from './src/telemetry.js';
@@ -160,6 +161,11 @@ const DEFAULT_ALLOWED_ORIGINS = withExtraOrigins(['http://127.0.0.1:5173', 'http
 // POST /api/n8n/commands/ack. Sem redelivery: entregue e não confirmado é
 // podado após 120 s com log.
 const sharedN8nQueue = createN8nCommandQueue();
+
+// Atividade ao vivo dos turnos (fase + ferramenta em execução). Ver
+// `src/chat-activity.js`: existe para o cliente saber o que a Usami está
+// fazendo enquanto o turno ainda não terminou.
+const sharedChatActivity = createChatActivityRegistry();
 
 // Comando válido para controle direto do avatar (executado pelo cliente).
 const VALID_COMMAND_TYPES = new Set([
@@ -754,6 +760,10 @@ export function createChatHandler(options = {}) {
   // Fila de comandos do refino: o comando do chat vai para a MESMA aba que
   // pediu o turno (x-usami-client), não para a primeira que pollar.
   const n8nQueue = options.n8nQueue || sharedN8nQueue;
+  // Atividade ao vivo do turno: o desktop (e o web) consultam durante os
+  // 10-20 s do turno para saber se a Usami está rodando uma ferramenta ou
+  // se já terminou a ferramenta e está só compitando a resposta.
+  const chatActivity = options.chatActivity || sharedChatActivity;
   // Contador atômico de turnos em andamento: com um booleano, dois turnos
   // sobrepostos (duas abas) liberavam o motor proativo quando o primeiro
   // terminava, mesmo com o segundo ainda rodando.
@@ -884,6 +894,16 @@ export function createChatHandler(options = {}) {
     proactive?.markUserActivity();
     activeTurns += 1;
     if (activeTurns === 1) proactive?.setBusy(true);
+    // Cliente desta sessão (para a atividade ao vivo e para a fila de comandos).
+    const activityClientId = normalizeClientId(req.headers['x-usami-client']);
+    const publishActivity = (activity) => {
+      try {
+        chatActivity.set(activityClientId, activity);
+      } catch {
+        // atividade é best-effort: nunca derruba o turno
+      }
+    };
+    publishActivity({ phase: 'thinking' });
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
       const mem = memoryStore.getAll();
@@ -949,10 +969,20 @@ export function createChatHandler(options = {}) {
       let executedAgentTurn = null;
       if (agentCore && options.syncAgentInChat !== false && typeof agentCore.runOperationalForChat === 'function') {
         try {
-          const executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
-            history: todayHistory,
-            timeoutMs: options.agentChatTimeoutMs ?? 10000,
-          });
+          let executedTurn = null;
+          try {
+            executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
+              history: todayHistory,
+              timeoutMs: options.agentChatTimeoutMs ?? 10000,
+              // Publica o NOME real da ferramenta enquanto ela executa: é o
+              // trecho de 10-20 s em que o usuário precisa saber o que ela
+              // está fazendo (e não só que está ocupada).
+              onToolStart: toolName => publishActivity({ phase: 'tool', tool: toolName, tools: [toolName] }),
+              onToolEnd: () => publishActivity({ phase: 'thinking' }),
+            });
+          } catch {
+            agentTurn = null;
+          }
           if (executedTurn) {
             executedAgentTurn = executedTurn;
             agentTurn = {
@@ -971,6 +1001,9 @@ export function createChatHandler(options = {}) {
               result: executedTurn.status,
             });
           }
+          // Ferramenta concluída: volta para "thinking" (o modelo ainda vai
+          // chamar o provedor para compor a fala).
+          publishActivity({ phase: 'thinking' });
         } catch {
           agentTurn = null;
         }
@@ -1087,11 +1120,16 @@ export function createChatHandler(options = {}) {
           const openAiTools = useTools ? toolRegistry.toOpenAiTools() : [];
           const executeToolForChat = async (name, args) => {
             if (!installToolExecutor) return { ok: false, error: 'executor ausente' };
+            // Tool calling nativo: aqui sabemos o NOME real da ferramenta que
+            // está rodando — o cliente mostra "executando <tool>".
+            publishActivity({ phase: 'tool', tool: name, tools: [name] });
             try {
               const exec = await installToolExecutor.execute(name, args, { origin: 'chat' });
               return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
             } catch (error) {
               return { ok: false, error: String(error?.message || error) };
+            } finally {
+              publishActivity({ phase: 'thinking' });
             }
           };
           const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', async () => {
@@ -1172,20 +1210,27 @@ export function createChatHandler(options = {}) {
               }
             } else if (!agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
               try {
+                // Caminho tardio: a ferramenta só é descoberta DEPOIS da
+                // primeira resposta (o modelo pediu algo acionável). Mesmos
+                // callbacks de atividade, senão o cliente ficaria sem sinal
+                // justo no trecho mais longo.
+                const lateHistory = [
+                  ...todayHistory,
+                  { role: 'user', content: parsedBody.message },
+                  { role: 'assistant', content: parsed.reply },
+                ];
+                const lateActivity = {
+                  onToolStart: toolName => publishActivity({ phase: 'tool', tool: toolName, tools: [toolName] }),
+                  onToolEnd: () => publishActivity({ phase: 'thinking' }),
+                };
                 const lateTurn = await agentCore.runOperationalForChat(parsedBody.message, {
-                  history: [
-                    ...todayHistory,
-                    { role: 'user', content: parsedBody.message },
-                    { role: 'assistant', content: parsed.reply },
-                  ],
+                  history: lateHistory,
                   timeoutMs: options.agentChatTimeoutMs ?? 8000,
+                  ...lateActivity,
                 }) || await agentCore.runOperationalForChat(parsed.reply, {
-                  history: [
-                    ...todayHistory,
-                    { role: 'user', content: parsedBody.message },
-                    { role: 'assistant', content: parsed.reply },
-                  ],
+                  history: lateHistory,
                   timeoutMs: options.agentChatTimeoutMs ?? 8000,
+                  ...lateActivity,
                 });
                 if (lateTurn) {
                   executedAgentTurn = lateTurn;
@@ -1437,6 +1482,8 @@ export function createChatHandler(options = {}) {
         ...(affinityPayload || {}),
       });
     } finally {
+      // Turno encerrado: a atividade some (o próximo turno publica a dele).
+      try { chatActivity.clear(activityClientId); } catch { /* best-effort */ }
       activeTurns = Math.max(0, activeTurns - 1);
       if (activeTurns === 0) proactive?.setBusy(false);
     }
@@ -1514,8 +1561,62 @@ export function createFlowChatHandler(options = {}) {
   };
 }
 
-// --- n8n → Usami: fila de comandos ------------------------------------------
+// --- Atividade ao vivo do turno ----------------------------------------------
 
+/**
+ * GET /api/chat/activity — o que a Usami está fazendo AGORA.
+ *
+ * O turno do `/api/chat` leva 10-20 s quando há ferramenta. Sem esta leitura
+ * o cliente só descobre o resultado no fim, e o usuário não sabe se ela está
+ * trabalhando ou travada. A resposta é tiny e sem histórico: `{active, phase,
+ * tool, tools, startedAt}`.
+ *
+ * Leitura apenas (não escreve nada no disco), mas exige token: a atividade
+ * revela quais skills estão ativas no runtime.
+ */
+export function createChatActivityHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const activity = options.chatActivity || sharedChatActivity;
+
+  return async function handleChatActivity(req, res) {
+    const send = (status, data) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'GET') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!isAllowedOrigin(origin, host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const url = new URL(req.url || '/', 'http://localhost');
+    // O desktop não manda header de cliente: usa o turno mais recente.
+    const explicitClient = req.headers['x-usami-client'] || url.searchParams.get('client');
+    const current = explicitClient
+      ? activity.get(normalizeClientId(explicitClient))
+      : activity.latest();
+
+    if (!current) {
+      return send(200, { active: false, phase: null, tool: null, tools: [], startedAt: null });
+    }
+    return send(200, {
+      active: true,
+      phase: current.phase,
+      tool: current.tool,
+      tools: current.tools,
+      startedAt: current.startedAt,
+    });
+  };
+}
+
+// --- n8n → Usami: fila de comandos ------------------------------------------
 export function createN8nCommandHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   // Injetável para os testes: cada teste ganha uma fila isolada em vez de
@@ -3391,6 +3492,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleStt = createSttHandler();
   const handleMediaAnalyze = createMediaAnalyzeHandler();
   const handleN8nCommand = createN8nCommandHandler();
+  const handleChatActivity = createChatActivityHandler();
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
@@ -3420,6 +3522,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (served) return;
     }
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
+    if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
     if (req.method === 'POST' && req.url === '/api/tts') return handleTts(req, res);
     if (req.method === 'POST' && req.url === '/api/stt') return handleStt(req, res);
