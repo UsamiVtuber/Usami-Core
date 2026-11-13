@@ -1119,36 +1119,60 @@ export function createChatHandler(options = {}) {
             })
             : await startNvidia();
 
-          if (parsed?.ok && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function' && isDeferredToolPromise(parsed.reply)) {
-            try {
-              const lateTurn = await agentCore.runOperationalForChat(parsed.reply, {
-                history: [
-                  ...todayHistory,
-                  { role: 'user', content: parsedBody.message },
-                  { role: 'assistant', content: parsed.reply },
-                ],
-                timeoutMs: options.agentChatTimeoutMs ?? 8000,
-              });
-              if (lateTurn) {
-                executedAgentTurn = lateTurn;
-                agentTurn = {
-                  id: lateTurn.id,
-                  kind: lateTurn.intent?.kind || 'operational',
-                  route: lateTurn.route || 'tool',
-                  status: lateTurn.status,
-                  ...(lateTurn.tool ? { tool: lateTurn.tool } : {}),
-                };
-                const toolPromptContext = formatAgentTurnPromptContext(lateTurn);
-                if (toolPromptContext && !turn.signal.aborted && !nvidiaAbort.signal.aborted) {
-                  system += toolPromptContext;
-                  const lateReply = await invokeNvidia(system, { temperature: 0.3, skipBlurt: true });
-                  if (lateReply?.ok && lateReply.reply) {
-                    parsed = lateReply;
+          if (parsed?.ok && isDeferredToolPromise(parsed.reply)) {
+            if (executedAgentTurn && executedAgentTurn.status === 'executed') {
+              try {
+                const enforcePrompt = system + `\n\nATENÇÃO: Você respondeu "${parsed.reply}". ISSO É PROIBIDO porque a ferramenta ${executedAgentTurn.tool} JÁ FOI EXECUTADA e os dados estão acima. Responda IMEDIATAMENTE informando o resultado definitivo em JSON {"reply":"...", "gesture":"nod"}.`;
+                const strictReply = await invokeNvidia(enforcePrompt, { temperature: 0.1, skipBlurt: true });
+                if (strictReply?.ok && strictReply.reply && !isDeferredToolPromise(strictReply.reply)) {
+                  parsed = strictReply;
+                } else {
+                  parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
+                }
+              } catch {
+                parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
+              }
+            } else if (!agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
+              try {
+                const lateTurn = await agentCore.runOperationalForChat(parsedBody.message, {
+                  history: [
+                    ...todayHistory,
+                    { role: 'user', content: parsedBody.message },
+                    { role: 'assistant', content: parsed.reply },
+                  ],
+                  timeoutMs: options.agentChatTimeoutMs ?? 8000,
+                }) || await agentCore.runOperationalForChat(parsed.reply, {
+                  history: [
+                    ...todayHistory,
+                    { role: 'user', content: parsedBody.message },
+                    { role: 'assistant', content: parsed.reply },
+                  ],
+                  timeoutMs: options.agentChatTimeoutMs ?? 8000,
+                });
+                if (lateTurn) {
+                  executedAgentTurn = lateTurn;
+                  agentTurn = {
+                    id: lateTurn.id,
+                    kind: lateTurn.intent?.kind || 'operational',
+                    route: lateTurn.route || 'tool',
+                    status: lateTurn.status,
+                    ...(lateTurn.tool ? { tool: lateTurn.tool } : {}),
+                    ...(Array.isArray(lateTurn.tools) ? { tools: lateTurn.tools } : {}),
+                  };
+                  const toolPromptContext = formatAgentTurnPromptContext(lateTurn);
+                  if (toolPromptContext && !turn.signal.aborted && !nvidiaAbort.signal.aborted) {
+                    system += toolPromptContext;
+                    const lateReply = await invokeNvidia(system, { temperature: 0.2, skipBlurt: true });
+                    if (lateReply?.ok && lateReply.reply && !isDeferredToolPromise(lateReply.reply)) {
+                      parsed = lateReply;
+                    } else if (lateTurn.status === 'executed') {
+                      parsed.reply = formatExecutedTurnFallbackReply(lateTurn);
+                    }
                   }
                 }
+              } catch {
+                // não bloqueia o fluxo principal
               }
-            } catch {
-              // não bloqueia o fluxo principal
             }
           }
 
@@ -1221,6 +1245,10 @@ export function createChatHandler(options = {}) {
           // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
           // e é medido à parte em refineAnimationInBackground, fora do totalMs.
           mark('animation');
+
+          if (parsed?.ok && isDeferredToolPromise(parsed.reply) && executedAgentTurn && executedAgentTurn.status === 'executed') {
+            parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
+          }
         }
       }
 

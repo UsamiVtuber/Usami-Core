@@ -1089,6 +1089,58 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
     result: { query: 'café', count: 1, results: [{ text: 'Gosta de café com leite' }] },
   });
   assert.match(memFallback, /Achei na memória \(1\): Gosta de café com leite/);
+
+  // Verificações de anti-adiamento e roteamento de inspeção de código/commits
+  const { isDeferredToolPromise, DEFAULT_TOOL_MATCHERS } = await import('../src/agent-core.js');
+
+  const completionMsg = 'Refatoração e melhorias técnicasrefactor 🟢 completedCommit d3d3edf finalizei o refactor que pediu, da uma olhada no código como ficou';
+  const matchGitLog = DEFAULT_TOOL_MATCHERS.find(t => t.toolName === 'git.log');
+  const matchCodePropose = DEFAULT_TOOL_MATCHERS.find(t => t.toolName === 'code.propose');
+  const matchCodeProposals = DEFAULT_TOOL_MATCHERS.find(t => t.toolName === 'code.proposals');
+
+  assert.equal(matchGitLog.matches(completionMsg.toLowerCase()), true, 'Mensagem com finalizei/commit d3d3edf deve acionar git.log');
+  assert.equal(matchCodePropose.matches(completionMsg.toLowerCase()), false, 'Mensagem de conclusão não deve abrir nova proposta');
+
+  const inquiryMsg = 'Boa, da uma olhada no seu código, tem alguma sugestao ou melhoria que vc deseja?';
+  assert.equal(matchCodeProposals.matches(inquiryMsg.toLowerCase()), true, 'Pergunta sobre sugestões/melhorias deve consultar code.proposals');
+
+  assert.equal(isDeferredToolPromise('Entendido! Vou dar uma olhada no código após o refator no commit d3d3edf. Deixa eu inspecionar como ficou...'), true);
+  assert.equal(isDeferredToolPromise('Hmph, você quer que eu critique meu próprio código ? Tá bom... vou dar uma olhada séria.'), true);
+
+  const gitLogPrompt = formatAgentTurnPromptContext({
+    status: 'executed',
+    route: 'tool',
+    tool: 'git.log',
+    result: {
+      target: 'usami',
+      count: 1,
+      commits: [{ hash: 'd3d3edf', subject: 'refactor(core): modulariza rotas http' }],
+    },
+  });
+  assert.match(gitLogPrompt, /REGRA CRÍTICA E OBRIGATÓRIA: A ferramenta 'git\.log' JÁ TERMINOU SUA EXECUÇÃO AGORA/);
+  assert.match(gitLogPrompt, /d3d3edf/);
+  assert.match(gitLogPrompt, /Comente diretamente sobre os commits recentes/);
+
+  const gitLogFallback = formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'git.log',
+    result: { target: 'usami', commits: [{ hash: 'd3d3edf', subject: 'refactor: rotas' }] },
+  });
+  assert.match(gitLogFallback, /d3d3edf: refactor: rotas/);
+
+  const gitDiffFallback = formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'git.diff',
+    result: { target: 'usami', stat: ' 2 files changed, 10 insertions(+)' },
+  });
+  assert.match(gitDiffFallback, /Diff do Git/);
+
+  const codeInspectFallback = formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'code.inspect',
+    result: { path: 'server.mjs', lines: 150, symbols: ['createChatHandler'] },
+  });
+  assert.match(codeInspectFallback, /server\.mjs: 150 linha\(s\)\. Símbolos: createChatHandler\./);
 });
 
 

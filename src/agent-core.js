@@ -30,12 +30,13 @@ const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|ch
 const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei|fatura)\b|\b(?:meu\s+extrato|meus\s+gastos|minhas\s+transacoes)\b/;
 const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*|ach\w*|veja|ver|v[eê]|traz\w*|traga|trouxe|quais(?:\s+as)?|tem|saiu)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:noticias?|manchetes?|novidades?(?:\s+(?:de|sobre|do|da|em|no|na)))\b|\b(?:noticias?|manchetes?)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:ver|v[eê]|veja|pesquis\w*|bus(?:c|qu)\w*|procur\w*|ach\w*|mostr\w*)\b|\b(?:pesquis\w*|googl\w*)\s+(?:sobre|por|a\s+respeito\s+de)\s+(?!.*\b(?:memoria|fatos|historico|resumos?|mim|eu|meu|minha|e-?mails?|gmail|agenda|calendario|arquivo|codigo|git|repo(?:sitorio)?)\b).+/;
 const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/;
-const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b/;
+const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b|\bcommit\s+[a-f0-9]{4,40}\b|\b(?:como\s+ficou|o\s+que\s+(?:mudou|foi\s+feito|foi\s+alterado))\s+(?:no\s+c[oó]digo|no\s+repo|no\s+git|no\s+projeto)\b|\b(?:olha|veja?|da\s+uma\s+olhada)\s+(?:no\s+c[oó]digo|nos\s+commits?|no\s+refactor|no\s+commit)\b/i;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
 const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo|no\s+repositorio)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b/;
+const IS_COMPLETION_OR_INSPECT_RE = /\b(?:como\s+ficou|finalizei|conclu[ií]|terminei|apliquei|comitei|ja\s+(?:fiz|apliquei|comitei))\b|\b(?:da\s+uma\s+olhada|olh\w*|veja?|mostr\w*)\s+(?:no\s+c[oó]digo|no\s+repo|no\s+commit|nos\s+commits|como\s+ficou)\b/i;
 const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|sugest\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
-const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b/i;
+const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha)\s+(?:alguma\s+)?(?:sugestao|melhoria|proposta)\b/i;
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
 
@@ -390,8 +391,17 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     },
   },
   {
+    toolName: 'code.proposals',
+    matches: normalized => CODE_PROPOSALS_QUERY_RE.test(normalized),
+    buildArgs: () => ({ status: 'all', limit: 5 }),
+  },
+  {
     toolName: 'code.propose',
-    matches: normalized => CODE_PROPOSE_RE.test(normalized),
+    matches: normalized => (
+      CODE_PROPOSE_RE.test(normalized)
+      && !CODE_PROPOSALS_QUERY_RE.test(normalized)
+      && (!IS_COMPLETION_OR_INSPECT_RE.test(normalized) || /\b(?:nova\s+proposta|outra\s+proposta|propor\s+outr\w*)\b/.test(normalized))
+    ),
     buildArgs: message => {
       const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
       const repo = slugMatch?.[1] && !slugMatch[1].startsWith('src/') ? slugMatch[1] : 'UsamiVtuber/Usami-Core';
@@ -416,11 +426,6 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         files: [],
       };
     },
-  },
-  {
-    toolName: 'code.proposals',
-    matches: normalized => CODE_PROPOSALS_QUERY_RE.test(normalized),
-    buildArgs: () => ({ status: 'all', limit: 5 }),
   },
   {
     toolName: 'github.issue',
@@ -453,7 +458,7 @@ const CONFIRMATION_REPLY_RE = /^(?:(?:ok+|okay|e\s+ai|entao|hm+)[,\s]+)*(?:sim+|
 const ASSISTANT_OFFER_ACTION_RE = /\b(?:quer(?:e|o)?\s+que\s+eu|posso|devo|vou|deixa\s+eu|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando))\s*(?:pesquis\w*|busc\w*|procur\w*|consult\w*|chec\w*|ver|olh\w*|list\w*|mostr\w*|confer\w*|d[ae]r\s+uma\s+olhada)?\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando)\b/;
 const GENERIC_RESEARCH_QUERY_RE = /^(?:noticias?|manchetes?|novidades?|isso|agora(?:\s+de\s+verdade)?|de\s+verdade)$|\b(?:que\s+(?:eu\s+)?pedi|consegue\s+ver\s+ela)\b/i;
 
-export const DEFERRED_TOOL_PROMISE_RE = /\b(?:vou\s+(?:dar\s+uma\s+olhada|olh\w*|ver|verificar|chec\w*|confer\w*|busc\w*|pesquis\w*|procur\w*|consult\w*|list\w*|mostrar)|deixa\s+eu\s+(?:ver|olh\w*|chec\w*|busc\w*|pesquis\w*|confer\w*)|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando)|espera\s+um\s+pouquinho.*(?:olhando|buscando|pesquisando))\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando)\b/i;
+export const DEFERRED_TOOL_PROMISE_RE = /\b(?:vou\s+(?:dar\s+uma\s+olhada|olh\w*|ver|verificar|chec\w*|confer\w*|busc\w*|pesquis\w*|procur\w*|consult\w*|list\w*|mostrar|inspecion\w*)|deixa\s+eu\s+(?:ver|olh\w*|chec\w*|busc\w*|pesquis\w*|confer\w*|inspecion\w*)|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando|inspecionando)|espera\s+um\s+pouquinho.*(?:olhando|buscando|pesquisando|inspecionando))\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando|inspecionando)\b/i;
 
 export function isDeferredToolPromise(text) {
   return DEFERRED_TOOL_PROMISE_RE.test(normalizeText(text));
@@ -1081,6 +1086,53 @@ function formatCodeProposeForPrompt(result) {
   };
 }
 
+function formatGitLogForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  const commits = Array.isArray(result.commits) ? result.commits.slice(0, 5).map(c => ({
+    hash: c.hash,
+    subject: c.subject,
+    author: c.author,
+  })) : [];
+  return {
+    target: result.target || 'usami',
+    count: result.count || commits.length,
+    commits,
+  };
+}
+
+function formatGitDiffForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  return {
+    target: result.target || 'usami',
+    stat: result.stat || 'sem alterações pendentes',
+    diff: typeof result.diff === 'string' ? result.diff.slice(0, 500) : '',
+  };
+}
+
+function formatCodeProposalsForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  const list = Array.isArray(result.proposals) ? result.proposals.slice(0, 5).map(p => ({
+    id: p.id,
+    title: p.title,
+    status: p.status,
+    routedTo: p.routedTo,
+  })) : [];
+  return {
+    count: list.length,
+    proposals: list,
+  };
+}
+
+function formatCodeInspectForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  return {
+    path: result.path,
+    lines: result.lines,
+    symbols: Array.isArray(result.symbols) ? result.symbols.slice(0, 10) : [],
+    preview: typeof result.content === 'string' ? result.content.slice(0, 600) : null,
+  };
+}
+
 export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
   if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
   if (Array.isArray(turn.multi) && turn.multi.length > 1) {
@@ -1096,9 +1148,17 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
               ? (formatGithubReposForPrompt(sub.result) ?? sub.result ?? {})
               : toolName === 'git.status'
                 ? (formatGitStatusForPrompt(sub.result) ?? sub.result ?? {})
-                : toolName === 'code.propose'
-                  ? (formatCodeProposeForPrompt(sub.result) ?? sub.result ?? {})
-                  : (sub.result ?? {});
+                : toolName === 'git.log'
+                  ? (formatGitLogForPrompt(sub.result) ?? sub.result ?? {})
+                  : toolName === 'git.diff'
+                    ? (formatGitDiffForPrompt(sub.result) ?? sub.result ?? {})
+                    : toolName === 'code.proposals'
+                      ? (formatCodeProposalsForPrompt(sub.result) ?? sub.result ?? {})
+                      : toolName === 'code.inspect'
+                        ? (formatCodeInspectForPrompt(sub.result) ?? sub.result ?? {})
+                        : toolName === 'code.propose'
+                          ? (formatCodeProposeForPrompt(sub.result) ?? sub.result ?? {})
+                          : (sub.result ?? {});
         let serialized = '';
         try {
           serialized = JSON.stringify(payload);
@@ -1121,9 +1181,17 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
           ? (formatGithubReposForPrompt(turn.result) ?? turn.result ?? {})
           : turn.tool === 'git.status'
             ? (formatGitStatusForPrompt(turn.result) ?? turn.result ?? {})
-            : turn.tool === 'code.propose'
-              ? (formatCodeProposeForPrompt(turn.result) ?? turn.result ?? {})
-              : (turn.result ?? {});
+            : turn.tool === 'git.log'
+              ? (formatGitLogForPrompt(turn.result) ?? turn.result ?? {})
+              : turn.tool === 'git.diff'
+                ? (formatGitDiffForPrompt(turn.result) ?? turn.result ?? {})
+                : turn.tool === 'code.proposals'
+                  ? (formatCodeProposalsForPrompt(turn.result) ?? turn.result ?? {})
+                  : turn.tool === 'code.inspect'
+                    ? (formatCodeInspectForPrompt(turn.result) ?? turn.result ?? {})
+                    : turn.tool === 'code.propose'
+                      ? (formatCodeProposeForPrompt(turn.result) ?? turn.result ?? {})
+                      : (turn.result ?? {});
     let serialized = '';
     try {
       serialized = JSON.stringify(payload);
@@ -1131,10 +1199,23 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       serialized = String(turn.result ?? '');
     }
     const clean = redactSecrets(serialized).slice(0, maxChars);
-    const extraRule = turn.tool === 'self.describe'
-      ? ' Confirme diretamente quais skills/ferramentas reais você possui usando essa lista (nunca diga que não sabe nem peça ao usuário para contar o que mudou).'
-      : '';
-    return `\n\n=== RESULTADO DA SKILL EXECUTADA AGORA (${turn.tool}) ===\nDados reais obtidos:\n${clean}\nInstrução: responda diretamente usando esses dados reais obtidos agora (sem inventar números ou fatos ausentes), mantendo seu jeito natural e conciso (1 a 2 frases objetivas em "reply").${extraRule}`;
+    let toolInstruction = '';
+    if (turn.tool === 'self.describe') {
+      toolInstruction = ' Confirme diretamente quais skills/ferramentas reais você possui usando essa lista (nunca diga que não sabe nem peça ao usuário para contar o que mudou).';
+    } else if (turn.tool === 'code.propose') {
+      toolInstruction = ' A proposta de código JÁ FOI ENVIADA com sucesso agora para o Code Agent/GitHub. Confirme o título e envio diretamente. NUNCA diga que você vai inspecionar, olhar ou programar o código agora, pois quem implementa é o Code Agent!';
+    } else if (turn.tool === 'code.proposals') {
+      toolInstruction = ' Responda listando com clareza as propostas obtidas acima com seus títulos e status reais.';
+    } else if (turn.tool === 'git.log') {
+      toolInstruction = ' Comente diretamente sobre os commits recentes obtidos acima e sobre o que foi feito/comitado.';
+    } else if (turn.tool === 'git.diff') {
+      toolInstruction = ' Comente diretamente sobre as alterações obtidas acima.';
+    } else if (turn.tool === 'git.status') {
+      toolInstruction = ' Informe a branch e alterações pendentes com base nos dados obtidos acima.';
+    } else if (turn.tool === 'code.inspect') {
+      toolInstruction = ' Avalie e comente diretamente o conteúdo do código inspecionado acima.';
+    }
+    return `\n\n=== RESULTADO DA SKILL EXECUTADA AGORA (${turn.tool}) ===\nDados reais obtidos:\n${clean}\nREGRA CRÍTICA E OBRIGATÓRIA: A ferramenta '${turn.tool}' JÁ TERMINOU SUA EXECUÇÃO AGORA com os dados reais acima. NUNCA diga que "vai ver", "vai olhar", "deixa eu inspecionar" ou prometa fazer depois. Responda IMEDIATAMENTE entregando o resultado definitivo e os fatos reais obtidos em 1 a 2 frases objetivas no "reply".${toolInstruction}`;
   }
   const errDetail = redactSecrets(
     String(turn.execution?.reason || (Array.isArray(turn.errors) ? turn.errors.join('; ') : 'falha ao executar ferramenta')).slice(0, 300),
@@ -1210,8 +1291,15 @@ export function formatExecutedTurnFallbackReply(turn) {
     return `Git (${r.target || 'usami'}): branch ${r.branch}${head}, ${dirty} alteração(ões) pendente(s).`;
   }
   if (turn.tool === 'git.log' && Array.isArray(r.commits)) {
-    const list = r.commits.slice(0, 3).map(c => `${c.hash || ''} ${c.subject || ''}`.trim());
+    const list = r.commits.slice(0, 3).map(c => `${c.hash ? `${c.hash}: ` : ''}${c.subject || ''}`.trim());
     return list.length ? `Últimos commits (${r.target || 'usami'}): ${list.join(' | ')}.` : 'Não encontrei commits recentes.';
+  }
+  if (turn.tool === 'git.diff') {
+    return r.stat ? `Diff do Git (${r.target || 'usami'}): ${r.stat.slice(0, 160)}.` : `Conferi o repositório (${r.target || 'usami'}): não há alterações pendentes.`;
+  }
+  if (turn.tool === 'code.inspect') {
+    const syms = Array.isArray(r.symbols) && r.symbols.length ? ` Símbolos: ${r.symbols.slice(0, 4).join(', ')}.` : '';
+    return `Inspecionei ${r.path || 'o arquivo'}: ${r.lines || 0} linha(s).${syms}`;
   }
   if (turn.tool === 'github.repos') {
     const repos = Array.isArray(r.repositories) ? r.repositories : (Array.isArray(r.repos) ? r.repos : []);
