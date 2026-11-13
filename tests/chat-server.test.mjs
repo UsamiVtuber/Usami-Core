@@ -444,6 +444,11 @@ test('parseProviderRaw: remove vazamento de gesture/actions com aspas simples ou
   assert.equal(res3.ok, true);
   assert.equal(res3.reply, 'Q-que?! B-baka! Por que eu iria querer ser sua mãe?! Hmph... você fala cada absurdo...');
 
+  const rawTrailingBraces = '{"reply":"Já enviei a proposta de README pro Usami-Core. \\"}{"}';
+  const resBraces = parseProviderRaw(rawTrailingBraces);
+  assert.equal(resBraces.ok, true);
+  assert.equal(resBraces.reply, 'Já enviei a proposta de README pro Usami-Core.');
+
   const rawPipeSpaceLeak = 'Entendido! Adicionando a entrevista TRINCA para hoje às 15:30 com 30 minutos de duração. .| gesture ": "nod';
   const res4 = parseProviderRaw(rawPipeSpaceLeak);
   assert.equal(res4.ok, true);
