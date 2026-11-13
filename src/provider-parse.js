@@ -128,6 +128,7 @@ export function stripLeakedJson(reply) {
     .replace(/["'`]?\s*\\?["'`]?[}{]+\s*$/, '')
     .replace(/['"]\s*,\s*['"]?\s*$/, '')
     .replace(/[\s,'"]*\]\s*,?\s*$/, '')
+    .replace(/[\s"']*\s+['"]+$/, '')
     .trim();
 }
 
