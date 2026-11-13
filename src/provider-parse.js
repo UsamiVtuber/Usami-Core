@@ -115,11 +115,11 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
 // aqui é a fonte e o restante importa daqui.
 export function stripLeakedJson(reply) {
   return String(reply ?? '')
-    // Remove vazamento com separadores literais ou pipes, ex.: `.|gesture":"nod` ou `,"gesture":"nod`
-    .replace(/[.|,;\s]*\\?["']?(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']?\s*:\s*[\s\S]*$/i, '')
+    // Remove vazamento com separadores literais ou pipes, ex.: `.|gesture":"nod`, `.| gesture ": "nod` ou `,"gesture":"nod`
+    .replace(/(?:[\s,;|]+|\s*\.\s*[|]|\s*\.\s*(?=["']?gesture))\s*\\?["']?\b(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b[\s\S]*$/i, '')
     // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
     // Ex.: `','gesture': 'angry','actions': [{'type':` ou `"gesture":"angry","actions":[...`
-    .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
+    .replace(/['",\s|]*\\?["']?(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b\s*\\?["']?\s*:\s*[\s\S]*$/i, '')
     // Remove fragmentos truncados de arrays/objetos JSON no fim da frase (ex.: ` [{'type':` ou ` {"type":`)
     .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
     // Remove vazamento de nomes de prefabs/morphs internos do modelo 3D (ex.: `15-prefab_awkward01 0.8, 08-prefab_angry02 0.6],`)
@@ -158,7 +158,7 @@ export function parseJsonLoosely(raw) {
 }
 
 function salvageLeakedGesture(rawText) {
-  const match = /['",\s]\\?["']gesture\\?["']\s*:\s*\\?["']([a-zA-Z0-9_-]+)\\?["']/i.exec(String(rawText ?? ''));
+  const match = /['",\s|]*\\?["']?gesture\b\s*\\?["']?\s*:\s*\\?["']([a-zA-Z0-9_-]+)/i.exec(String(rawText ?? ''));
   if (!match) return null;
   const candidate = match[1].trim();
   return GESTURE_NAMES.includes(candidate) ? candidate : null;
@@ -282,6 +282,12 @@ export function parseProviderRaw(raw) {
         const salvagedGesture = salvageLeakedGesture(trimmed) || 'neutral';
         return { ok: true, reply: cleaned.display, gesture: salvagedGesture, actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
       }
+      // Rejeita texto bruto com caracteres CJK ou debris de raciocínio/código
+      const hasCjk = /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(trimmed);
+      const isReasoningDebris = /^(!\s*|\d+\.\s*|csal_|\/\/|\/\*|```|Thinking\s*Process)/i.test(trimmed);
+      if (hasCjk || isReasoningDebris) {
+        return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
+      }
       // Caso contrário, trata o texto bruto como resposta livre
       result = { reply: trimmed, gesture: 'neutral' };
     }
@@ -291,6 +297,10 @@ export function parseProviderRaw(raw) {
   // é fala, e cai no 502 amigável em vez de chegar vazio ao cliente. As tags
   // não-verbais também saem do texto exibido e voltam em `speechTags`.
   if (typeof replyText !== 'string' || !replyText.trim() || replyText.length > 2000) {
+    return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
+  }
+  // Se o próprio reply contiver caracteres CJK ou começar com debris de raciocínio
+  if (/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(replyText) || /^(!|\d+\.\s*csal_)/i.test(replyText.trim())) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
   const salvagedFromReply = salvageLeakedGesture(replyText);

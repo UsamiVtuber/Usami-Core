@@ -443,6 +443,20 @@ test('parseProviderRaw: remove vazamento de gesture/actions com aspas simples ou
   const res3 = parseProviderRaw(rawPrefabLeak);
   assert.equal(res3.ok, true);
   assert.equal(res3.reply, 'Q-que?! B-baka! Por que eu iria querer ser sua mãe?! Hmph... você fala cada absurdo...');
+
+  const rawPipeSpaceLeak = 'Entendido! Adicionando a entrevista TRINCA para hoje às 15:30 com 30 minutos de duração. .| gesture ": "nod';
+  const res4 = parseProviderRaw(rawPipeSpaceLeak);
+  assert.equal(res4.ok, true);
+  assert.equal(res4.reply, 'Entendido! Adicionando a entrevista TRINCA para hoje às 15:30 com 30 minutos de duração.');
+  assert.equal(res4.gesture, 'nod');
+});
+
+test('parseProviderRaw: rejeita tokens em CJK e fragmentos espúrios de raciocínio como 502', () => {
+  const cjkGarbage = '!\n\n 0. csal_那些物ck_着的表示 required for';
+  assert.equal(parseProviderRaw(cjkGarbage).ok, false);
+
+  const jsonWithCjk = JSON.stringify({ reply: 'csal_那些物ck_着的表示' });
+  assert.equal(parseProviderRaw(jsonWithCjk).ok, false);
 });
 
 test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {
