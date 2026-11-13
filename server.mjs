@@ -3410,6 +3410,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
   const server = createServer(async (req, res) => {
+    // Estado de visão da agente em memória (reinicia com o servidor).
+    let visionEnabled = true;
     // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
     if ((req.method === 'GET' || req.method === 'HEAD') && (
       req.url.startsWith('/models/') || req.url.startsWith('/animations/') || req.url.startsWith('/live2d/')
@@ -3451,6 +3453,18 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url === '/api/agent/proposals' || req.url.startsWith('/api/agent/proposals/')
       || req.url.startsWith('/api/agent/proposals?')) return handleBridge(req, res);
     if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
+    if (req.method === 'GET' && req.url === '/api/llm/models') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ chat: FAST_MODEL, reasoning: BRAIN_MODEL, vision: VISION_MODEL }));
+      return;
+    }
+    // Estado de visão da agente em memória (reinicia com o servidor).
+    if (req.method === 'POST' && req.url === '/api/vision/toggle') {
+      visionEnabled = !visionEnabled;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ enabled: visionEnabled }));
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });

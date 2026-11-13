@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { Keyboard, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2, Maximize, Minimize, RotateCcw, Image as ImageIcon, Clapperboard } from 'lucide-react';
+import { Keyboard, Phone, PhoneOff, Send, Moon, X, Volume2, VolumeX, ImagePlus, MessagesSquare, Settings, Upload, Download, Trash2, Maximize, Minimize, RotateCcw, Image as ImageIcon, Clapperboard, ChevronRight, Brain, Cpu, Monitor, Smartphone, MessageCircle, Mail, Shield, User, Bot, AlertCircle } from 'lucide-react';
 import { inspectAnimation } from './animation-utils';
 import { createCustomMotion } from './custom-motion';
 import { buildCapabilityManifest, resolveMeshVisibility, summarizeCapabilities } from './capability-manifest';
@@ -939,6 +939,22 @@ export function Usami() {
   }, [bondLevel]);
   const [settingsTab, setSettingsTab] = useState('chat');
   const [dangerConfirm, setDangerConfirm] = useState(null);
+  // Bolha de status / pensamento do menu (texto dinâmico, estilo "Você" do WhatsApp).
+  const [statusBubble, setStatusBubble] = useState('Pensativa…');
+  // Modelos de LLM reais, lidos do backend (/api/llm/models).
+  const [llmModels, setLlmModels] = useState(null);
+  const [visionEnabled, setVisionEnabled] = useState(true);
+  const toggleVision = useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/vision/toggle', { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'Falha ao alternar visão.');
+      setVisionEnabled(Boolean(body.enabled));
+    } catch {
+      // Sem servidor: mantém o estado local e segue sem quebrar o menu.
+      setVisionEnabled(prev => !prev);
+    }
+  }, [apiFetch]);
   const settingsRef = useRef(null);
   const settingsCloseRef = useRef(null);
   const settingsTriggerRef = useRef(null);
@@ -1310,6 +1326,36 @@ export function Usami() {
     restoreRef: settingsTriggerRef,
     onEscape: handleSettingsEscape,
   });
+
+  // Carrega os modelos reais de LLM ao abrir o painel e rotaciona a bolha de
+  // status enquanto ele fica visível (textos dinâmicos de "pensamento").
+  useEffect(() => {
+    if (!panel) {
+      setLlmModels(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await apiFetch('/api/llm/models');
+        if (!response.ok) throw new Error(String(response.status));
+        const body = await response.json();
+        if (!cancelled) setLlmModels(body);
+      } catch {
+        // Sem modelos expostos: segue sem quebrar o menu.
+      }
+    })();
+    const frases = ['Lendo arquivos…', 'Pensativa…', 'Sextou?', 'Ouvindo você', 'Aqui comigo', 'Vamo lá!'];
+    let i = 0;
+    const rotaciona = () => {
+      if (!panel || cancelled) return;
+      setStatusBubble(frases[i]);
+      i = (i + 1) % frases.length;
+    };
+    rotaciona();
+    const timer = setInterval(rotaciona, 4000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [panel, apiFetch]);
 
   // Fecha em camadas popups ou o drawer de chat no Escape quando nenhum modal com foco exclusivo está ativo
   useEffect(() => {
@@ -2677,8 +2723,74 @@ export function Usami() {
         onClick={event => event.stopPropagation()}
       >
         <div className="panel-head">
-          <div><span className="eyebrow">CONFIGURAÇÕES</span><h2 id="usami-settings-title">Usami</h2></div>
-          <button ref={settingsCloseRef} className="icon" onClick={closeSettings} aria-label="Fechar"><X size={20}/></button>
+          <div className="menu-header">
+            <div className="avatar-wrap">
+              <div className="menu-avatar" aria-label="Avatar da Usami"><Bot size={36} /></div>
+              <div className="status-bubble" role="status" aria-live="polite">{statusBubble}</div>
+            </div>
+            <div className="menu-identity">
+              <h2 id="usami-settings-title" className="menu-name">Usami<span className="online-dot" aria-hidden="true"></span></h2>
+              <div className="menu-subtitle">Companion IA · online</div>
+            </div>
+          </div>
+          <button ref={settingsCloseRef} className="icon" onClick={closeSettings} aria-label="Fechar configurações"><X size={20} /></button>
+        </div>
+
+        {/* Controles reais da agente — ListGroups no estilo do menu "Você" */}
+        <div className="menu-controls">
+          <div className="listgroup">
+            <div className="listgroup-title">Cérebro &amp; Motor</div>
+            <button className="list-item" type="button" aria-label="Modelo de chat">
+              <Brain size={16} className="list-icon" />
+              <span className="list-label">Modelo de Chat</span>
+              <span className="list-value">{llmModels?.chat ?? '—'}</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+            <button className="list-item" type="button" aria-label="Modelo de raciocínio">
+              <Cpu size={16} className="list-icon" />
+              <span className="list-label">Modelo de Raciocínio</span>
+              <span className="list-value">{llmModels?.reasoning ?? '—'}</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+            <button className="list-item" type="button" onClick={toggleVision} aria-pressed={visionEnabled} aria-label="Alternar visão">
+              <Monitor size={16} className="list-icon" />
+              <span className="list-label">Ativar Visão</span>
+              <span className="list-value">{visionEnabled ? 'Ligada' : 'Desligada'}</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+          </div>
+
+          <div className="listgroup">
+            <div className="listgroup-title">Memória (RAG) &amp; Estado</div>
+            <button className="list-item" type="button" onClick={clearChat} aria-label="Limpar contexto atual da conversa">
+              <AlertCircle size={16} className="list-icon" />
+              <span className="list-label">Limpar Contexto Atual</span>
+              <span className="list-value">Chat</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+            <button className="list-item" type="button" onClick={() => { setSettingsTab('personality'); setDangerConfirm(null); }} aria-label="Personalidade e humor">
+              <User size={16} className="list-icon" />
+              <span className="list-label">Personalidade / Humor</span>
+              <span className="list-value">Jeito</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+          </div>
+
+          <div className="listgroup">
+            <div className="listgroup-title">Sistema</div>
+            <button className="list-item" type="button" onClick={() => { setSettingsTab('voice'); setDangerConfirm(null); }} aria-label="Voz e áudio">
+              <Mail size={16} className="list-icon" />
+              <span className="list-label">Voz &amp; Áudio</span>
+              <span className="list-value">Dispositivos</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+            <button className="list-item" type="button" aria-label="Integrações">
+              <Shield size={16} className="list-icon" />
+              <span className="list-label">Integrações</span>
+              <span className="list-value">WhatsApp · Discord · MCP</span>
+              <ChevronRight size={14} className="list-chevron" />
+            </button>
+          </div>
         </div>
         <div className="panel-tabs" role="tablist" aria-label="Seções das configurações">
           {SETTINGS_TABS.map(([id, label], index) => (
