@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createCodeAgentBridge,
   createAgentBridgeHandler,
@@ -360,7 +361,9 @@ test('code.propose Tool: integrada em git-assistant-skill e reconhecida por agen
 
 test('MCP Stdio Server: responde a initialize e tools/list via JSON-RPC 2.0', async () => {
   const { spawn } = await import('node:child_process');
-  const mcpScript = join(process.cwd(), 'scripts', 'usami-mcp.mjs');
+  const { existsSync } = await import('node:fs');
+  const localScript = join(process.cwd(), 'scripts', 'usami-mcp.mjs');
+  const mcpScript = existsSync(localScript) ? localScript : resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/usami-mcp.mjs');
 
   const proc = spawn(process.execPath, [mcpScript], {
     env: { ...process.env, USAMI_API_TOKEN: 'token-dummy' },

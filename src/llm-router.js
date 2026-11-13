@@ -23,6 +23,14 @@ const DEFAULT_CLASSIFICATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_GENERATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const DEFAULT_ANIMATION_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 
+// Modelos por papel (Etapa 1 do plano de roteamento multi-modelo):
+//   FAST  — "boca"/chat rápido: saudações, perguntas simples, baixa latência.
+//   BRAIN — "chefão": código, MCP, tool calling, raciocínio estruturado.
+//   VISION — modelo VL, usado só quando a entrada contém imagem (base64).
+const DEFAULT_FAST_MODEL = 'nv-mistralai/mistral-nemo-12b-instruct';
+const DEFAULT_BRAIN_MODEL = 'mistralai/mistral-large-2-instruct';
+const DEFAULT_VISION_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+
 function envOr(name, fallback) {
   return process.env[name] || fallback;
 }
@@ -30,6 +38,20 @@ function envOr(name, fallback) {
 const CLASSIFICATION_MODEL = envOr('NVIDIA_CLASSIFICATION_MODEL', DEFAULT_CLASSIFICATION_MODEL);
 const GENERATION_MODEL = envOr('NVIDIA_GENERATION_MODEL', DEFAULT_GENERATION_MODEL);
 const ANIMATION_MODEL = envOr('NVIDIA_ANIMATION_MODEL', DEFAULT_ANIMATION_MODEL);
+export const FAST_MODEL = envOr('NVIDIA_FAST_MODEL', DEFAULT_FAST_MODEL);
+export const BRAIN_MODEL = envOr('NVIDIA_BRAIN_MODEL', DEFAULT_BRAIN_MODEL);
+export const VISION_MODEL = envOr('NVIDIA_VISION_MODEL', DEFAULT_VISION_MODEL);
+
+// Seleciona o modelo pelo papel (Etapa 1). Papéis desconhecidos caem no FAST
+// (chat rápido) para não quebrar o fluxo.
+export function getRoleModel(role) {
+  switch (role) {
+    case 'brain': return BRAIN_MODEL;
+    case 'vision': return VISION_MODEL;
+    case 'fast':
+    default: return FAST_MODEL;
+  }
+}
 
 // O raciocínio do nemotron é o que domina o turno. No MESMO prompt de fala+ações:
 // 23,0s/515 tokens, 9,0s/356 e 23,8s/527 com thinking; 1,35s/53, 5,5s/57 e
@@ -131,7 +153,7 @@ export async function classifyUserMessage(text, { classifier = classifyEmotion, 
 export async function generateReplyWithActions(
   systemPrompt,
   userMessage,
-  { temperature = 0.7, maxTokens = 1800, client = sharedClient, signal, blurtReply } = {},
+  { temperature = 0.7, maxTokens = 1800, client = sharedClient, signal, blurtReply, model } = {},
 ) {
   if (!process.env.NVIDIA_API_KEY) throw new Error('NVIDIA_API_KEY não configurada');
 
@@ -145,7 +167,7 @@ export async function generateReplyWithActions(
     { role: 'user', content: userMessage },
   ];
   const answer = await client.chatJson({
-    model: GENERATION_MODEL,
+    model: (model || GENERATION_MODEL),
     messages,
     temperature,
     max_tokens: maxTokens,

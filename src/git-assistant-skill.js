@@ -49,6 +49,8 @@ export const GIT_ASSISTANT_TOOLS = Object.freeze([
   'github.repos',
   'github.pr',
   'github.issue',
+  'github.create_repo',
+  'github.write_file',
   'code.propose',
   'code.proposals',
 ]);
@@ -406,6 +408,74 @@ export function createGitAssistantClient({
         labels: Array.isArray(created.labels) ? created.labels.map(l => (typeof l === 'string' ? l : l.name)) : safeLabels,
       };
     },
+
+    async createRepo({ name, description = '', isPrivate = false, autoInit = true, owner = null } = {}) {
+      const safeName = String(name ?? '').trim().slice(0, 100);
+      if (!safeName || !/^[a-zA-Z0-9._-]+$/.test(safeName)) {
+        throw new Error('name do repositório inválido (apenas caracteres alfanuméricos, hifens, pontos e underscores).');
+      }
+      const safeDesc = String(description ?? '').trim().slice(0, 350);
+      const isOrg = Boolean(owner && owner.toLowerCase() !== envProvider('GITHUB_USERNAME')?.toLowerCase());
+      const path = isOrg ? `/orgs/${encodeURIComponent(owner)}/repos` : '/user/repos';
+
+      const created = await requestGitHub(path, {
+        method: 'POST',
+        body: {
+          name: safeName,
+          description: safeDesc,
+          private: Boolean(isPrivate),
+          auto_init: autoInit !== false,
+        },
+      });
+
+      return {
+        created: true,
+        name: String(created.name || safeName),
+        fullName: String(created.full_name || safeName),
+        htmlUrl: created.html_url || null,
+        isPrivate: Boolean(created.private),
+        defaultBranch: String(created.default_branch || 'main'),
+      };
+    },
+
+    async createOrUpdateFile({ repo, path, content, message = 'Arquivo gerenciado pela Usami', branch = null } = {}) {
+      const rawRepo = String(repo ?? '').trim();
+      const effectiveRepo = rawRepo.includes('/') ? rawRepo : `${envProvider('GITHUB_USERNAME') || 'Usamiin'}/${rawRepo}`;
+      const { slug } = parseRepoSlug(effectiveRepo);
+      const safePath = String(path ?? '').trim().replace(/^\/+/, '');
+      if (!safePath) throw new Error('path do arquivo é obrigatório.');
+      const safeMessage = String(message ?? 'Arquivo gerenciado pela Usami').trim().slice(0, 200);
+      const contentStr = typeof content === 'string' ? content : String(content ?? '');
+
+      let sha = null;
+      try {
+        const existing = await requestGitHub(`/repos/${slug}/contents/${encodeURIComponent(safePath)}${branch ? `?ref=${encodeURIComponent(branch)}` : ''}`);
+        if (existing?.sha) sha = existing.sha;
+      } catch {
+        sha = null;
+      }
+
+      const encoded = Buffer.from(contentStr, 'utf8').toString('base64');
+      const body = {
+        message: safeMessage,
+        content: encoded,
+        ...(sha ? { sha } : {}),
+        ...(branch ? { branch } : {}),
+      };
+
+      const res = await requestGitHub(`/repos/${slug}/contents/${encodeURIComponent(safePath)}`, {
+        method: 'PUT',
+        body,
+      });
+
+      return {
+        updated: true,
+        repo: slug,
+        path: safePath,
+        commitSha: res?.commit?.sha || null,
+        htmlUrl: res?.content?.html_url || null,
+      };
+    },
   };
 }
 
@@ -715,6 +785,85 @@ export function createGitAssistantTools({
     },
   };
 
-  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool, proposeTool, proposalsListTool];
+  const createRepoTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'github.create_repo',
+    version: '1.0.0',
+    description: 'Cria um novo repositório no GitHub para o usuário autenticado ou organização via GITHUB_TOKEN (ex.: perfil ou novos projetos).',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 15000,
+    parameters: [
+      { name: 'name', type: 'string', required: true, description: 'Nome do repositório a criar (ex: Usamiin, meu-projeto).' },
+      { name: 'description', type: 'string', required: false, description: 'Descrição breve do repositório.' },
+      { name: 'private', type: 'boolean', required: false, description: 'Se true, cria repositório privado (padrão false: público).' },
+      { name: 'autoInit', type: 'boolean', required: false, description: 'Se true, inicializa com commit e README inicial (padrão true).' },
+      { name: 'readmeContent', type: 'string', required: false, description: 'Conteúdo markdown opcional para o README.md inicial.' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === GIT_ASSISTANT_SCHEMA
+        && result.created === true
+        && typeof result.name === 'string';
+    },
+    async execute(args = {}) {
+      const data = await gitClient.createRepo({
+        name: args.name,
+        description: args.description || '',
+        isPrivate: args.private === true,
+        autoInit: args.autoInit !== false,
+      });
+      let readmeUpdated = false;
+      if (args.readmeContent && typeof args.readmeContent === 'string' && args.readmeContent.trim()) {
+        try {
+          await gitClient.createOrUpdateFile({
+            repo: data.fullName || args.name,
+            path: 'README.md',
+            content: args.readmeContent,
+            message: 'Criar README inicial via Usami',
+          });
+          readmeUpdated = true;
+        } catch {}
+      }
+      return { ok: true, schema: GIT_ASSISTANT_SCHEMA, ...data, readmeUpdated };
+    },
+  };
+
+  const writeFileTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'github.write_file',
+    version: '1.0.0',
+    description: 'Cria ou atualiza um arquivo em um repositório GitHub via GITHUB_TOKEN sem precisar clonar localmente.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 15000,
+    parameters: [
+      { name: 'repo', type: 'string', required: true, description: 'Repositório alvo (formato owner/repo ou repo).' },
+      { name: 'path', type: 'string', required: true, description: 'Caminho do arquivo (ex.: README.md).' },
+      { name: 'content', type: 'string', required: true, description: 'Conteúdo em texto puro do arquivo.' },
+      { name: 'message', type: 'string', required: false, description: 'Mensagem de commit.' },
+      { name: 'branch', type: 'string', required: false, description: 'Branch alvo (padrão default branch).' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === GIT_ASSISTANT_SCHEMA
+        && result.updated === true
+        && typeof result.path === 'string';
+    },
+    async execute(args = {}) {
+      const data = await gitClient.createOrUpdateFile({
+        repo: args.repo,
+        path: args.path,
+        content: args.content,
+        message: args.message || 'Arquivo atualizado via Usami',
+        branch: args.branch || null,
+      });
+      return { ok: true, schema: GIT_ASSISTANT_SCHEMA, ...data };
+    },
+  };
+
+  return [statusTool, logTool, diffTool, reposTool, commitTool, pushTool, prTool, issueTool, createRepoTool, writeFileTool, proposeTool, proposalsListTool];
 }
 

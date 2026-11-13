@@ -129,6 +129,19 @@ const TOOLS = [
       properties: {},
     },
   },
+  {
+    name: 'usami_list_executions',
+    description: 'Lista as execuções recentes de ferramentas da Usami com status, duração, parâmetros e erros.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Número máximo de execuções a retornar (padrão: 20).',
+        },
+      },
+    },
+  },
 ];
 
 async function apiRequest(path, { method = 'GET', body = null } = {}) {
@@ -237,6 +250,11 @@ async function handleToolCall(name, args) {
     case 'usami_ping_heartbeat': {
       await sendHeartbeat('active');
       return { ok: true, ping: 'pong', agent: AGENT_NAME, timestamp: new Date().toISOString() };
+    }
+    case 'usami_list_executions': {
+      const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 50);
+      const res = await apiRequest(`/api/agent/executions?limit=${limit}`);
+      return res.data || { ok: false, executions: [] };
     }
     default:
       throw new Error(`Ferramenta desconhecida: ${name}`);

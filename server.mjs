@@ -50,7 +50,7 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique, summarizeDay } from './src/llm-router.js';
+import { classifyUserMessage, describeFetchError, generateReplyWithActions, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL, VISION_MODEL } from './src/llm-router.js';
 import { summarizePendingDays } from './src/memory-summaries.js';
 import { classifyFactDurability, consolidateFacts } from './src/memory-consolidation.js';
 import { readRagContext, resolveVaultDir } from './src/rag.js';
@@ -1071,11 +1071,15 @@ export function createChatHandler(options = {}) {
 
           const nvidiaAbort = new AbortController();
           const routerAbort = new AbortController();
+          // Etapa 1: seleção por papel. Ferramenta rodou (operacional/complexo) →
+          // "chefão" (brain); conversa normal → modelo rápido (fast).
+          const chatModel = executedAgentTurn ? BRAIN_MODEL : FAST_MODEL;
           const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', () => generateReply(
             withCapabilities(promptOverride ?? system, capabilities),
             parsedBody.message,
             {
               temperature,
+              model: chatModel,
               signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
               blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
             },
@@ -1341,7 +1345,23 @@ export function createChatHandler(options = {}) {
         + (nvidiaFailed && routerUsed ? ' (fallback: llmMs soma a tentativa NVIDIA + OpenRouter)' : ''));
 
       if (!agentTurn && agentCore) {
-        agentTurn = agentCore.dispatchAsync(parsedBody.message);
+        const followupClientId = normalizeClientId(req.headers['x-usami-client']);
+        agentTurn = agentCore.dispatchAsync(parsedBody.message, {
+          onComplete: turn => {
+            try {
+              if (!turn || turn.status !== 'executed') return;
+              const summary = formatExecutedTurnFallbackReply(turn);
+              if (!summary) return;
+              queueAvatarCommand({
+                type: 'proactive_say',
+                message: summary,
+                gesture: 'nod',
+              }, { clientId: followupClientId ? normalizeClientId(followupClientId) : null });
+            } catch {
+              // follow-up é best-effort: nunca derruba o turno
+            }
+          },
+        });
       }
 
       let moodPayload = null;
@@ -3106,7 +3126,7 @@ export function parseLearningVerdict(raw) {
 
 export function createMediaAnalyzeHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const getKey = options.getKey || (async () => readEnvValue('GEMINI_API_KEY'));
+  const getKey = options.getKey || (async () => readEnvValue('NVIDIA_API_KEY'));
   const memoryStore = options.memoryStore || installMemoryStore;
   const personalityStore = options.personalityStore || installPersonalityStore;
   // Base64 + JSON.parse + frames multiplicam o payload em RAM: uma análise por

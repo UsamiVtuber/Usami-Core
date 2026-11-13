@@ -1205,6 +1205,7 @@ export function Usami() {
       const turn = { id, role, content: value, mode };
       // F2: turno de erro do chat tem tipo próprio e é persistido no storage.
       if (flags?.error) turn.error = true;
+      if (flags?.agentTurn) turn.agentTurn = flags.agentTurn;
       const next = [...previous, turn];
       // O estado guarda a conversa inteira da sessão; o navegador fica com as
       // últimas 100 mensagens para não crescer sem limite.
@@ -2040,7 +2041,12 @@ export function Usami() {
       const fullCleanText = balloons.map(b => b.display).join(' ');
       // Voz oficial da Usami (Gemini TTS) com lip-sync e expressões tanto em texto quanto em chamada
       const defaultStyle = resolved.emotion?.label || styleIdForActions(resolved.actions);
-      speakReply(balloons, defaultStyle, timedActions, part => addTurn('assistant', stripSpeechTags(part), spoken ? 'voice' : 'text'));
+      let attachedToolFlag = false;
+      speakReply(balloons, defaultStyle, timedActions, part => {
+        const flags = (!attachedToolFlag && data.agentTurn) ? { agentTurn: data.agentTurn } : null;
+        attachedToolFlag = true;
+        addTurn('assistant', stripSpeechTags(part), spoken ? 'voice' : 'text', flags);
+      });
       setMessage(fullCleanText + (gestureRequested && !gestureApplied ? ' (Gesto indisponível neste modelo.)' : ''));
     } catch (error) {
       // F2: turno de erro persistente, com retry no histórico. A mensagem do
@@ -2568,7 +2574,19 @@ export function Usami() {
     {chat && <section className="chat-history" aria-label="Histórico da conversa">
       <div className="chat-history-head"><span><MessagesSquare size={14}/> conversa</span><div className="chat-history-actions"><button onClick={exportChat} disabled={!conversation.length} aria-label="Exportar histórico" title="Exportar histórico"><Download size={14}/></button><button onClick={clearChat} disabled={!conversation.length} aria-label="Limpar histórico" title="Limpar histórico"><Trash2 size={15}/></button><button onClick={() => setOpenPanel(null)} aria-label="Ocultar histórico"><X size={15}/></button></div></div>
       <div className="chat-scroll" ref={chatScrollRef}>
-        {conversation.length ? conversation.map(turn => <div className={'chat-turn ' + turn.role + (turn.error ? ' error' : '')} key={turn.id}><span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span><p role={turn.error ? 'alert' : undefined}>{turn.content}</p>{turn.error && <button type="button" className="chat-retry" onClick={retryLastMessage} disabled={busy}>Tentar de novo</button>}</div>) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
+        {conversation.length ? conversation.map(turn => (
+          <div className={'chat-turn ' + turn.role + (turn.error ? ' error' : '')} key={turn.id}>
+            <span>{turn.role === 'assistant' ? 'Usami' : 'Você'}{turn.mode === 'voice' ? ' · voz' : ''}</span>
+            <p role={turn.error ? 'alert' : undefined}>{turn.content}</p>
+            {turn.agentTurn && (
+              <div className="chat-tool-badge" title={`Ferramenta: ${turn.agentTurn.tool?.name || turn.agentTurn.route || 'tool'}`}>
+                <span className="chat-tool-tag">🛠️ {turn.agentTurn.tool?.name || turn.agentTurn.route || 'ferramenta'}</span>
+                <span className={'chat-tool-status ' + (turn.agentTurn.status || 'ok')}>{turn.agentTurn.status === 'executed' ? 'concluído' : turn.agentTurn.status}</span>
+              </div>
+            )}
+            {turn.error && <button type="button" className="chat-retry" onClick={retryLastMessage} disabled={busy}>Tentar de novo</button>}
+          </div>
+        )) : <div className="chat-empty"><p>Comece do seu jeito.</p><span>Escreva abaixo ou inicie uma chamada com a Usami.</span></div>}
         {busy && <div className="chat-typing" aria-label="Usami está digitando"><i/><i/><i/></div>}
       </div>
     </section>}

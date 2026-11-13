@@ -20,7 +20,7 @@ function geminiImageResponse(reply = 'Vi tudo!') {
     ok: true,
     status: 200,
     json: async () => ({
-      candidates: [{ content: { parts: [{ text: JSON.stringify({ reply, gesture: 'nod', actions: [], ocr: [] }) }] } }],
+      choices: [{ message: { content: JSON.stringify({ reply, gesture: 'nod', actions: [], ocr: [] }) } }],
     }),
   };
 }
@@ -125,7 +125,7 @@ test('B15: actions da mídia passam por sanitizeActions e pelo catálogo do corp
       ok: true,
       status: 200,
       json: async () => ({
-        candidates: [{ content: { parts: [{ text: JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
           reply: 'olha só!',
           gesture: 'nod',
           actions: [
@@ -134,7 +134,7 @@ test('B15: actions da mídia passam por sanitizeActions e pelo catálogo do corp
             { type: 'dance', name: 'fora-da-allowlist' },
           ],
           ocr: [],
-        }) }] } }],
+        }) } }],
       }),
     }),
   });
@@ -164,7 +164,7 @@ test('B15: actions da mídia passam por sanitizeActions e pelo catálogo do corp
 });
 
 // --- B2: chave fora da URL e erro genérico ---------------------------------
-test('Gemini é chamado com x-goog-api-key no header e SEM ?key= na URL', async () => {
+test('Vision é chamado com Authorization Bearer no header e SEM ?key= na URL', async () => {
   let capturedUrl = null;
   let capturedHeaders = null;
   await analyzeMedia({
@@ -180,7 +180,7 @@ test('Gemini é chamado com x-goog-api-key no header e SEM ?key= na URL', async 
   });
   assert.ok(!capturedUrl.includes('key='), `URL não pode carregar a chave: ${capturedUrl}`);
   assert.ok(!capturedUrl.includes('segredo-gemini-123'));
-  assert.equal(capturedHeaders['x-goog-api-key'], 'segredo-gemini-123');
+  assert.equal(capturedHeaders['Authorization'], 'Bearer segredo-gemini-123');
   assert.equal(capturedHeaders['Content-Type'], 'application/json');
 });
 

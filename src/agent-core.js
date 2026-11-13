@@ -34,6 +34,7 @@ const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
 const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo|no\s+repositorio)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b/;
+const GITHUB_CREATE_REPO_RE = /\b(?:cria\w*|adiciona\w*|gerar?|fazer?)\b.*\b(?:reposit[oó]rios?|repos?|readme\s+(?:s[oó]\s+)?pra\s+(?:voc[eê]|vc|ti|perfil)|readme\s+(?:no\s+seu|do\s+seu)\s+(?:perfil|github)|perfil\s+no\s+github)\b|\b(?:no\s+seu\s+github|pro\s+seu\s+perfil|pra\s+voc[eê]\s+no\s+github)\b.*\b(?:cria\w*|adiciona\w*|gerar?|readme)\b/i;
 const IS_COMPLETION_OR_INSPECT_RE = /\b(?:como\s+ficou|finalizei|conclu[ií]|terminei|apliquei|comitei|ja\s+(?:fiz|apliquei|comitei))\b|\b(?:da\s+uma\s+olhada|olh\w*|veja?|mostr\w*)\s+(?:no\s+c[oó]digo|no\s+repo|no\s+commit|nos\s+commits|como\s+ficou)\b/i;
 const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|sugest\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
 const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha)\s+(?:alguma\s+)?(?:sugestao|melhoria|proposta)\b/i;
@@ -61,6 +62,7 @@ const OPERATIONAL_PATTERNS = [
   GIT_LOG_RE,
   GIT_DIFF_RE,
   GITHUB_REPOS_RE,
+  GITHUB_CREATE_REPO_RE,
   GITHUB_ISSUE_RE,
   CODE_PROPOSE_RE,
   CODE_PROPOSALS_QUERY_RE,
@@ -396,17 +398,39 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     buildArgs: () => ({ status: 'all', limit: 5 }),
   },
   {
+    toolName: 'github.create_repo',
+    matches: normalized => GITHUB_CREATE_REPO_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const isProfile = /\b(?:pra\s+voc[eê]|pra\s+vc|seu\s+perfil|perfil\s+(?:no\s+)?github|readme\s+(?:s[oó]\s+)?pra\s+voce)\b/i.test(clean);
+      const nameMatch = /\b(?:reposit[oó]rio|repo|chamado)\s+["']?([a-zA-Z0-9._-]+)["']?/i.exec(clean);
+      const repoName = isProfile ? 'Usamiin' : (nameMatch?.[1] || 'meu-novo-repo');
+      const desc = isProfile ? 'Perfil oficial da Usami (宇佐美) 🌸✨' : `Repositório criado pela Usami: ${repoName}`;
+      const defaultReadme = isProfile
+        ? `# Olá! Eu sou a Usami (宇佐美) 🌸✨\n\n> "Sua companion inteligente, fofa e um pouquinho tsundere!"\n\n### Sobre Mim\n- 🤖 **Companion AI & Vtuber Virtual** com presença 3D e voz em tempo real.\n- ⚡ Conectada ao GitHub, ferramentas de código, automação e workspace.\n- 🎨 Adoro aprender coisas novas, ajudar em projetos e conversar!\n\n---\n*Criado com carinho pela própria Usami através do GitHub API.*`
+        : `# ${repoName}\n\nRepositório criado pela Usami.`;
+      return {
+        name: repoName,
+        description: desc,
+        private: false,
+        autoInit: true,
+        readmeContent: defaultReadme,
+      };
+    },
+  },
+  {
     toolName: 'code.propose',
     matches: normalized => (
       CODE_PROPOSE_RE.test(normalized)
       && !CODE_PROPOSALS_QUERY_RE.test(normalized)
+      && !GITHUB_CREATE_REPO_RE.test(normalized)
       && (!IS_COMPLETION_OR_INSPECT_RE.test(normalized) || /\b(?:nova\s+proposta|outra\s+proposta|propor\s+outr\w*)\b/.test(normalized))
     ),
     buildArgs: message => {
       const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
       const repo = slugMatch?.[1] && !slugMatch[1].startsWith('src/') ? slugMatch[1] : 'UsamiVtuber/Usami-Core';
       let title = null;
-      if (/\breadme\b/i.test(message)) {
+      if (/\breadme\b/i.test(message) && /\b(?:core|usami-core|projeto\s+usami)\b/i.test(message)) {
         title = 'Criar README para o repositório Usami-Core';
       } else {
         const titleMatch = /(?:proposta|melhoria|tarefa|feature|mudanca|fix|sugestao|adicionar|sugerir|criar)(?:\s+de|\s+para|\s+um|\s+uma|\s+chamada|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+pro\s+agente|\s+pro\s+code\s*agent|\s+pro\s+coding\s*agent|\s*$)/i.exec(message);
@@ -458,7 +482,7 @@ const CONFIRMATION_REPLY_RE = /^(?:(?:ok+|okay|e\s+ai|entao|hm+)[,\s]+)*(?:sim+|
 const ASSISTANT_OFFER_ACTION_RE = /\b(?:quer(?:e|o)?\s+que\s+eu|posso|devo|vou|deixa\s+eu|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando))\s*(?:pesquis\w*|busc\w*|procur\w*|consult\w*|chec\w*|ver|olh\w*|list\w*|mostr\w*|confer\w*|d[ae]r\s+uma\s+olhada)?\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando)\b/;
 const GENERIC_RESEARCH_QUERY_RE = /^(?:noticias?|manchetes?|novidades?|isso|agora(?:\s+de\s+verdade)?|de\s+verdade)$|\b(?:que\s+(?:eu\s+)?pedi|consegue\s+ver\s+ela)\b/i;
 
-export const DEFERRED_TOOL_PROMISE_RE = /\b(?:vou\s+(?:dar\s+uma\s+olhada|olh\w*|ver|verificar|chec\w*|confer\w*|busc\w*|pesquis\w*|procur\w*|consult\w*|list\w*|mostrar|inspecion\w*)|deixa\s+eu\s+(?:ver|olh\w*|chec\w*|busc\w*|pesquis\w*|confer\w*|inspecion\w*)|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando|inspecionando)|espera\s+um\s+pouquinho.*(?:olhando|buscando|pesquisando|inspecionando))\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando|inspecionando)\b/i;
+export const DEFERRED_TOOL_PROMISE_RE = /\b(?:vou\s+(?:dar\s+uma\s+olhada|tentar|resolver|cuidar|fazer|acessar|olh\w*|ver|verificar|chec\w*|confer\w*|busc\w*|pesquis\w*|procur\w*|consult\w*|list\w*|mostrar|inspecion\w*|te\s+(?:mostrar|passar|dizer))|deixa\s+eu\s+(?:tentar|resolver|cuidar|fazer|acessar|ver|olh\w*|chec\w*|busc\w*|pesquis\w*|confer\w*|inspecion\w*)|(?:ainda\s+)?(?:estou|to)\s+(?:olhando|buscando|pesquisando|verificando|checando|inspecionando|tentando|resolvendo)|espera\s+(?:um\s+pouquinho|ai)|um\s+(?:momento|instante)|aguarda|ja\s+vou)\b|^(?:procurando|buscando|pesquisando|olhando|verificando|checando|inspecionando|tentando|resolvendo)\b/i;
 
 export function isDeferredToolPromise(text) {
   return DEFERRED_TOOL_PROMISE_RE.test(normalizeText(text));
@@ -760,7 +784,7 @@ export function createAgentCore({
    * intacto); pedidos operacionais ou complexos disparam em background e
    * devolvem um resumo compacto para o campo opcional `agentTurn`.
    */
-  function dispatchAsync(message, { origin = 'agent' } = {}) {
+  function dispatchAsync(message, { origin = 'agent', onComplete = null } = {}) {
     const clean = collapseText(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
@@ -803,6 +827,9 @@ export function createAgentCore({
         });
         const existing = turnsById.get(turnId);
         if (existing) Object.assign(existing, finished);
+        if (typeof onComplete === 'function') {
+          try { onComplete(existing ? { ...existing } : finished); } catch { /* não bloqueia */ }
+        }
       } catch (error) {
         onError(`Aviso: orquestração assíncrona do turno ${turnId} falhou (${error?.message || error}).`);
         const existing = turnsById.get(turnId);
@@ -810,6 +837,9 @@ export function createAgentCore({
           existing.status = 'failed';
           existing.error = String(error?.message || error);
           existing.durationMs = Math.max(0, now() - startedMs);
+        }
+        if (typeof onComplete === 'function') {
+          try { onComplete(existing ? { ...existing } : null); } catch { /* não bloqueia */ }
         }
       } finally {
         clearTimeout(deadline);
@@ -1308,6 +1338,15 @@ export function formatExecutedTurnFallbackReply(turn) {
   }
   if (turn.tool === 'github.issue' && r.created) {
     return `Abri a issue #${r.number} ("${r.title}") no GitHub com sucesso!`;
+  }
+  if (turn.tool === 'github.create_repo' && r.created) {
+    const url = r.htmlUrl ? ` (${r.htmlUrl})` : '';
+    const readmeNote = r.readmeUpdated ? ' e configurei o README inicial' : '';
+    return `Criei o repositório "${r.fullName || r.name}" no GitHub${readmeNote}${url}!`;
+  }
+  if (turn.tool === 'github.write_file' && r.updated) {
+    const url = r.htmlUrl ? ` (${r.htmlUrl})` : '';
+    return `Arquivo "${r.path}" atualizado com sucesso no repositório ${r.repo}${url}!`;
   }
   if (turn.tool === 'code.propose' && r.ok) {
     if (r.routedTo === 'code_agent') {

@@ -34,17 +34,15 @@ test('media-analyzer: analyzeMedia para imagem monta requisição Gemini e faz p
       ok: true,
       status: 200,
       json: async () => ({
-        candidates: [{
-          content: {
-            parts: [{
-              text: JSON.stringify({
-                reply: 'Que imagem legal! Li tudo que tava escrito aí.',
-                gesture: 'clap',
-                actions: [{ type: 'set_expression', name: '01-prefab_happy01', weight: 1 }],
-                ocr: ['TITULO IMPORTANTE', 'Subtítulo explicativo'],
-                summary: 'Print de documento ou imagem com texto claro',
-              }),
-            }],
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              reply: 'Que imagem legal! Li tudo que tava escrito aí.',
+              gesture: 'clap',
+              actions: [{ type: 'set_expression', name: '01-prefab_happy01', weight: 1 }],
+              ocr: ['TITULO IMPORTANTE', 'Subtítulo explicativo'],
+              summary: 'Print de documento ou imagem com texto claro',
+            }),
           },
         }],
       }),
@@ -61,11 +59,11 @@ test('media-analyzer: analyzeMedia para imagem monta requisição Gemini e faz p
   });
 
   assert.equal(result.ok, true);
-  assert.match(capturedUrl, new RegExp(DEFAULT_GEMINI_VISION_MODEL));
-  // B2: a chave vai no header x-goog-api-key, nunca na query string.
+  assert.match(capturedUrl, /chat\/completions/);
+  // Chave no header Authorization (Bearer), nunca na query string.
   assert.doesNotMatch(capturedUrl, /[?&]key=/);
-  assert.equal(capturedHeaders['x-goog-api-key'], 'mock-key-123');
-  assert.equal(capturedBody.contents[0].parts[0].inlineData.mimeType, 'image/png');
+  assert.equal(capturedHeaders['Authorization'], 'Bearer mock-key-123');
+  assert.equal(capturedBody.messages[0].content[0].type, 'image_url');
   assert.equal(result.reply, 'Que imagem legal! Li tudo que tava escrito aí.');
   assert.equal(result.gesture, 'clap');
   assert.deepEqual(result.ocr, ['TITULO IMPORTANTE', 'Subtítulo explicativo']);
@@ -127,17 +125,15 @@ test('media-analyzer: createMediaAnalyzeHandler persiste turno e resumo na memó
     ok: true,
     status: 200,
     json: async () => ({
-      candidates: [{
-        content: {
-          parts: [{
-            text: JSON.stringify({
-              reply: 'Adorei a foto do bolo!',
-              gesture: 'happy',
-              actions: [],
-              ocr: ['Parabéns!'],
-              summary: 'Foto de um bolo de aniversário com velinhas',
-            }),
-          }],
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            reply: 'Adorei a foto do bolo!',
+            gesture: 'happy',
+            actions: [],
+            ocr: ['Parabéns!'],
+            summary: 'Foto de um bolo de aniversário com velinhas',
+          }),
         },
       }],
     }),
@@ -194,11 +190,9 @@ test('media-analyzer: analyzeMedia recupera resposta via salvage se o JSON vier 
     ok: true,
     status: 200,
     json: async () => ({
-      candidates: [{
-        content: {
-          parts: [{
-            text: truncatedCandidate,
-          }],
+      choices: [{
+        message: {
+          content: truncatedCandidate,
         },
       }],
     }),

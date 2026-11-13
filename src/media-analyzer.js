@@ -8,7 +8,10 @@ import { parseJsonLoosely, sanitizeActions } from './provider-parse.js';
 
 const execFileAsync = promisify(execFile);
 
-export const DEFAULT_GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-3.8-flash';
+// Etapa 3: visão isolada no modelo VL da NVIDIA (sem fallback Gemini).
+export const DEFAULT_VISION_MODEL = process.env.NVIDIA_VISION_MODEL || 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+// Alias legado (testes/compat): aponta para o modelo VL atual.
+export const DEFAULT_GEMINI_VISION_MODEL = DEFAULT_VISION_MODEL;
 export const MAX_VIDEO_FRAMES = 6;
 export const MAX_FRAME_WIDTH = 800;
 
@@ -167,7 +170,7 @@ export async function analyzeMedia({
   userPrompt = '',
   personaSystemPrompt = '',
   apiKey,
-  geminiUrl = 'https://generativelanguage.googleapis.com',
+  baseUrl = 'https://integrate.api.nvidia.com/v1',
   model = DEFAULT_GEMINI_VISION_MODEL,
   fetchImpl = globalThis.fetch,
   extractMedia = extractVideoFramesAndAudio,
@@ -176,7 +179,7 @@ export async function analyzeMedia({
   if (!apiKey) {
     return {
       ok: false,
-      reply: 'Eu queria muito ver o que você mandou, mas a chave de visão (Gemini API) não tá configurada no servidor!',
+      reply: 'Eu queria muito ver o que você mandou, mas a chave de visão (NVIDIA API) não tá configurada no servidor!',
       gesture: 'scratchHead',
       actions: [{ type: 'gesture', name: 'scratchHead' }],
       error: 'GEMINI_API_KEY ausente',
@@ -203,14 +206,10 @@ export async function analyzeMedia({
         maxFrames: MAX_VIDEO_FRAMES,
       });
 
-      // Inclui faixa de áudio se presente
+      // O modelo VL é de visão: áudio não é processado. Anotamos a presença
+      // para o prompt, mas não enviamos bytes de áudio.
       if (extracted.audio?.base64) {
-        parts.push({
-          inlineData: {
-            mimeType: extracted.audio.mimeType,
-            data: extracted.audio.base64,
-          },
-        });
+        parts.push({ text: '[Áudio presente no vídeo — transcrição não disponível no modelo de visão atual.]' });
       }
 
       // Inclui frames picotados com timestamps
@@ -287,7 +286,7 @@ FORMATO OBRIGATÓRIO (JSON PURO):
 
     // A chave vai APENAS no header `x-goog-api-key` (mesmo padrão do TTS):
     // query string entra em log de proxy, histórico e mensagem de erro.
-    const apiUrl = `${geminiUrl.replace(/\/+$/, '')}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    const apiUrl = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -297,15 +296,14 @@ FORMATO OBRIGATÓRIO (JSON PURO):
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 8192,
-            responseMimeType: 'application/json',
-          },
+          model,
+          messages: [{ role: 'user', content: parts.map(p => p.text ? { type: 'text', text: p.text } : { type: 'image_url', image_url: { url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}` } }).filter(Boolean) }],
+          temperature: 0.7,
+          max_tokens: 2048,
+          response_format: { type: 'json_object' },
         }),
         signal: controller.signal,
       });
@@ -319,7 +317,7 @@ FORMATO OBRIGATÓRIO (JSON PURO):
       // O corpo do provedor não volta ao cliente (pode ecoar detalhes internos).
       // O log é truncado e qualquer `key=`/`api_key=` é mascarado por segurança.
       const errText = String(await res.text()).slice(0, 300);
-      console.warn('[media-analyzer] Gemini HTTP ' + res.status + ': '
+      console.warn('[media-analyzer] Vision HTTP ' + res.status + ': '
         + errText.replace(/(api[_-]?key|key)=[^&\s"']+/gi, '$1=***'));
       return {
         ok: false,
@@ -331,12 +329,7 @@ FORMATO OBRIGATÓRIO (JSON PURO):
     }
 
     const resultJson = await res.json();
-    const candidateParts = resultJson.candidates?.[0]?.content?.parts || [];
-    const nonThoughtParts = candidateParts.filter(p => !p.thought);
-    const candidateText = (nonThoughtParts.length ? nonThoughtParts : candidateParts)
-      .map(p => p.text)
-      .filter(Boolean)
-      .join('\n');
+    const candidateText = resultJson.choices?.[0]?.message?.content || '';
 
     let parsedObj = {};
     if (candidateText) {

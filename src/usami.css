@@ -2430,6 +2430,44 @@ header > * {
   color: var(--err);
 }
 
+.chat-tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 7px 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(11, 19, 43, 0.75);
+  border: 1px solid rgba(255, 166, 201, 0.3);
+  font-size: 11px;
+  font-family: var(--font-display, monospace);
+  color: var(--pearl, #F9F9FB);
+}
+
+.chat-tool-badge .chat-tool-tag {
+  color: var(--sec, #FFA6C9);
+  font-weight: 600;
+}
+
+.chat-tool-badge .chat-tool-status {
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: rgba(46, 204, 113, 0.18);
+  color: #2ECC71;
+  border: 1px solid rgba(46, 204, 113, 0.35);
+}
+
+.chat-tool-badge .chat-tool-status.failed,
+.chat-tool-badge .chat-tool-status.error,
+.chat-tool-badge .chat-tool-status.denied {
+  background: rgba(255, 107, 122, 0.18);
+  color: var(--err, #FF5E7E);
+  border-color: rgba(255, 107, 122, 0.35);
+}
+
 .chat-retry {
   margin: 8px 7px 0;
   padding: 6px 12px;

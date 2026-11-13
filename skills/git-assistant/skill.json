@@ -16,6 +16,8 @@
     "github.repos",
     "github.pr",
     "github.issue",
+    "github.create_repo",
+    "github.write_file",
     "code.propose",
     "code.proposals"
   ],
