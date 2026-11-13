@@ -815,6 +815,7 @@ export function createChatHandler(options = {}) {
         snapshot,
         gitStatus: fallbackGit,
         githubConfigured: integrationsStatus.github,
+        githubUsername: readEnvValue('GITHUB_USERNAME'),
         integrationsStatus,
       });
       cachedAwareness = { expiresAt: t + 15_000, text };

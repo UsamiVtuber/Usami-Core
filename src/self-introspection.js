@@ -422,6 +422,7 @@ export function formatSelfAwarenessPrompt({
   snapshot,
   gitStatus = null,
   githubConfigured = false,
+  githubUsername = null,
   integrationsStatus = null,
 } = {}) {
   if (!snapshot || typeof snapshot !== 'object') return '';
@@ -457,7 +458,11 @@ export function formatSelfAwarenessPrompt({
   }
 
   const ghReady = Boolean(integrationsStatus?.github ?? githubConfigured);
-  lines.push(`GitHub API (GITHUB_TOKEN): ${ghReady ? 'configurada' : 'não configurada (falha fechado até definir no .env)'}.`);
+  const userDesc = githubUsername ? ` com sua conta própria @${githubUsername}` : '';
+  lines.push(`GitHub API (GITHUB_TOKEN): ${ghReady ? `configurada${userDesc}` : 'não configurada (falha fechado até definir no .env)'}.`);
+  if (ghReady && githubUsername) {
+    lines.push(`Identidade no GitHub: você possui sua própria conta oficial (@${githubUsername}) para abrir issues, propor melhorias no Usami-Core e colaborar no desenvolvimento dos projetos da organização UsamiVtuber.`);
+  }
 
   if (integrationsStatus && typeof integrationsStatus === 'object') {
     const statusLabel = flag => (flag ? 'pronta' : 'não configurada');
