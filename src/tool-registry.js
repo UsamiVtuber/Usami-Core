@@ -124,7 +124,7 @@ export function toolToOpenAi(tool) {
   return {
     type: 'function',
     function: {
-      name: tool.name,
+      name: tool.name.replace(/\./g, '_'),
       description: tool.description || tool.name,
       parameters: {
         type: 'object',

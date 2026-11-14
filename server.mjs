@@ -967,7 +967,8 @@ export function createChatHandler(options = {}) {
 
       let agentTurn = null;
       let executedAgentTurn = null;
-      if (agentCore && options.syncAgentInChat !== false && typeof agentCore.runOperationalForChat === 'function') {
+      const isFastTier = Boolean(parsedBody.input?.skipAgent || parsedBody.input?.fastTier);
+    if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
         try {
           let executedTurn = null;
           try {
@@ -1068,10 +1069,12 @@ export function createChatHandler(options = {}) {
         return timeStage('llm', async () => {
           let response;
           try {
+            const routerModel = isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model;
+            const routerMaxTokens = isFastTier ? 250 : 700;
             response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
               method: 'POST',
               headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model, max_tokens: 700, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
+              body: JSON.stringify({ model: routerModel, max_tokens: routerMaxTokens, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
               signal,
             });
           } catch (error) {
@@ -1113,10 +1116,10 @@ export function createChatHandler(options = {}) {
           const nvidiaAbort = new AbortController();
           const routerAbort = new AbortController();
           // Etapa 1: seleção por papel. Ferramenta rodou (operacional/complexo) →
-          // "chefão" (brain); conversa normal → modelo rápido (fast).
-          const chatModel = executedAgentTurn ? BRAIN_MODEL : FAST_MODEL;
+          // "chefão" (brain); conversa normal ou LoL fast tier → modelo rápido (fast).
+          const chatModel = (executedAgentTurn && !isFastTier) ? BRAIN_MODEL : FAST_MODEL;
           // Em testes (generateReply mockado) ou sem registry, mantém o fluxo regex.
-          const useTools = !options.generateReply && chatModel === BRAIN_MODEL && toolRegistry && typeof toolRegistry.toOpenAiTools === 'function';
+          const useTools = !options.generateReply && !isFastTier && chatModel === BRAIN_MODEL && toolRegistry && typeof toolRegistry.toOpenAiTools === 'function';
           const openAiTools = useTools ? toolRegistry.toOpenAiTools() : [];
           const executeToolForChat = async (name, args) => {
             if (!installToolExecutor) return { ok: false, error: 'executor ausente' };
@@ -1152,6 +1155,7 @@ export function createChatHandler(options = {}) {
             const rawReply = await generateReply(sys, parsedBody.message, {
               temperature,
               model: chatModel,
+              maxTokens: isFastTier ? 250 : 1800,
               signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
               blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
             });
@@ -1208,7 +1212,7 @@ export function createChatHandler(options = {}) {
               } catch {
                 parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
               }
-            } else if (!agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
+            } else if (!isFastTier && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
               try {
                 // Caminho tardio: a ferramenta só é descoberta DEPOIS da
                 // primeira resposta (o modelo pediu algo acionável). Mesmos
@@ -1261,8 +1265,8 @@ export function createChatHandler(options = {}) {
 
           // Sem ação nenhuma no JSON da geração: o diretor de animação roda em
           // background e o refino chega pela fila de comandos. Nunca bloqueia a
-          // resposta — a fala já está na mão do cliente.
-          if (parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
+          // resposta — a fala já está na mão do cliente. Não roda em fast tier (LoL).
+          if (!isFastTier && parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
             void refineAnimationInBackground(parsed.reply, capabilities, {
               clientId: normalizeClientId(req.headers['x-usami-client']),
               queue: n8nQueue,
