@@ -1044,37 +1044,94 @@ export function createChatHandler(options = {}) {
       };
       mark('context');
 
-      // Chave do OpenRouter resolvida uma vez por turno: o hedge só dispara se
-      // houver para onde cair, e o fallback sequencial não relê o .env.
-      let routerKey = null;
-      let routerKeyError = null;
-      let routerKeyResolved = false;
-      const resolveRouterKey = async () => {
-        if (!routerKeyResolved) {
-          routerKeyResolved = true;
+      // Provedor alternativo resolvido uma vez por turno (Gemini Flash, Groq ou OpenRouter):
+      // o hedge só dispara se houver para onde cair, e o fallback sequencial não relê o .env.
+      let alternateConfig = null;
+      let alternateError = null;
+      let alternateResolved = false;
+      const resolveAlternateProvider = async () => {
+        if (!alternateResolved) {
+          alternateResolved = true;
           try {
-            routerKey = await getKey();
+            // Se getKey foi injetado explicitamente (ex: testes mockando OpenRouter ou modo offline):
+            if (options.getKey) {
+              const testKey = await options.getKey();
+              if (!testKey) return null;
+              alternateConfig = {
+                provider: 'openrouter',
+                key: testKey,
+                url: 'https://openrouter.ai/api/v1/chat/completions',
+                model: isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model,
+              };
+              return alternateConfig;
+            }
+            // 1. Google Gemini (endpoint compatível OpenAI - ultra rápido e cota generosa)
+            const geminiKey = readEnvValue('GEMINI_API_KEY', { filePath: options.envPath });
+            if (geminiKey) {
+              alternateConfig = {
+                provider: 'gemini',
+                key: geminiKey,
+                url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+                model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+              };
+              return alternateConfig;
+            }
+            // 2. Groq (Llama 3.3 70B ultra rápido)
+            const groqKey = readEnvValue('GROQ_API_KEY', { filePath: options.envPath });
+            if (groqKey) {
+              alternateConfig = {
+                provider: 'groq',
+                key: groqKey,
+                url: 'https://api.groq.com/openai/v1/chat/completions',
+                model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+              };
+              return alternateConfig;
+            }
+            // 3. OpenRouter (fallback tradicional)
+            const routerKey = readEnvValue('OPENROUTER_API_KEY', { filePath: options.envPath });
+            if (routerKey) {
+              alternateConfig = {
+                provider: 'openrouter',
+                key: routerKey,
+                url: 'https://openrouter.ai/api/v1/chat/completions',
+                model: isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model,
+              };
+              return alternateConfig;
+            }
           } catch (error) {
-            routerKeyError = error;
+            alternateError = error;
           }
         }
-        return routerKey;
+        return alternateConfig;
       };
 
-      // Uma implementação só do OpenRouter: usada pelo hedge e pelo fallback
-      // sequencial (NVIDIA desligada ou falha sem corrida).
+      // Implementação multi-provedor (Gemini / Groq / OpenRouter): usada pelo
+      // hedge e pelo fallback sequencial (NVIDIA desligada ou falha sem corrida).
+      let alternateUsed = false;
       let routerUsed = false;
-      const openRouterReply = (key, signal) => {
+      const alternateProviderReply = (config, signal) => {
+        alternateUsed = true;
         routerUsed = true;
         return timeStage('llm', async () => {
           let response;
           try {
-            const routerModel = isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model;
-            const routerMaxTokens = isFastTier ? 250 : 700;
-            response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+            const maxTokens = isFastTier ? 250 : 700;
+            const bodyPayload = {
+              model: config.model,
+              max_tokens: maxTokens,
+              messages: [
+                { role: 'system', content: withSurfaceReconciliation(system, surface) },
+                { role: 'user', content: parsedBody.message },
+              ],
+              response_format: { type: 'json_object' },
+            };
+            response = await fetchImpl(config.url, {
               method: 'POST',
-              headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model: routerModel, max_tokens: routerMaxTokens, messages: [{ role: 'system', content: withSurfaceReconciliation(system, surface) }, { role: 'user', content: parsedBody.message }] }),
+              headers: {
+                'Authorization': 'Bearer ' + config.key,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(bodyPayload),
               signal,
             });
           } catch (error) {
@@ -1082,11 +1139,14 @@ export function createChatHandler(options = {}) {
             // provedor: não vira log nem mensagem de erro.
             if (signal?.aborted && error?.name !== 'TimeoutError') throw error;
             if (turn.signal.aborted) throw error;
-            console.warn('OpenRouter falhou:', describeFetchError(error));
+            console.warn(`${config.provider} falhou:`, describeFetchError(error));
             throw providerError(error?.name === 'TimeoutError' ? 'A solicitação expirou.' : 'Não foi possível acessar o provedor.');
           }
           if (!response || !response.ok) {
-            throw providerError('A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').');
+            const providerMsg = config.provider === 'openrouter'
+              ? 'A OpenRouter recusou a solicitação ou está indisponível (HTTP ' + (response?.status ?? 0) + ').'
+              : `O provedor ${config.provider} recusou a solicitação ou está indisponível (HTTP ${response?.status ?? 0}).`;
+            throw providerError(providerMsg);
           }
           let data;
           try {
@@ -1094,9 +1154,9 @@ export function createChatHandler(options = {}) {
           } catch {
             throw providerError('Resposta inválida do provedor.');
           }
-          const parsedRouter = parseProviderRaw(data?.choices?.[0]?.message?.content);
-          if (!parsedRouter.ok) throw providerError(parsedRouter.error, parsedRouter.status);
-          return { ...parsedRouter, classification, source: 'openrouter' };
+          const parsedAlternate = parseProviderRaw(data?.choices?.[0]?.message?.content);
+          if (!parsedAlternate.ok) throw providerError(parsedAlternate.error, parsedAlternate.status);
+          return { ...parsedAlternate, classification, source: config.provider };
         });
       };
 
@@ -1107,14 +1167,15 @@ export function createChatHandler(options = {}) {
           // A classificação só alimenta o webhook do n8n (o cliente deriva a emoção
           // do texto localmente), então roda no classificador determinístico: não
           // gasta chamada nem um slot do rate limiter de 40 req/min por turno.
-          const [classified] = await Promise.all([
+          const [classified, alternate] = await Promise.all([
             classifyUserMessage(parsedBody.message, { local: true }),
-            resolveRouterKey(),
+            resolveAlternateProvider(),
           ]);
           classification = classified;
 
           const nvidiaAbort = new AbortController();
-          const routerAbort = new AbortController();
+          const alternateAbort = new AbortController();
+          const routerKey = alternate?.key || null;
           // Etapa 1: seleção por papel. Ferramenta rodou (operacional/complexo) →
           // "chefão" (brain); conversa normal ou LoL fast tier → modelo rápido (fast).
           const chatModel = (executedAgentTurn && !isFastTier) ? BRAIN_MODEL : FAST_MODEL;
@@ -1183,18 +1244,19 @@ export function createChatHandler(options = {}) {
             }
           };
 
-          // Sem chave do OpenRouter não há corrida: correr sozinho não acelera.
-          parsed = routerKey
+          // Sem provedor alternativo não há corrida: correr sozinho não acelera.
+          const effectiveHedgeMs = isFastTier ? 500 : hedgeAfterMs;
+          parsed = alternate
             ? await raceProviders({
-              hedgeMs: hedgeAfterMs,
+              hedgeMs: effectiveHedgeMs,
               startPrimary: startNvidia,
-              startFallback: () => openRouterReply(routerKey, AbortSignal.any([
+              startFallback: () => alternateProviderReply(alternate, AbortSignal.any([
                 turn.signal,
-                routerAbort.signal,
+                alternateAbort.signal,
                 AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
               ])),
               abortPrimary: () => nvidiaAbort.abort(),
-              abortFallback: () => routerAbort.abort(),
+              abortFallback: () => alternateAbort.abort(),
               onHedge: () => { hedged = true; },
             })
             : await startNvidia();
@@ -1279,7 +1341,7 @@ export function createChatHandler(options = {}) {
           // O fallback já foi tentado (em paralelo ou depois da falha): repetir
           // a chamada ao mesmo provedor só gastaria tokens.
           if (error?.fallbackAttempted) return send(error.httpStatus || 502, { error: error.message });
-          console.warn('NVIDIA falhou, tentando OpenRouter:', describeFetchError(error));
+          console.warn('NVIDIA falhou, tentando fallback alternativo:', describeFetchError(error));
           // Fallback sequencial abaixo (offline quando não há chave).
         }
       }
@@ -1288,12 +1350,12 @@ export function createChatHandler(options = {}) {
       if (turn.signal.aborted) return;
 
       if (!parsed || !parsed.ok) {
-        // Fluxo OpenRouter (atual) — usado como fallback ou quando NVIDIA desligado
-        const key = await resolveRouterKey();
-        if (routerKeyError) {
+        // Fluxo Alternativo (Gemini / Groq / OpenRouter) — usado como fallback ou quando NVIDIA desligado
+        const alt = await resolveAlternateProvider();
+        if (alternateError) {
           return send(502, { error: 'Não foi possível acessar a configuração.' });
         }
-        if (!key) {
+        if (!alt) {
           // Sem nenhuma chave de fallback: usa classificador local (sem gastar rede)
           // e aproveita dados reais caso uma skill operacional já tenha executado.
           classification = await classifyUserMessage(parsedBody.message, { local: true });
@@ -1308,13 +1370,13 @@ export function createChatHandler(options = {}) {
             doubtful: 'Oi... você tem certeza que quer conversar comigo?',
           };
           const timeoutReplies = {
-            neutral: 'Hmph... a conexão com o provedor de IA demorou demais e deu timeout. Me fala de novo?',
-            shy: 'D-Desculpe... a resposta demorou muito no servidor e deu timeout. Pode falar comigo de novo?',
+            neutral: isFastTier ? 'Ei, foco na partida! A gente conversa depois do Nexus cair!' : 'Hmph... a conexão com o provedor de IA demorou demais e deu timeout. Me fala de novo?',
+            shy: isFastTier ? 'Foca no jogo, baka!' : 'D-Desculpe... a resposta demorou muito no servidor e deu timeout. Pode falar comigo de novo?',
           };
           const emotion = classification?.emotion || 'neutral';
           const skillFallback = executedAgentTurn ? formatExecutedTurnFallbackReply(executedAgentTurn) : null;
           const fallbackMap = nvidiaFailed ? timeoutReplies : offlineReplies;
-          const chosenReply = skillFallback || fallbackMap[emotion] || fallbackMap.neutral || offlineReplies[emotion] || offlineReplies.neutral;
+          const chosenReply = skillFallback || (isFastTier && nvidiaFailed ? timeoutReplies.neutral : null) || fallbackMap[emotion] || fallbackMap.neutral || offlineReplies[emotion] || offlineReplies.neutral;
           parsed = {
             ok: true,
             reply: chosenReply,
@@ -1326,7 +1388,7 @@ export function createChatHandler(options = {}) {
           };
         } else {
           try {
-            parsed = await openRouterReply(key, AbortSignal.any([
+            parsed = await alternateProviderReply(alt, AbortSignal.any([
               turn.signal,
               AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
             ]));
