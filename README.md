@@ -2,7 +2,7 @@
 
 > Runtime local, motor de inteligência e cérebro da companion virtual **Usami**.
 
-O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). Ele reúne o servidor HTTP na porta `8787` (bind padrão `0.0.0.0`, ajustável por `USAMI_API_HOST`), a interface web de desenvolvimento e prototipagem (React 19 + Three.js VRM), os subsistemas de inteligência agêntica (USAMI 2.0), memória persistente, vínculos estilo visual novel, síntese/reconhecimento de voz e comunicação autônoma com agentes de código externos.
+O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). Ele reúne o servidor HTTP na porta `8787` (bind padrão `0.0.0.0`, ajustável por `USAMI_API_HOST`), a interface web de desenvolvimento e prototipagem (React 19 + Three.js VRM), a página de transmissão ao vivo para OBS (`index-live.html`), os subsistemas de inteligência agêntica (USAMI 2.0), memória persistente, vínculos estilo visual novel, síntese/reconhecimento de voz e comunicação autônoma com agentes de código externos.
 
 ---
 
@@ -58,7 +58,7 @@ O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). E
 - **Detecção de Presença em Tempo Real**: Rastreia agentes de código ativos com TTL de 60s.
 - **Roteamento Inteligente**:
   - Se o agente estiver online: despacha propostas para a fila direta do MCP.
-  - Se estiver offline: abre automaticamente uma GitHub Issue no repositório `UsamiVtuber/Usami-Core` com a etiqueta `[usami-proposal]`.
+  - Se estiver offline: abre automaticamente uma GitHub Issue no repositório `UsamiVtuber/Usami-Core` com a label `usami-proposal` e o título prefixado com `[Usami Proposal]`.
 - **Servidor MCP Stdio (`scripts/usami-mcp.mjs`)**: Protocolo padrão compatível com Antigravity, Claude Code, Cursor e IDEs agênticas.
 
 ### 3. 💾 Memória, Vínculo e Persona
@@ -72,12 +72,17 @@ O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). E
 - **Reconhecimento de Voz (`src/stt.js`)**: Suporte a `faster-whisper` em Python para transcrição local rápida e segura.
 - **Motion Director & VRM Expression (`src/motion-director.js`, `src/vrm-gesture-layer.js`)**: Orquestração de animações VRMA, blendshapes e expressões sincronizadas ao áudio.
 
+### 5. 📺 Transmissão ao Vivo
+- **Live chat (`src/live-chat/`)**: Store sanitizado de mensagens (com adapter de IRC da Twitch), rotas `/api/live/*` e a skill `live-companion`, que transforma o chat em falas com fila e guardrails.
+- **Página para OBS (`index-live.html`, `src/LivePage.jsx`)**: Browser source com avatar VRM de fundo transparente e legenda da última mensagem; só lê o store, sem controles e sem token no bundle. Detalhes em `docs/live-streaming.md`.
+
 ---
 
 ## 📁 Estrutura de Diretórios
 
 ```text
 usami/
+├── automations/               # Definições de automação (n8n)
 ├── data/                      # Dados locais (memory.json, bond.json, propostas, etc.)
 ├── docs/                      # Documentação de arquitetura e auditoria
 ├── public/                    # Assets estáticos, modelos VRM e animações
@@ -89,14 +94,18 @@ usami/
 │   │   ├── agent-routes.js    # /api/agent/* (turnos, self, sugestões, briefing)
 │   │   ├── memory-routes.js   # /api/memory, /api/bond, /api/mood, RAG
 │   │   └── http-helpers.js    # Validação de origens, tokens e buffers
+│   ├── live-chat/             # Store e rotas do chat ao vivo (/api/live/*)
 │   ├── agent-core.js          # Roteamento e orquestração de turnos
 │   ├── agent-contracts.js     # Tipagem e contratos do sistema agêntico
 │   ├── code-agent-bridge.js   # Motor de integração com o Code Agent
 │   ├── n8n-queue.js           # Fila n8n com exponential backoff e full jitter
 │   ├── personality-store.js   # Traços e persona
 │   └── ...                    # Módulos de domínio puros
-├── tests/                     # Suíte de testes automatizados (>630 testes)
+├── tools/                     # Ingestão de mídia e voice casting (Python)
+├── tests/                     # Suíte de testes automatizados (>1.000 casos, 124 arquivos)
+├── index-live.html            # Entry da página de transmissão para OBS
 ├── server.mjs                 # Servidor HTTP central e roteador da porta 8787
+├── vite.config.mjs            # Vite + proxy /api (injeta o token de dev)
 ├── package.json               # Configurações, scripts e dependências Node.js
 └── jsconfig.json              # Configurações de tipagem estrita NodeNext
 ```
@@ -108,18 +117,31 @@ usami/
 | Rota | Método | Autenticação | Descrição |
 | :--- | :--- | :--- | :--- |
 | `/api/chat` | `POST` | Host/Origin | Conversa principal com a Usami (texto, persona e avatar) |
+| `/api/chat/activity` | `GET` | Host/Origin | Atividade ao vivo do turno (`thinking`, `tool`, `responding`) |
 | `/api/agent/turn` | `POST` | Host/Origin + Token | Processamento agêntico de turnos operacionais e ferramentas |
 | `/api/agent/self` | `GET` | Host/Origin + Token | Introspecção do sistema, ferramentas ativas e limitações |
 | `/api/agent/suggestions`| `GET`, `POST`| Host/Origin + Token | Sugestões proativas contextuais |
 | `/api/agent/briefing` | `GET` | Host/Origin + Token | Daily Briefing matinal consolidado |
 | `/api/agent/proposals`| `GET`, `POST`| Host/Origin + Token | Propostas de código geradas pela Usami |
 | `/api/agent/presence` | `GET`, `POST`| Host/Origin + Token | Heartbeat de presença de agentes de código externos |
+| `/api/agent/tools`, `/api/agent/executions`, `/api/agent/permissions`, `/api/agent/confirmations`, `/api/agent/plans`, `/api/agent/skills` | `GET` | Host/Origin + Token | Central do Agente: ferramentas, execuções, permissões, confirmações, planos e skills |
 | `/api/tts` | `POST` | Host/Origin | Síntese de áudio (Gemini TTS / ElevenLabs) com streaming e cache |
 | `/api/stt` | `POST` | Host/Origin + Token | Transcrição de áudio via Whisper |
+| `/api/media/analyze` | `POST` | Host/Origin + Token | Análise de imagem/documento anexado ao chat |
 | `/api/memory` | `GET`, `POST` | Host/Origin + Token | Inspeção, esquecimento e manutenção da memória semântica |
+| `/api/memory/maintenance` | `POST` | Host/Origin + Token | Consolidação noturna acionada por automação |
+| `/api/personality` | `GET`, `POST` | Host/Origin + Token | Traços e instruções extras da persona |
 | `/api/bond` | `GET`, `POST` | Host/Origin + Token | Medidores de vínculo e histórico estilo VN |
 | `/api/mood` | `GET`, `POST` | Host/Origin + Token | Leitura e atualização do humor contínuo da companion |
-| `/api/n8n/command` | `POST` | Host/Origin + Token | Comandos de animação e eventos oriundos de automações n8n |
+| `/api/achievements` | `GET` | Host/Origin + Token | Conquistas avaliadas pelo core |
+| `/api/proactive/events` | `GET`, `POST` | Host/Origin + Token | Eventos proativos (cutucadas, saudações) e ack de entrega |
+| `/api/proactive/state`, `/api/proactive/trigger` | `GET`, `POST` | Host/Origin + Token | Estado e disparo manual da proatividade |
+| `/api/n8n/command` | `POST` | Host/Origin + Token | Enfileira um comando (`say`, `gesture`, `set_expression`, ...) |
+| `/api/n8n/commands` | `GET`, `DELETE` | Host/Origin + Token | Consumo por cliente (`x-usami-client`) e descarte da própria fila |
+| `/api/n8n/commands/ack` | `POST` | Host/Origin + Token | Confirmação de entrega dos comandos |
+| `/api/live/status`, `/api/live/messages`, `/api/live/session` | `GET`, `POST` | Host/Origin + Token (escrita) | Chat ao vivo usado pela página de transmissão |
+| `/api/techniques`, `/api/technique` | `GET` | Host/Origin | Biblioteca de técnicas e detalhe de uma técnica |
+| `/api/rag/context` | `GET` | Host/Origin | Contexto recuperado do vault Obsidian |
 
 > **Bind:** a API escuta em `0.0.0.0:8787` por padrão, então fica acessível na rede local. Para restringir ao loopback, defina `USAMI_API_HOST=127.0.0.1` (variável de ambiente ou `.env`). `Host` e `Origin` continuam limitados pela allowlist (`USAMI_ALLOWED_HOSTS` / `USAMI_ALLOWED_ORIGINS`).
 
@@ -145,6 +167,7 @@ npm install
 ```bash
 # Inicia a API na porta 8787 (bind padrão 0.0.0.0)
 node server.mjs
+# equivalente: npm run api
 ```
 
 ### Executar a Interface Web (Vite Dev Server)
