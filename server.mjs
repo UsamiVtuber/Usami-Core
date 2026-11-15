@@ -2716,7 +2716,7 @@ export function createTtsHandler(options = {}) {
         // WAV completo. Falhou o stream (qualquer motivo antes do primeiro byte de
         // áudio)? Segue o caminho normal abaixo, que ainda responde.
         if (parsedBody.stream && provider === 'gemini') {
-          const streamed = await streamGeminiPcm({
+          let streamed = await streamGeminiPcm({
             fetchImpl,
             geminiUrl,
             apiKey: config.apiKey,
@@ -2728,6 +2728,21 @@ export function createTtsHandler(options = {}) {
             signal: closed.signal,
             timeoutMs,
           });
+          // Se o modelo configurado estourar cota (HTTP 429) no stream:
+          if (!streamed.ok && streamed.reason === 'http-429' && !res.headersSent && (geminiModel !== DEFAULT_GEMINI_TTS_MODEL || geminiVoice !== DEFAULT_GEMINI_TTS_VOICE)) {
+            console.warn(`[tts] Gemini TTS (${geminiModel}) cota excedida no stream (429); tentando fallback para ${DEFAULT_GEMINI_TTS_MODEL}`);
+            streamed = await streamGeminiPcm({
+              fetchImpl,
+              geminiUrl,
+              apiKey: config.apiKey,
+              model: DEFAULT_GEMINI_TTS_MODEL,
+              voice: DEFAULT_GEMINI_TTS_VOICE,
+              text: geminiInstruction + parsedBody.text,
+              res,
+              signal: closed.signal,
+              timeoutMs,
+            });
+          }
           if (streamed.ok) {
             if (cache && cacheKey) {
               try {
@@ -2749,6 +2764,15 @@ export function createTtsHandler(options = {}) {
             body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: geminiVoice })),
             signal: ttsAbortSignal(closed.signal, timeoutMs),
           });
+          if (!response.ok && (geminiModel !== DEFAULT_GEMINI_TTS_MODEL || geminiVoice !== DEFAULT_GEMINI_TTS_VOICE)) {
+            console.warn(`[tts] Gemini TTS (${geminiModel}) retornou HTTP ${response.status}; tentando fallback para ${DEFAULT_GEMINI_TTS_MODEL}`);
+            response = await fetchImpl(geminiUrl + '/v1beta/models/' + encodeURIComponent(DEFAULT_GEMINI_TTS_MODEL) + ':generateContent', {
+              method: 'POST',
+              headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
+              body: JSON.stringify(geminiSpeechBody({ text: geminiInstruction + parsedBody.text, voice: DEFAULT_GEMINI_TTS_VOICE })),
+              signal: ttsAbortSignal(closed.signal, timeoutMs),
+            });
+          }
         } else {
           response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(config.voiceId) + '?output_format=mp3_44100_128', {
             method: 'POST',
