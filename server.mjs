@@ -3596,6 +3596,41 @@ export function createProactiveHandler(options = {}) {
   };
 }
 
+/**
+ * Síntese de produção para o live-companion (S17). Chama o provedor de TTS
+ * (Gemini por padrão) e devolve { ok, streamed } sem expor a chave nem gravar
+ * em `res`. É injetada no serviço de fala da skill; testes a substituem por mock.
+ */
+async function synthesizeLiveChat(text) {
+  let config;
+  try {
+    const parsed = parseEnv(await readFile(keysFilePath(), 'utf8'));
+    config = { provider: 'gemini', apiKey: parsed.GEMINI_API_KEY };
+  } catch {
+    return { ok: false };
+  }
+  if (!config.apiKey) return { ok: false };
+  const model = process.env.GEMINI_TTS_MODEL || DEFAULT_GEMINI_TTS_MODEL;
+  const voice = process.env.GEMINI_TTS_VOICE || DEFAULT_GEMINI_TTS_VOICE;
+  try {
+    const response = await globalThis.fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
+      {
+        method: 'POST',
+        headers: { 'x-goog-api-key': config.apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(geminiSpeechBody({ text, voice })),
+        signal: ttsAbortSignal(null, 30000),
+      }
+    );
+    if (!response.ok) return { ok: false };
+    const data = await response.json();
+    const inlineData = data?.candidates?.[0]?.content?.parts?.find(part => part?.inlineData)?.inlineData;
+    return { ok: Boolean(inlineData?.data), streamed: Boolean(inlineData?.data) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
