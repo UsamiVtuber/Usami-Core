@@ -64,9 +64,10 @@ import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
 import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
+import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
-import { createLiveChatHandler } from './src/live-chat/live-chat-routes.js';
+import { createLiveChatHandler, createLiveChatStore } from './src/live-chat/live-chat-routes.js';
 import {
   createDefaultSuggestionSources,
   createSuggestionStore,
@@ -350,6 +351,31 @@ const briefingRegistration = toolRegistry.register(createDailyBriefingTool({
 }));
 if (!briefingRegistration.ok) {
   console.error('Aviso: ferramenta briefing.build não registrada:', briefingRegistration.errors.join('; '));
+}
+
+// Skill Live Companion (S17): fala do chat ao vivo com fila de uma síntese
+// por vez, cooldown por usuário e não-fala enquanto o usuário fala. Conecta
+// o store do S16 (live-chat) ao TTS via Tool Executor, sem acessar data/.
+try {
+  publishLiveCompanionSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto live-companion falhou:', error?.message || error);
+}
+const liveChatStore = createLiveChatStore();
+for (const liveTool of createLiveCompanionTools({
+  service: createLiveCompanionService({
+    liveChatStore,
+    synthesize: synthesizeLiveChat,
+    // Injeção de ponto de extensão: o cliente/desktop pode repassar o estado
+    // real do VAD aqui. Por padrão não bloqueia a fala do chat ao vivo.
+    isUserSpeaking: () => false,
+  }),
+  toolExecutor: installToolExecutor,
+})) {
+  const registered = toolRegistry.register(liveTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${liveTool.name} não registrada:`, registered.errors.join('; '));
+  }
 }
 
 const installGitClient = createGitAssistantClient();
