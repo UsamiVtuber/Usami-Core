@@ -2,7 +2,7 @@
 
 > Runtime local, motor de inteligência e cérebro da companion virtual **Usami**.
 
-O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). Ele reúne o servidor HTTP local (`127.0.0.1:8787`), a interface web de desenvolvimento e prototipagem (React 19 + Three.js VRM), os subsistemas de inteligência agêntica (USAMI 2.0), memória persistente, vínculos estilo visual novel, síntese/reconhecimento de voz e comunicação autônoma com agentes de código externos.
+O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). Ele reúne o servidor HTTP na porta `8787` (bind padrão `0.0.0.0`, ajustável por `USAMI_API_HOST`), a interface web de desenvolvimento e prototipagem (React 19 + Three.js VRM), os subsistemas de inteligência agêntica (USAMI 2.0), memória persistente, vínculos estilo visual novel, síntese/reconhecimento de voz e comunicação autônoma com agentes de código externos.
 
 ---
 
@@ -14,7 +14,7 @@ O **Usami-Core** é o núcleo do ecossistema Usami (`UsamiVtuber/Usami-Core`). E
 │  • Web (React 19, Three.js VRM) │           │  • Antigravity / Coding Agents  │
 │  • Desktop (Rust + GPUI, WGPU)  │           │  • MCP Stdio Server             │
 └───────────────┬─────────────────┘           └────────────────┬────────────────┘
-                │ HTTP (127.0.0.1:8787)                        │ JSON-RPC / HTTP
+                │ HTTP (0.0.0.0:8787)                          │ JSON-RPC / HTTP
                 ▼                                              ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                              USAMI CORE SERVER                                │
@@ -103,7 +103,7 @@ usami/
 
 ---
 
-## 🌐 Superfície da API HTTP (`127.0.0.1:8787`)
+## 🌐 Superfície da API HTTP (`0.0.0.0:8787`)
 
 | Rota | Método | Autenticação | Descrição |
 | :--- | :--- | :--- | :--- |
@@ -120,6 +120,8 @@ usami/
 | `/api/bond` | `GET`, `POST` | Host/Origin + Token | Medidores de vínculo e histórico estilo VN |
 | `/api/mood` | `GET`, `POST` | Host/Origin + Token | Leitura e atualização do humor contínuo da companion |
 | `/api/n8n/command` | `POST` | Host/Origin + Token | Comandos de animação e eventos oriundos de automações n8n |
+
+> **Bind:** a API escuta em `0.0.0.0:8787` por padrão, então fica acessível na rede local. Para restringir ao loopback, defina `USAMI_API_HOST=127.0.0.1` (variável de ambiente ou `.env`). `Host` e `Origin` continuam limitados pela allowlist (`USAMI_ALLOWED_HOSTS` / `USAMI_ALLOWED_ORIGINS`).
 
 ---
 
@@ -141,7 +143,7 @@ npm install
 
 ### Executar o Servidor de API
 ```bash
-# Inicia a API local na porta 8787
+# Inicia a API na porta 8787 (bind padrão 0.0.0.0)
 node server.mjs
 ```
 
