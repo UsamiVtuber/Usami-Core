@@ -121,8 +121,18 @@ function stateGroupFor(story) {
   return group;
 }
 
+const onlyStories = typeof args.stories === 'string'
+  ? new Set(args.stories.split(',').map(id => id.trim()).filter(Boolean))
+  : null;
+
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
 for (const story of plan.stories) stateGroupFor(story);
+const selectedStories = onlyStories
+  ? plan.stories.filter(story => onlyStories.has(story.id))
+  : plan.stories;
+for (const id of onlyStories ?? []) {
+  if (!plan.stories.some(story => story.id === id)) throw new Error(`story ${id} não existe no plano.`);
+}
 const configPath = resolve(args.config || join(dirname(planPath), 'plane.json'));
 let config = null;
 try {
@@ -191,7 +201,7 @@ for (const issue of issues) {
 }
 
 const created = [];
-for (const story of plan.stories) {
+for (const story of selectedStories) {
   const externalId = `usami-plan:${story.id}`;
   const name = `[${story.id}] ${story.title}`;
   const payload = {
@@ -235,6 +245,6 @@ for (const story of plan.stories) {
 }
 
 if (!dryRun) {
-  console.log(`\nPronto: ${plan.stories.length} stories em ${project.name}. Criadas agora: ${created.length}.`);
+  console.log(`\nPronto: ${selectedStories.length} stories em ${project.name}. Criadas agora: ${created.length}.`);
   console.log(`https://app.plane.so/${workspace}/projects/${project.id}/issues/`);
 }

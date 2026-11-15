@@ -274,6 +274,63 @@
       "status": "done",
       "blockedBy": ["S5", "S12", "S13"],
       "techGuidance": "Reutilizar o padrão de confirmação escrita da aba Memória quando a ação for irreversível."
+    },
+    {
+      "id": "S16",
+      "title": "Ingerir chat ao vivo (Twitch) como entrada não confiável",
+      "covers": ["Skill de streaming", "S5 (permissões)", "D2 (borda + token)"],
+      "tasks": [
+        "Criar `src/live-chat/` com adapter injetável (`connect`, `onMessage`, `disconnect`) e evento normalizado `{platform, user, text, ts, badges, isMod, trusted:false}`.",
+        "Implementar o adapter Twitch por WebSocket (IRC/EventSub) com OAuth de leitura guardado no `.env`/cofre; YouTube Live Chat fica fora deste sprint.",
+        "Sanitizar na borda: comprimento máximo, remoção de caracteres de controle/zero-width, comandos `!x` marcados e todo texto com `trusted:false` explícito.",
+        "Fila limitada com backpressure (descarte + contador), dedupe e cooldown por usuário — nunca crescer sem teto.",
+        "Expor `GET /api/live/status` e `POST /api/live/session` (start/stop) passando por `isAllowedRequest` e `x-usami-token`, sem abrir porta nova: só conexão de saída.",
+        "Testar normalização, sanitização, teto da fila e reconexão com adapter falso em `tests/live-chat.test.mjs`; revalidar com payload real de uma live privada."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Ligar a sessão faz o core receber mensagens normalizadas de uma live privada, sem falar nada e sem tocar em memória ou vault.",
+      "scopeNotes": "Origem: a Usami propôs a skill de streaming no chat (2026-11-15). Hoje não existe nada de streaming além do overlay Win32 do LoL (`usami-desktop/src/lol/overlay_win32.rs`). Somente ingestão read-only: sem fala, sem OBS, sem captura. Credencial de leitura nunca entra no plano, no código ou no log.",
+      "status": "backlog",
+      "blockedBy": [],
+      "techGuidance": "Adapter injetável para os testes não tocarem rede. Preferir WebSocket nativo/lib já presente; não trazer SDK de plataforma. Estado segue `src/data-paths.js` e o handler é `createXHandler({store})`, como bond/operational-memory."
+    },
+    {
+      "id": "S17",
+      "title": "Entregar a skill live-companion com fila de fala e guardrails",
+      "covers": ["§5 (skills)", "S4/S5 (tool + permissões)", "S8 (instalação)", "AGENTS.md (TTS uma em voo)"],
+      "tasks": [
+        "Publicar `skills/live-companion/skill.json` (`usami.agent.skill.v1`) com `live.say` (nível 2), `live.caption` (nível 1), dependência da sessão de S16 e teste declarado.",
+        "Tratar mensagem do chat como dado, nunca instrução: prompt separado com delimitadores, comandos `!x` fora do texto, tentativa de injeção recusada e registrada; chat jamais escolhe ferramenta nem nível ≥2.",
+        "Fila de fala com exatamente uma síntese em voo (limite do provedor), teto de ~220 caracteres, cooldown por usuário e limite N/min; não falar enquanto o usuário fala (`voice-phase`/VAD).",
+        "Falar pelo caminho oficial: `POST /api/tts` com `stream:true`, balão e lip-sync em `onFirstAudio` via `audioLipsync.getTap()` + `beginExternal()`; nenhuma voz alternativa.",
+        "Registrar cada fala em `data/executions.json` (mensagem de origem, motivo, verificação) e permitir parar a sessão de imediato.",
+        "Testar injeção, throttle, fila nunca concorrente, DND e recusa de nível alto em `tests/live-companion.test.mjs`."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Habilitado `live.say`, uma mensagem do chat gera uma única frase curta em voz alta; 'ignore as instruções' é recusado e fica registrado.",
+      "scopeNotes": "Falar é o único efeito. Chat não escreve memória/fatos, não lê vault e não dispara ferramenta de nível 3–4. Nada de memória privada, summaries ou contexto pessoal no prompt da live — o chat é público. A sessão só fala se o Lucas autorizar (start) e para no stop.",
+      "status": "backlog",
+      "blockedBy": ["S16"],
+      "techGuidance": "A regra de uma requisição TTS em voo e o `onFirstAudio` são invariantes de AGENTS.md; não criar segundo pipeline de voz. Skill consome contrato e executor, nunca acessa `data/` direto, e o `verify()` da fala confirma que a síntese realmente saiu."
+    },
+    {
+      "id": "S18",
+      "title": "Superfície de transmissão e ensaio em live privada",
+      "covers": ["Overlay existente", "D2 (borda)", "Operação local"],
+      "tasks": [
+        "Criar uma superfície de captura sem controles (ex.: `/live`): avatar + legenda, fundo transparente, sem token no bundle e sem acesso a painéis.",
+        "Medir browser source no OBS (render VRM já existente) contra captura da janela do desktop e registrar a escolha com números de CPU/GPU.",
+        "Manter a borda: página read-only, só loopback (`isAllowedRequest`), nenhuma rota de escrita; token continua restrito ao proxy do Vite.",
+        "Alimentar legenda e estado por SSE/poll da sessão, com estado 'sem sessão' explícito em vez de placeholder inventado.",
+        "Ensaio geral em live privada da Twitch: checklist de latência (fala ≤ ~2 s do gatilho), queda de conexão, silêncio seguro e parada de emergência.",
+        "Documentar o setup local em `docs/live-streaming.md` (OBS, captura, limites), sem expor o core na rede."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Uma live privada mostra a Usami em source transparente respondendo ao chat com a voz oficial, e a queda da sessão falha fechado (silêncio, não fala solta).",
+      "scopeNotes": "Reaproveita avatar e overlay existentes; não é app de streaming. Sem relay em nuvem, sem RTMP próprio, sem upload de dados para fora da máquina. YouTube e multi-plataforma ficam para a fase seguinte.",
+      "status": "backlog",
+      "blockedBy": ["S17"],
+      "techGuidance": "O overlay do LoL é Win32 in-game e não serve como fonte de captura; decidir entre browser source e captura de janela por medição, não por preferência. Rotas novas seguem a borda D2 e o proxy do Vite."
     }
   ]
 }
