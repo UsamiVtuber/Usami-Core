@@ -125,6 +125,25 @@ test('GET /api/live/status retorna sessão inativa por padrão', async () => {
   }
 });
 
+test('GET /api/live/messages devolve mensagens ingeridas (apenas leitura)', async () => {
+  const { dir, store, handler } = seeded();
+  try {
+    store.ingestMessage({ platform: 'twitch', user: 'u1', text: 'oi', ts: 100, badges: {}, isMod: false, trusted: false });
+    store.ingestMessage({ platform: 'twitch', user: 'u2', text: 'ola', ts: 200, badges: {}, isMod: false, trusted: false });
+
+    const { status, data } = await call(handler, mockReq({ url: '/api/live/messages?limit=1' }));
+    assert.equal(status, 200);
+    assert.equal(data.ok, true);
+    assert.equal(data.messages.length, 1);
+    assert.equal(data.messages[0].text, 'ola');
+    assert.equal(data.messages[0].trusted, false);
+    // nenhum efeito colateral na fila
+    assert.equal(store.getState().queueLength, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('POST /api/live/session start cria sessão e conecta o adapter', async () => {
   const { dir, store, handler, adapter } = seeded();
   try {

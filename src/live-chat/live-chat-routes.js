@@ -41,6 +41,12 @@ export function createLiveChatHandler(options = {}) {
       return send(200, { ok: true, ...store.getState() });
     }
 
+    if (req.method === 'GET' && path === '/api/live/messages') {
+      const limitParam = url.searchParams.get('limit');
+      const limit = limitParam ? Number(limitParam) : 50;
+      return send(200, { ok: true, messages: store.listMessages({ limit }) });
+    }
+
     if (req.method === 'POST' && path === '/api/live/session') {
       const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
       if (contentType !== 'application/json') {

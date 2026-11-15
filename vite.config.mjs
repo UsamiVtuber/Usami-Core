@@ -10,6 +10,12 @@ const apiToken = readApiToken();
 export default defineConfig({
   build: {
     outDir: "dist/client",
+    rollupOptions: {
+      input: {
+        main: path.resolve("index.html"),
+        live: path.resolve("index-live.html"),
+      },
+    },
   },
   optimizeDeps: {
     include: ["react", "react-dom/client"],
