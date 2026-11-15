@@ -36,7 +36,7 @@ O poll da página usa `apiFetch('/api/live/messages?limit=1')`, que envia `x-usa
 
 ## 4. Limites de projeto
 
-- **Loopback-only:** o servidor da API escuta em `127.0.0.1:8787` (ou host configurado por `USAMI_API_HOST`). Não expor portas nem publicar serviços.
+- **Exposição:** o servidor da API escuta em `0.0.0.0:8787` por padrão, configurável por `USAMI_API_HOST` (ex.: `127.0.0.1` para restringir ao loopback). Host e Origin seguem limitados pela allowlist (`USAMI_ALLOWED_HOSTS` / `USAMI_ALLOWED_ORIGINS`). Não publicar serviços além do previsto.
 - **Read-only na captura:** a página do OBS só lê mensagens. Start/stop de sessão é feito por outro cliente (painel do operador), nunca pelo browser source.
 - **Sem controles na página:** sem botões, painéis ou exibição de token. Se o avatar não carregar, a legenda continua visível (falha silenciosa, captura nunca fica quebrada).
 - **Estado explícito "sem sessão":** quando não há mensagem recente, o status mostra `sem sessão` em vez de ficar em branco ou simular atividade.
