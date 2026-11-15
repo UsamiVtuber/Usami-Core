@@ -66,6 +66,7 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
+import { createLiveChatHandler } from './src/live-chat/live-chat-routes.js';
 import {
   createDefaultSuggestionSources,
   createSuggestionStore,
@@ -3596,6 +3597,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleTechnique = createTechniqueHandler();
   const handlePlan = createPlannerHandler();
   const handleProactive = createProactiveHandler();
+  const handleLiveChat = createLiveChatHandler();
   const handleBridge = createAgentBridgeHandler({
     bridge: installCodeBridge,
     allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
@@ -3646,6 +3648,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url === '/api/agent/proposals' || req.url.startsWith('/api/agent/proposals/')
       || req.url.startsWith('/api/agent/proposals?')) return handleBridge(req, res);
     if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
+    if (req.url.startsWith('/api/live/')) return handleLiveChat(req, res);
     if (req.method === 'GET' && req.url === '/api/llm/models') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ chat: FAST_MODEL, reasoning: BRAIN_MODEL, vision: VISION_MODEL }));
