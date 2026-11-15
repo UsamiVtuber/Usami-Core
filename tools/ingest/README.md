@@ -46,7 +46,7 @@ python ingest.py --input ../../tmp/tutorial.mp4 --titulo "VRM rig: aceno" --max-
 python ingest.py --input ../../tmp/tutorial.mp4 --seco
 
 # uma pasta inteira, com teto de varredura
-python ingest.py --input ../downloads --max-files 20 --threads 4
+python ingest.py --input ../../tmp --max-files 20 --threads 4
 
 # legenda/texto: nenhuma transcrição, nenhum frame, custo quase zero
 python ingest.py --input legenda.srt --titulo "notas do curso"
@@ -56,7 +56,9 @@ python ingest.py --input aula.mp4 --tempos 2,17,41,58
 ```
 
 Flag `--forcar` reingerir material já no índice. `--sem-transcricao` e
-`--sem-frames` reduzem o custo quando só interessa um dos canais.
+`--sem-frames` reduzem o custo quando só interessa um dos canais. Ajustes de
+saída e de modelo: `--out` (padrão `usami/data/ingest`), `--modelo` (`tiny`),
+`--idioma` (`pt`, vazio = detectar) e `--max-largura` (640 px).
 
 ## Custo medido (não estimado)
 
@@ -82,7 +84,8 @@ VRAM: **zero** — tudo roda em CPU/int8 de propósito.
 
 ```
 usami/data/ingest/
-  index.json                 # sha256 -> {id, kind, title, ficha, bytes}
+  index.json                 # {version: 1, entries: {sha256: {...}}}
+                             # sha256 -> {id, kind, title, createdAt, ficha, bytes}
   src-24772342f063/
     ficha.json
     frames/frame-000.jpg ... # só quando há vídeo
