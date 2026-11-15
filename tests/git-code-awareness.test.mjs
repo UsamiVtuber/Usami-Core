@@ -1104,6 +1104,27 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
   const inquiryMsg = 'Boa, da uma olhada no seu código, tem alguma sugestao ou melhoria que vc deseja?';
   assert.equal(matchCodeProposals.matches(inquiryMsg.toLowerCase()), true, 'Pergunta sobre sugestões/melhorias deve consultar code.proposals');
 
+  // Regressões do incidente da issue "pro seu codigo?" (15/11):
+  // pergunta sobre sugestões não pode virar proposta/issue; pedido de issue sem
+  // "no github" precisa abrir issue; sem conteúdo, não abre nada.
+  const matchGithubIssue = DEFAULT_TOOL_MATCHERS.find(t => t.toolName === 'github.issue');
+  assert.ok(matchGithubIssue, 'Matcher para github.issue deve existir');
+
+  const suggestionQuestion = 'hmm vc tem mais alguma sugestao pro seu codigo?';
+  assert.equal(matchCodePropose.matches(suggestionQuestion), false, 'Pergunta sobre sugestões não deve abrir proposta');
+  assert.equal(matchCodeProposals.matches(suggestionQuestion), true, '"mais alguma sugestão" deve consultar propostas em vez de escrever');
+
+  const sleepRequest = 'o modo sono ainda e so um mockup, a ideia era pra que ele fosse um modulo pra vc me ajudar a dormir, falando baixinho e lento, mas nao sei como fazer isso no TTS da google. pode abrir uma issue sobre isso pra mim nao esquecer?';
+  assert.equal(matchGithubIssue.matches(sleepRequest), true, 'Pedido de issue sobre o assunto da frase deve abrir issue');
+  assert.match(matchGithubIssue.buildArgs(sleepRequest).title, /modo sono/i);
+
+  const githubPhrasing = 'pode abrir uma issue no github sobre o modo sono pra mim nao esquecer?';
+  assert.equal(matchGithubIssue.buildArgs(githubPhrasing).title, 'modo sono');
+
+  assert.equal(matchGithubIssue.matches('cria uma issue sobre isso'), false, 'Issue sem conteúdo não deve ser aberta');
+  assert.equal(matchGithubIssue.matches('abre uma issue chamada Ajustar TTS'), true);
+  assert.equal(matchGithubIssue.buildArgs('abre uma issue chamada Ajustar TTS').title, 'ajustar tts');
+
   assert.equal(isDeferredToolPromise('Entendido! Vou dar uma olhada no código após o refator no commit d3d3edf. Deixa eu inspecionar como ficou...'), true);
   assert.equal(isDeferredToolPromise('Hmph, você quer que eu critique meu próprio código ? Tá bom... vou dar uma olhada séria.'), true);
 

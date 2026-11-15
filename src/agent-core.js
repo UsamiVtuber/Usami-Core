@@ -33,11 +33,67 @@ const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/
 const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b|\bcommit\s+[a-f0-9]{4,40}\b|\b(?:como\s+ficou|o\s+que\s+(?:mudou|foi\s+feito|foi\s+alterado))\s+(?:no\s+c[oó]digo|no\s+repo|no\s+git|no\s+projeto)\b|\b(?:olha|veja?|da\s+uma\s+olhada)\s+(?:no\s+c[oó]digo|nos\s+commits?|no\s+refactor|no\s+commit)\b/i;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
-const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo|no\s+repositorio)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b/;
+const GITHUB_ISSUE_RE = /\b(?:cria\w*|abre|abrir|abra|registra\w*|manda\w*|enviar?)\b.*\b(?:issues?|tarefas?|propostas?|tickets?)\b.*\b(?:no\s+github|pro\s+github|no\s+repo(?:sitorio)?)\b|\b(?:no\s+github|pro\s+github)\b.*\b(?:cria\w*|abre|abrir|abra|registra\w*)\b.*\b(?:issues?|tarefas?|propostas?)\b|\b(?:cria\w*|abre|abrir|abra|registra\w*|manda\w*|enviar?)\b.*\bissues?\b/;
 const GITHUB_CREATE_REPO_RE = /\b(?:cria\w*|adiciona\w*|gerar?|fazer?)\b.*\b(?:reposit[oó]rios?|repos?|readme\s+(?:s[oó]\s+)?pra\s+(?:voc[eê]|vc|ti|perfil)|readme\s+(?:no\s+seu|do\s+seu)\s+(?:perfil|github)|perfil\s+no\s+github)\b|\b(?:no\s+seu\s+github|pro\s+seu\s+perfil|pra\s+voc[eê]\s+no\s+github)\b.*\b(?:cria\w*|adiciona\w*|gerar?|readme)\b/i;
 const IS_COMPLETION_OR_INSPECT_RE = /\b(?:como\s+ficou|finalizei|conclu[ií]|terminei|apliquei|comitei|ja\s+(?:fiz|apliquei|comitei))\b|\b(?:da\s+uma\s+olhada|olh\w*|veja?|mostr\w*)\s+(?:no\s+c[oó]digo|no\s+repo|no\s+commit|nos\s+commits|como\s+ficou)\b/i;
-const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|sugest\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
-const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha)\s+(?:alguma\s+)?(?:sugestao|melhoria|proposta)\b/i;
+// Verbos de ação explícitos: "sugestão" é substantivo e não pode transformar
+// uma pergunta sobre sugestões em proposta de código (issue automática).
+const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
+const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha|teria)\s+(?:(?:mais|outra?|algumas?)\s+)*(?:sugest\w*|melhoria\w*|proposta\w*|ideia\w*)\b/i;
+// Pergunta sobre sugestões nunca é pedido para abrir proposta/issue.
+const SUGGESTION_INQUIRY_RE = /\b(?:tem|ha|teria)\s+(?:(?:mais|outra?|algumas?)\s+)*(?:sugest\w*|melhoria\w*|proposta\w*|ideia\w*)\b/i;
+
+const ANAPHORIC_TITLE_RE = /^(?:isso|isto|aquilo|essa|esse|esse\s+problema|essa\s+ideia|o\s+problema|a\s+ideia)$/;
+
+function cleanTitleFragment(raw) {
+  const withoutContext = String(raw ?? '')
+    .replace(/\b(?:no|pro|para\s+o)\s+github\b/gi, ' ')
+    .replace(/\bno\s+repo(?:sitorio)?\b/gi, ' ')
+    .replace(/\b(?:pro|para\s+o)\s+(?:code|coding)\s*agent\b/gi, ' ')
+    .replace(/\b(?:pro|para\s+o)\s+agente\b/gi, ' ')
+    .replace(/\b(?:pro|para\s+o)\s+(?:antigravity|claude(?:\s+code)?|qoder|cursor)\b/gi, ' ')
+    .replace(/(?:pra|para|pro)\s+(?:(?:mim|eu)\s+)?nao\s+esquecer\b.*$/i, ' ');
+  return collapseText(withoutContext)
+    .replace(/^[\s"“'\-–—:;,.]+/, '')
+    .replace(/[\s"”'?!.,;:]+$/, '')
+    .replace(/^(?:(?:pra|pro|para|sobre|de|do|da|dos|das|no|na|nos|nas|em|um|uma|chamada|chamado|o|a|os|as|seu|sua|teu|tua|voce|vc|tu)\b[\s,:-]*)+/i, '');
+}
+
+// Sem título concreto não há proposta: o caller deve conversar em vez de abrir
+// issue com frase solta ("pro seu codigo?") — ver deriveTitle.
+function fallbackTitleFromMessage(normalized, stopIndex) {
+  const head = stopIndex > 0 ? normalized.slice(0, stopIndex) : normalized;
+  const withoutRequest = head.replace(/[.!?]?\s*(?:e\s+)?(?:pode|poderia|consegue|quer|vai|da|faz)\b[^.!?]*[.!?]?\s*$/, ' ');
+  const cleaned = cleanTitleFragment(withoutRequest);
+  if (cleaned.length < 12) return null;
+  if (cleaned.length <= 100) return cleaned;
+  const cut = cleaned.slice(0, 100);
+  const boundary = cut.lastIndexOf(' ');
+  return (boundary > 0 ? cut.slice(0, boundary) : cut).trim();
+}
+
+function deriveIssueTitle(message) {
+  const normalized = normalizeText(message);
+  const marker = /\b(?:issues?|tarefas?|tickets?)\b/.exec(normalized);
+  if (!marker) return null;
+  const fragment = cleanTitleFragment(normalized.slice(marker.index + marker[0].length));
+  if (fragment.length >= 4 && !ANAPHORIC_TITLE_RE.test(fragment)) return fragment.slice(0, 180);
+  return fallbackTitleFromMessage(normalized, marker.index);
+}
+
+function deriveProposalTitle(message) {
+  const normalized = normalizeText(message);
+  const match = /(?:proposta|melhoria|tarefa|feature|mudanca|fix|sugestao|adicionar|sugerir|criar)(?:\s+de|\s+para|\s+um|\s+uma|\s+chamada|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+pro\s+agente|\s+pro\s+code\s*agent|\s+pro\s+coding\s*agent|\s*$)/i.exec(normalized);
+  let fragment = match ? cleanTitleFragment(match[1]) : '';
+  if (fragment.length < 5 || ANAPHORIC_TITLE_RE.test(fragment)) {
+    fragment = cleanTitleFragment(normalized
+      .replace(/^.*?\b(?:code|coding)\s*agent\b\s*/i, '')
+      .replace(/^.*?\b(?:antigravity|claude(?:\s+code)?|qoder|cursor)\b\s*/i, '')
+      .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:manda|mande|enviar|envie|pede|peca|sugira|sugere|proponha|propoe|cria|crie|criar|adiciona|adicionar)\b\s*/i, ''));
+  }
+  if (fragment.length < 5 || ANAPHORIC_TITLE_RE.test(fragment)) return null;
+  return fragment.slice(0, 180);
+}
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
 
@@ -423,25 +479,17 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     matches: normalized => (
       CODE_PROPOSE_RE.test(normalized)
       && !CODE_PROPOSALS_QUERY_RE.test(normalized)
+      && !SUGGESTION_INQUIRY_RE.test(normalized)
       && !GITHUB_CREATE_REPO_RE.test(normalized)
       && (!IS_COMPLETION_OR_INSPECT_RE.test(normalized) || /\b(?:nova\s+proposta|outra\s+proposta|propor\s+outr\w*)\b/.test(normalized))
+      && deriveProposalTitle(normalized) !== null
     ),
     buildArgs: message => {
       const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
       const repo = slugMatch?.[1] && !slugMatch[1].startsWith('src/') ? slugMatch[1] : 'UsamiVtuber/Usami-Core';
-      let title = null;
-      if (/\breadme\b/i.test(message) && /\b(?:core|usami-core|projeto\s+usami)\b/i.test(message)) {
-        title = 'Criar README para o repositório Usami-Core';
-      } else {
-        const titleMatch = /(?:proposta|melhoria|tarefa|feature|mudanca|fix|sugestao|adicionar|sugerir|criar)(?:\s+de|\s+para|\s+um|\s+uma|\s+chamada|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+pro\s+agente|\s+pro\s+code\s*agent|\s+pro\s+coding\s*agent|\s*$)/i.exec(message);
-        title = titleMatch?.[1]?.trim()
-          ?.replace(/^(?:de|para|ou\s+melhoria|ou\s+sugestao)\s+/i, '')
-          ?.replace(/\s+(?:pro|para|ao)\s+(?:coding|code)?\s*agent\b.*$/i, '')
-          ?.trim();
-      }
-      if (!title || title.length < 5 || /\b(?:que\s+)?(?:voce|vc|tu)\s+(?:deseja|quer|acha)\b/i.test(title)) {
-        title = 'Refatoração e melhorias técnicas sugeridas pela Usami';
-      }
+      const title = (/\breadme\b/i.test(message) && /\b(?:core|usami-core|projeto\s+usami)\b/i.test(message))
+        ? 'Criar README para o repositório Usami-Core'
+        : (deriveProposalTitle(message) || 'Refatoração e melhorias técnicas sugeridas pela Usami');
       return {
         repo,
         title: title.slice(0, 180),
@@ -453,12 +501,16 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   },
   {
     toolName: 'github.issue',
-    matches: normalized => GITHUB_ISSUE_RE.test(normalized),
+    matches: normalized => (
+      GITHUB_ISSUE_RE.test(normalized)
+      && !CODE_PROPOSE_RE.test(normalized)
+      && !CODE_PROPOSALS_QUERY_RE.test(normalized)
+      && deriveIssueTitle(normalized) !== null
+    ),
     buildArgs: message => {
       const slugMatch = /\b([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)\b/.exec(collapseText(message));
       const repo = slugMatch?.[1] && !slugMatch[1].startsWith('src/') ? slugMatch[1] : 'UsamiVtuber/Usami-Core';
-      const titleMatch = /(?:issue|tarefa|proposta|ticket)(?:\s+chamada|\s+de|\s+com\s+o\s+titulo|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+no\s+github|\s*$)/i.exec(message);
-      const title = titleMatch?.[1]?.trim() || 'Proposta de melhoria sugerida pela Usami';
+      const title = deriveIssueTitle(message) || 'Solicitação registrada pela Usami';
       return {
         repo,
         title: title.slice(0, 180),
