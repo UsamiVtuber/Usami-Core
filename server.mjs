@@ -49,6 +49,7 @@ import { createResearchAgentTools, publishResearchAgentSkill } from './src/resea
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
+import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
 import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
@@ -86,6 +87,7 @@ import { TECHNIQUE_STATUSES, sanitizeTechnique, summarizeTechnique, techniqueUse
 import { analyzeMedia } from './src/media-analyzer.js';
 import { createN8nCommandQueue, normalizeClientId } from './src/n8n-queue.js';
 import { createChatActivityRegistry } from './src/chat-activity.js';
+import { createDiscordPresence } from './src/discord-presence.js';
 import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-paths.js';
 import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
 import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpan } from './src/telemetry.js';
@@ -181,6 +183,10 @@ const sharedN8nQueue = createN8nCommandQueue();
 // `src/chat-activity.js`: existe para o cliente saber o que a Usami está
 // fazendo enquanto o turno ainda não terminou.
 const sharedChatActivity = createChatActivityRegistry();
+
+// Discord Rich Presence para exibir a Usami como atividade/jogo no Discord.
+const sharedDiscordPresence = createDiscordPresence();
+export { sharedDiscordPresence as discordPresence };
 
 // Comando válido para controle direto do avatar (executado pelo cliente).
 const VALID_COMMAND_TYPES = new Set([
@@ -484,6 +490,17 @@ const selfDescribeRegistration = toolRegistry.register(
 );
 if (!selfDescribeRegistration.ok) {
   console.error('Aviso: ferramenta self.describe não registrada:', selfDescribeRegistration.errors.join('; '));
+}
+
+// Meta-Agente de Engenharia (Fase 2 — RFC-001): sandbox declarativo Ring 2 com snapshots + canary 60s.
+const installMetaWorkspace = createMetaTransactionManager({
+  workspaceRoot: pathResolve(resolveDataDir(), 'workspace'),
+});
+for (const metaTool of createMetaAgentTools({ manager: installMetaWorkspace })) {
+  const registered = toolRegistry.register(metaTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${metaTool.name} não registrada:`, registered.errors.join('; '));
+  }
 }
 
 const installAgentCore = createAgentCore({
@@ -853,6 +870,7 @@ export function createChatHandler(options = {}) {
   // 10-20 s do turno para saber se a Usami está rodando uma ferramenta ou
   // se já terminou a ferramenta e está só compitando a resposta.
   const chatActivity = options.chatActivity || sharedChatActivity;
+  const discordPresence = options.discordPresence !== undefined ? options.discordPresence : sharedDiscordPresence;
   // Contador atômico de turnos em andamento: com um booleano, dois turnos
   // sobrepostos (duas abas) liberavam o motor proativo quando o primeiro
   // terminava, mesmo com o segundo ainda rodando.
@@ -1018,6 +1036,16 @@ export function createChatHandler(options = {}) {
     const publishActivity = (activity) => {
       try {
         activeChatActivity.set(activityClientId, activity);
+        if (discordPresence) {
+          if (activity?.phase === 'tool' && activity?.tool) {
+            discordPresence.setActivity({
+              details: `Executando: ${activity.tool}`,
+              state: `Afinidade: ${discordPresence.getStatus().affinityStage} • Em ação ⚡`,
+            });
+          } else if (activity?.phase === 'thinking') {
+            discordPresence.onChatTurnStart();
+          }
+        }
       } catch {
         // atividade é best-effort: nunca derruba o turno
       }
@@ -1683,6 +1711,18 @@ export function createChatHandler(options = {}) {
       });
       chatTrace.update({ output: parsed.reply });
       chatTrace.end();
+
+      if (discordPresence) {
+        try {
+          discordPresence.onChatTurnEnd({
+            emotion: parsed.gesture,
+            stage: affinityPayload?.affinity?.stage,
+            details: 'Conversando com o Mestre',
+          });
+        } catch {
+          // presenca e best-effort
+        }
+      }
 
       return send(200, {
         reply: parsed.reply, gesture: parsed.gesture, actions, source: parsed.source,
@@ -3971,6 +4011,27 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
   const server = createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/api/presence') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, presence: sharedDiscordPresence.getStatus() }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/api/presence') {
+      const read = await readRequestBody(req, { limit: 4096 });
+      if (!read.ok) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: 'Corpo inválido.' }));
+        return;
+      }
+      const parsedPresence = parseJsonLoosely(read.body);
+      const activityData = parsedPresence?.value || parsedPresence;
+      if (activityData && typeof activityData === 'object') {
+        sharedDiscordPresence.setActivity(activityData);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, presence: sharedDiscordPresence.getStatus() }));
+      return;
+    }
     // Estado de visão da agente em memória (reinicia com o servidor).
     let visionEnabled = true;
     if (req.url && req.url.startsWith('/api/')) {
@@ -4036,6 +4097,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     res.end(JSON.stringify({ error: 'Não encontrado.' }));
   });
   proactiveEngine.start(60000);
+  sharedDiscordPresence.start();
+  server.on('close', () => {
+    sharedDiscordPresence.stop();
+  });
   const bindHost = process.env.USAMI_API_HOST || readEnvValue('USAMI_API_HOST') || '0.0.0.0';
   server.listen(8787, bindHost, () => console.log(`Usami API escutando em ${bindHost}:8787`));
 }
