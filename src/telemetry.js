@@ -7,6 +7,7 @@
 // - Rastrear: Turno de Chat, Chunks do RAG/Obsidian, Tool Calls e LLM Generativo (NVIDIA/OpenRouter)
 
 import { Langfuse } from 'langfuse';
+import { sendObservabilityEvent, redactSecrets } from './n8n-observability.js';
 
 let client = null;
 let isInitialized = false;
@@ -134,6 +135,24 @@ export function recordLlmGeneration(traceObj, {
   latencyMs,
   error = null,
 } = {}) {
+  void sendObservabilityEvent({
+    kind: error ? 'error' : 'llm_call',
+    source: 'usami-llm',
+    route: name,
+    provider: metadata?.provider || null,
+    model: model || null,
+    durationMs: latencyMs,
+    isError: Boolean(error),
+    errorMessage: error ? redactSecrets(error?.message || error) : null,
+    metadata: usage
+      ? {
+          promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? null,
+          completionTokens: usage.completion_tokens ?? usage.completionTokens ?? null,
+          totalTokens: usage.total_tokens ?? usage.totalTokens ?? null,
+        }
+      : {},
+  });
+
   if (!traceObj?.trace) return;
 
   try {
@@ -219,6 +238,15 @@ export function recordToolSpan(traceObj, {
   latencyMs,
   error = null,
 } = {}) {
+  void sendObservabilityEvent({
+    kind: error ? 'error' : 'tool_call',
+    source: 'usami-tool',
+    route: `tool:${toolName || 'unknown'}`,
+    durationMs: latencyMs,
+    isError: Boolean(error),
+    errorMessage: error ? redactSecrets(error?.message || error) : null,
+  });
+
   if (!traceObj?.trace) return;
 
   try {

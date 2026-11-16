@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+﻿import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -82,6 +82,8 @@ import { createChatActivityRegistry } from './src/chat-activity.js';
 import { dataDir as resolveDataDir, sttTmpDir, ttsCacheDir } from './src/data-paths.js';
 import { filterActionsByCatalog, parseJsonLoosely, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripCodeFence, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
 import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpan } from './src/telemetry.js';
+import { sendObservabilityEvent, observeApiRequest, redactSecrets } from './src/n8n-observability.js';
+export { sendObservabilityEvent, observeApiRequest, redactSecrets };
 import { LanceMemoryStore } from './src/lancedb-store.js';
 import {
   isAllowedOrigin as routeIsAllowedOrigin,
@@ -3667,6 +3669,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const server = createServer(async (req, res) => {
     // Estado de visão da agente em memória (reinicia com o servidor).
     let visionEnabled = true;
+    if (req.url && req.url.startsWith('/api/')) {
+      observeApiRequest(req, res);
+    }
     // Assets estáticos de avatar e animações (VRM, VRMA, Live2D) com ETag/304 inteligente (OpenAmika avatar_cache)
     if ((req.method === 'GET' || req.method === 'HEAD') && (
       req.url.startsWith('/models/') || req.url.startsWith('/animations/') || req.url.startsWith('/live2d/')

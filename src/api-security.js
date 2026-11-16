@@ -44,7 +44,7 @@ export function withExtraOrigins(origins) {
 // que está nesta lista fechada, nunca o que a própria requisição afirma.
 export function allowedHosts(allowedOrigins) {
   const extra = process.env.USAMI_ALLOWED_HOSTS || readEnvValue('USAMI_ALLOWED_HOSTS');
-  const hosts = new Set([`127.0.0.1:${API_PORT}`, `localhost:${API_PORT}`, `10.42.0.91:${API_PORT}`, ...csv(extra)]);
+  const hosts = new Set([`127.0.0.1:${API_PORT}`, `localhost:${API_PORT}`, `10.42.0.91:${API_PORT}`, `10.42.0.1:${API_PORT}`, ...csv(extra)]);
   for (const origin of allowedOrigins) {
     try {
       hosts.add(new URL(origin).host);

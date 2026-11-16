@@ -331,6 +331,26 @@
       "status": "backlog",
       "blockedBy": ["S17"],
       "techGuidance": "O overlay do LoL é Win32 in-game e não serve como fonte de captura; decidir entre browser source e captura de janela por medição, não por preferência. Rotas novas seguem a borda D2 e o proxy do Vite."
+    },
+    {
+      "id": "S19",
+      "title": "Bot Discord da Usami + monitoramento/alertas n8n",
+      "covers": ["Infra n8n", "Observabilidade", "Discord integration"],
+      "tasks": [
+        "Criar bot Discord (discord.js) com comandos slash: /usami status, /usami ping, /usami memory, /usami n8n-health",
+        "Endpoint no server.mjs: POST /api/discord/webhook (recebe interações) + GET /api/health/n8n (check n8n + workflows)",
+        "Error Workflow n8n nativo: trigger em falha → POST para webhook Discord (embed com workflow, nó, erro, link execução)",
+        "Healthchecks.io: criar 4 checks (um por workflow agendado), último nó de cada workflow faz curl no hc-ping",
+        "Comando /usami n8n-health: mostra status dos 4 agendados (último run, próximo, healthcheck ping), erro workflows, latência n8n",
+        "Persistir token Discord em vault (DPAPI) via script existente, nunca no .env/git",
+        "Documentar setup em docs/discord-bot.md (convite, permissões, webhooks, healthchecks UUIDs)"
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Bot responde /usami n8n-health com status real dos 4 agendados; falha forçada em workflow dispara embed no Discord em <10s; healthchecks.io alerta se cron não pingar no horário",
+      "scopeNotes": "Bot read-only (não executa ferramentas nível 3–4). Alertas n8n via Error Workflow nativo + Healthchecks.io (grátis 20 checks). Discord webhook para alertas, bot para consultas sob demanda. Não substitui painel n8n, complementa com aviso imediato.",
+      "status": "backlog",
+      "blockedBy": [],
+      "techGuidance": "discord.js v14 (ESM), interactions endpoint via createDiscordHandler({store}) padrão D2. Healthchecks UUIDs no vault (plane-api-key style). Error Workflow n8n usa nó HTTP Request para webhook Discord. Healthcheck: curl -fsS https://hc-ping.com/UUID no último nó (sucesso). Rate limit: 1 req/s no bot, cache 30s no /n8n-health."
     }
   ]
 }
