@@ -1,10 +1,17 @@
-﻿import { createServer } from 'node:http';
+import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolve as pathResolve } from 'node:path';
 import { createFileTtsCache, createTtsCacheKey } from './src/tts-cache.js';
-import { STYLE_INSTRUCTIONS, resolveGeminiStyleClause } from './src/tts-prosody.js';
+import {
+  STYLE_INSTRUCTIONS,
+  resolveGeminiStyleClause,
+  resolveCharacterVoiceProsody,
+  DEFAULT_USAMI_VOICE_INSTRUCTION,
+} from './src/tts-prosody.js';
+import { createCharacterRegistry, extractRequestCharacterId } from './src/character-context.js';
+import { DEFAULT_CHARACTER_ID } from './src/character-manifest-schema.js';
 import { createStaticAssetHandler } from './src/avatar-cache.js';
 import { GESTURE_NAMES, SHAPE_NAMES } from './src/motion-director.js';
 import { removeTempAudio, saveTempAudio, transcribeAudio } from './src/stt.js';
@@ -133,6 +140,10 @@ function nvidiaKeyConfigured() {
 if (USE_NVIDIA && !process.env.NVIDIA_API_KEY) {
   const nvidiaKey = readEnvValue('NVIDIA_API_KEY');
   if (nvidiaKey) process.env.NVIDIA_API_KEY = nvidiaKey;
+}
+if (!process.env.NVIDIA_LLM_THINKING) {
+  const thinkingVal = readEnvValue('NVIDIA_LLM_THINKING');
+  if (thinkingVal) process.env.NVIDIA_LLM_THINKING = thinkingVal;
 }
 
 const DEFAULT_SYSTEM = `Você é Usami, uma companion acolhedora, curiosa e natural. Responda em português de forma breve. Não incentive dependência emocional ou exclusividade. Responda SOMENTE JSON: {"reply":"resposta","gesture":"neutral" ou "tilt","actions":[{"type":"gesture","name":"um de: ${GESTURE_NAMES.join(', ')}"},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"Nome do morph","value":0 a 1},{"type":"set_mesh_visible","name":"Nome de mesh acessório","visible":true ou false},{"type":"play_sequence","shape":"um de: ${SHAPE_NAMES.join(', ')}","amplitude":0.02 a 0.5,"cycles":1 a 8,"durationMs":600 a 8000,"side":"left" ou "right"}]}. Actions é opcional e pode ser vazio; no máximo 5 ações. play_sequence compõe movimento novo a partir de uma shape; use apenas se capabilities.sequences for true. NUNCA coloque nomes de morphs, prefabs ou anotações técnicas dentro do campo "reply": "reply" contém APENAS o diálogo falado em português.`.trim();
@@ -570,6 +581,55 @@ const services = buildServices({
 });
 const flowExecutor = createFlowExecutor({ services, config: {} });
 
+// Registro multi-tenant de contextos isolados por personagem (Fase 0 / RFC-001).
+export const characterRegistry = createCharacterRegistry({
+  dataDir: resolveDataDir(),
+  defaultCharacterId: DEFAULT_CHARACTER_ID,
+  defaultStores: {
+    memoryStore: installMemoryStore,
+    personalityStore: installPersonalityStore,
+    bondStore: installBondStore,
+    moodStore: installMoodStore,
+    achievementsStore: installAchievementsStore,
+    operationalStore: installOperationalStore,
+    n8nQueue: sharedN8nQueue,
+    chatActivity: sharedChatActivity,
+  },
+  allowSyntheticManifest: true,
+  vaultFallback: async (query) => {
+    try {
+      const ctx = getVaultIndex().search({ query });
+      if (ctx) return ctx;
+    } catch { }
+    try {
+      return await readRagContext();
+    } catch {
+      return null;
+    }
+  },
+});
+
+const moduleLoadedDataDir = resolveDataDir();
+let dynamicRegistryDir = null;
+let dynamicRegistryInstance = null;
+
+function resolveActiveRegistry(options = {}) {
+  if (options.characterRegistry) return options.characterRegistry;
+  const targetDir = options.dataDir || resolveDataDir();
+  if (!options.dataDir && targetDir === moduleLoadedDataDir) {
+    return characterRegistry;
+  }
+  if (!dynamicRegistryInstance || dynamicRegistryDir !== targetDir) {
+    dynamicRegistryDir = targetDir;
+    dynamicRegistryInstance = createCharacterRegistry({
+      dataDir: targetDir,
+      defaultCharacterId: DEFAULT_CHARACTER_ID,
+      allowSyntheticManifest: true,
+    });
+  }
+  return dynamicRegistryInstance;
+}
+
 // --- Webhook de saída: Usami → n8n -----------------------------------------
 
 // Endereço do webhook do n8n. Fire-and-forget: nunca derruba o chat se o n8n
@@ -748,7 +808,7 @@ export const VOICE_REPLY_NOTE = '=== MODO VOZ (RESPOSTA FALADA CONCISA) ===\nO u
 
 export function withSpokenConciseness(system, { spoken = false, message = '' } = {}) {
   if (!spoken) return system;
-  if (/\b(hist[óo]ria|conta tudo|explica detalhad|passo a passo|longo|detalhes)\b/i.test(String(message || ''))) {
+  if (/\b(hist[óo]ria|conta tudo|explica detalhad|passo a passo|longo|detalhes|descrev\w*|resum\w*|arquitetura|m[óo]dulos|habilidades|skills|ferramentas|limita[çc][õo]es)\b/i.test(String(message || ''))) {
     return system;
   }
   return system + '\n\n' + VOICE_REPLY_NOTE + '\n';
@@ -914,6 +974,36 @@ export function createChatHandler(options = {}) {
       return send(parsedBody.status, { error: parsedBody.error });
     }
 
+    const activeRegistry = resolveActiveRegistry(options);
+    const charReq = extractRequestCharacterId(req, activeRegistry.getActiveCharacterId());
+    if (!charReq.ok) {
+      return send(charReq.status, { error: charReq.error });
+    }
+    let tenantCtx = null;
+    const shouldResolveTenant = Boolean(
+      options.characterRegistry
+      || options.dataDir
+      || (charReq.explicit && charReq.characterId !== DEFAULT_CHARACTER_ID)
+      || (!options.memoryStore && activeRegistry.getActiveCharacterId() !== DEFAULT_CHARACTER_ID),
+    );
+    if (shouldResolveTenant) {
+      try {
+        tenantCtx = activeRegistry.getOrCreate(charReq.characterId);
+      } catch (error) {
+        return send(error?.status || 404, { error: error?.message || 'Personagem não encontrado.' });
+      }
+    }
+    const useInjectedDefaultStores = Boolean(
+      options.memoryStore && !options.characterRegistry && charReq.characterId === DEFAULT_CHARACTER_ID && !charReq.explicit,
+    );
+    const activeMemoryStore = (tenantCtx && !useInjectedDefaultStores) ? tenantCtx.memoryStore : memoryStore;
+    const activePersonalityStore = (tenantCtx && !options.personalityStore) ? tenantCtx.personalityStore : personalityStore;
+    const activeMoodStore = (tenantCtx && !('moodStore' in options)) ? tenantCtx.moodStore : moodStore;
+    const activeManifest = options.manifest || tenantCtx?.manifest || null;
+    const activeMemoryProvider = options.memoryProvider || tenantCtx?.memoryProvider || null;
+    const activeChatActivity = (tenantCtx && !options.chatActivity) ? tenantCtx.chatActivity : chatActivity;
+    const activeN8nQueue = (tenantCtx && !options.n8nQueue) ? tenantCtx.n8nQueue : n8nQueue;
+
     const chatTrace = startChatTrace({
       input: parsedBody.message,
       metadata: { endpoint: '/api/chat', spoken: Boolean(parsedBody.spoken) },
@@ -927,7 +1017,7 @@ export function createChatHandler(options = {}) {
     const activityClientId = normalizeClientId(req.headers['x-usami-client']);
     const publishActivity = (activity) => {
       try {
-        chatActivity.set(activityClientId, activity);
+        activeChatActivity.set(activityClientId, activity);
       } catch {
         // atividade é best-effort: nunca derruba o turno
       }
@@ -935,13 +1025,13 @@ export function createChatHandler(options = {}) {
     publishActivity({ phase: 'thinking' });
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
-      const mem = memoryStore.getAll();
+      const mem = activeMemoryStore.getAll();
       const today = new Date().toISOString().slice(0, 10);
       const hour = new Date().getHours();
       const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
       let currentMood = null;
       try {
-        currentMood = moodStore ? moodStore.getAll(mem.affinity.score) : null;
+        currentMood = activeMoodStore ? activeMoodStore.getAll(mem.affinity.score) : null;
       } catch {
         currentMood = null;
       }
@@ -952,19 +1042,20 @@ export function createChatHandler(options = {}) {
       } catch {
         selfAwareness = null;
       }
-      const todayHistory = memoryStore.getTodayHistory(today);
+      const todayHistory = activeMemoryStore.getTodayHistory(today);
       let system = buildPersona({
         affinity: mem.affinity.score,
-        sections: memoryStore.getSections(),
-        recentFacts: memoryStore.getRecentFacts(new Date().toISOString()),
+        sections: activeMemoryStore.getSections(),
+        recentFacts: activeMemoryStore.getRecentFacts(new Date().toISOString()),
         history: todayHistory,
-        summaries: memoryStore.getSummaries().slice(-3),
+        summaries: activeMemoryStore.getSummaries().slice(-3),
         username: mem.user.nickname || 'você',
         date: today,
         timeOfDay,
-        personality: personalityStore.get(),
+        personality: activePersonalityStore.get(),
         mood: currentMood,
         selfAwareness,
+        manifest: activeManifest,
       });
 
       // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
@@ -972,7 +1063,18 @@ export function createChatHandler(options = {}) {
       // com o disco a cada busca; se ele falhar, o leitor antigo continua valendo.
       let ragContext = null;
       try {
-        ragContext = await searchVault(parsedBody.message);
+        if (activeMemoryProvider) {
+          if (activeMemoryProvider.isEnabled()) {
+            ragContext = await activeMemoryProvider.formatContext(parsedBody.message);
+            if (!ragContext && options.vaultSearch) {
+              ragContext = await searchVault(parsedBody.message);
+            }
+          } else {
+            ragContext = null;
+          }
+        } else {
+          ragContext = await searchVault(parsedBody.message);
+        }
       } catch {
         ragContext = null;
       }
@@ -997,7 +1099,7 @@ export function createChatHandler(options = {}) {
       let agentTurn = null;
       let executedAgentTurn = null;
       const isFastTier = Boolean(parsedBody.input?.skipAgent || parsedBody.input?.fastTier);
-    if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
+      if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
         try {
           let executedTurn = null;
           try {
@@ -1024,7 +1126,12 @@ export function createChatHandler(options = {}) {
               ...(Array.isArray(executedTurn.tools) ? { tools: executedTurn.tools } : {}),
             };
             const toolPromptContext = formatAgentTurnPromptContext(executedTurn);
-            if (toolPromptContext) system += toolPromptContext;
+            if (toolPromptContext) {
+              if (executedTurn.tool === 'self.describe' || executedTurn.tool === 'code.inspect') {
+                system = system.replace(/- reply: 1 a 2 frases curtas[^\n]*/g, '- reply: responda de forma clara e detalhada (400 a 1400 caracteres) usando todos os dados reais da ferramenta.');
+              }
+              system += toolPromptContext;
+            }
             recordToolSpan(chatTrace, {
               toolName: executedTurn.tool?.name || executedTurn.intent?.kind,
               parameters: executedTurn.tool?.parameters,
@@ -1073,78 +1180,84 @@ export function createChatHandler(options = {}) {
       };
       mark('context');
 
-      // Provedor alternativo resolvido uma vez por turno (Gemini Flash, Groq ou OpenRouter):
-      // o hedge só dispara se houver para onde cair, e o fallback sequencial não relê o .env.
+      // Provedores alternativos resolvidos uma vez por turno (Gemini Flash, Groq, OpenRouter):
+      // o hedge usa o primeiro disponível; o fallback sequencial tenta cada um em ordem.
       let alternateConfig = null;
+      let alternateList = null;
       let alternateError = null;
       let alternateResolved = false;
-      const resolveAlternateProvider = async () => {
+      const resolveAlternateProviders = async () => {
         if (!alternateResolved) {
           alternateResolved = true;
+          alternateList = [];
           try {
-            // Se getKey foi injetado explicitamente (ex: testes mockando OpenRouter ou modo offline):
             if (options.getKey) {
               const testKey = await options.getKey();
-              if (!testKey) return null;
-              alternateConfig = {
-                provider: 'openrouter',
-                key: testKey,
-                url: 'https://openrouter.ai/api/v1/chat/completions',
-                model: isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model,
-              };
-              return alternateConfig;
+              if (testKey) {
+                alternateList.push({
+                  provider: 'openrouter',
+                  key: testKey,
+                  url: 'https://openrouter.ai/api/v1/chat/completions',
+                  model: isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model,
+                });
+              }
+              alternateConfig = alternateList[0] || null;
+              return alternateList;
             }
-            // 1. Google Gemini (endpoint compatível OpenAI - ultra rápido e cota generosa)
             const geminiKey = readEnvValue('GEMINI_API_KEY', { filePath: options.envPath });
             if (geminiKey) {
-              alternateConfig = {
+              alternateList.push({
                 provider: 'gemini',
                 key: geminiKey,
                 url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
-                model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-              };
-              return alternateConfig;
+                model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+              });
             }
-            // 2. Groq (Llama 3.3 70B ultra rápido)
             const groqKey = readEnvValue('GROQ_API_KEY', { filePath: options.envPath });
             if (groqKey) {
-              alternateConfig = {
+              alternateList.push({
                 provider: 'groq',
                 key: groqKey,
                 url: 'https://api.groq.com/openai/v1/chat/completions',
                 model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-              };
-              return alternateConfig;
+              });
             }
-            // 3. OpenRouter (fallback tradicional)
             const routerKey = readEnvValue('OPENROUTER_API_KEY', { filePath: options.envPath });
             if (routerKey) {
-              alternateConfig = {
+              alternateList.push({
                 provider: 'openrouter',
                 key: routerKey,
                 url: 'https://openrouter.ai/api/v1/chat/completions',
                 model: isFastTier ? (process.env.OPENROUTER_FAST_MODEL || 'google/gemini-2.0-flash-exp:free') : model,
-              };
-              return alternateConfig;
+              });
             }
+            alternateConfig = alternateList[0] || null;
           } catch (error) {
             alternateError = error;
           }
         }
-        return alternateConfig;
+        return alternateList || [];
+      };
+      const resolveAlternateProvider = async () => {
+        const list = await resolveAlternateProviders();
+        return list[0] || null;
       };
 
       // Implementação multi-provedor (Gemini / Groq / OpenRouter): usada pelo
       // hedge e pelo fallback sequencial (NVIDIA desligada ou falha sem corrida).
       let alternateUsed = false;
       let routerUsed = false;
+      const isDetailedIntrospectionRequest = executedAgentTurn?.tool === 'self.describe'
+        || executedAgentTurn?.tool === 'code.inspect'
+        || /\b(?:descrev\w*|resum\w*|explic\w*|lista\w*)\b.*\b(?:m[óo]dulos|ferramentas|habilidades|skills|arquitetura|limita[çc][õo]es)\b/i.test(String(parsedBody.message || ''));
+      const replyCharLimit = isDetailedIntrospectionRequest ? 1800 : undefined;
       const alternateProviderReply = (config, signal) => {
         alternateUsed = true;
         routerUsed = true;
         return timeStage('llm', async () => {
           let response;
           try {
-            const maxTokens = isFastTier ? 250 : 700;
+            const maxTokens = isFastTier ? 800 : 2500;
             const bodyPayload = {
               model: config.model,
               max_tokens: maxTokens,
@@ -1183,7 +1296,7 @@ export function createChatHandler(options = {}) {
           } catch {
             throw providerError('Resposta inválida do provedor.');
           }
-          const parsedAlternate = parseProviderRaw(data?.choices?.[0]?.message?.content);
+          const parsedAlternate = parseProviderRaw(data?.choices?.[0]?.message?.content, { replyCharLimit });
           if (!parsedAlternate.ok) throw providerError(parsedAlternate.error, parsedAlternate.status);
           return { ...parsedAlternate, classification, source: config.provider };
         });
@@ -1249,7 +1362,7 @@ export function createChatHandler(options = {}) {
               signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
               blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
             });
-            const parsedReply = parseProviderRaw(rawReply);
+            const parsedReply = parseProviderRaw(rawReply, { replyCharLimit });
             if (!parsedReply.ok) {
               throw Object.assign(new Error(parsedReply.error), {
                 invalidModelReply: true,
@@ -1360,7 +1473,7 @@ export function createChatHandler(options = {}) {
           if (!isFastTier && parsed.source === 'nvidia' && !parsed.actions.length && capabilities) {
             void refineAnimationInBackground(parsed.reply, capabilities, {
               clientId: normalizeClientId(req.headers['x-usami-client']),
-              queue: n8nQueue,
+              queue: activeN8nQueue,
             });
           }
           mark('animation');
@@ -1416,14 +1529,22 @@ export function createChatHandler(options = {}) {
             source: 'offline',
           };
         } else {
-          try {
-            parsed = await alternateProviderReply(alt, AbortSignal.any([
-              turn.signal,
-              AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
-            ]));
-          } catch (error) {
-            if (turn.signal.aborted) return;
-            return send(error.httpStatus || 502, { error: error.message });
+          const alts = await resolveAlternateProviders();
+          let lastAltError = null;
+          for (const candidateAlt of alts) {
+            try {
+              parsed = await alternateProviderReply(candidateAlt, AbortSignal.any([
+                turn.signal,
+                AbortSignal.timeout(Math.max(FALLBACK_MIN_MS, TURN_DEADLINE_MS - (now() - chatStartedAt))),
+              ]));
+              if (parsed?.ok) break;
+            } catch (error) {
+              if (turn.signal.aborted) return;
+              lastAltError = error;
+            }
+          }
+          if (!parsed || !parsed.ok) {
+            return send(lastAltError?.httpStatus || 502, { error: lastAltError?.message || 'Todos os provedores alternativos falharam.' });
           }
           // Contribuição da animação no caminho do balão: aqui só o pós-processamento
           // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
@@ -1443,9 +1564,9 @@ export function createChatHandler(options = {}) {
         const remember = parsed.remember;
         if (remember) {
           if (classifyFactDurability(remember.fact, remember.section) === 'core') {
-            memoryStore.addCoreFact(remember.fact, remember.section);
+            activeMemoryStore.addCoreFact(remember.fact, remember.section);
           } else {
-            memoryStore.addRecentFact(remember.fact, 7, remember.section);
+            activeMemoryStore.addRecentFact(remember.fact, 7, remember.section);
           }
         }
         const turnTimestamp = new Date().toISOString();
@@ -1454,9 +1575,9 @@ export function createChatHandler(options = {}) {
           .replace(/【[^】]{1,30}】/g, ' ')
           .replace(/[ \t]{2,}/g, ' ')
           .trim() || parsed.reply;
-        memoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
-        memoryStore.appendHistory('assistant', historyReply, turnTimestamp);
-        const current = memoryStore.getAll();
+        activeMemoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
+        activeMemoryStore.appendHistory('assistant', historyReply, turnTimestamp);
+        const current = activeMemoryStore.getAll();
         const gain = calculateGain({
           userMessage: parsedBody.message,
           assistantReply: parsed.reply,
@@ -1467,7 +1588,7 @@ export function createChatHandler(options = {}) {
         });
         const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
         // applyGain já devolve o objeto completo (score + contador diário); grava direto.
-        memoryStore.save({ ...current, affinity: newAff });
+        activeMemoryStore.save({ ...current, affinity: newAff });
         affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
       } catch {
         // sem memória o chat segue stateless; nada a fazer aqui
@@ -1477,7 +1598,7 @@ export function createChatHandler(options = {}) {
       // background. Fora do caminho crítico — a próxima conversa já lê o
       // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
       void summarizePendingDays({
-        store: memoryStore,
+        store: activeMemoryStore,
         today,
         summarize: useNvidia() ? summarizeDay : undefined,
       }).catch(error => {
@@ -1487,7 +1608,7 @@ export function createChatHandler(options = {}) {
       });
 
       void consolidateFacts({
-        store: memoryStore,
+        store: activeMemoryStore,
         today,
       }).catch(error => {
         console.warn('[memoria] consolidação de fatos falhou: ' + (error?.message || error));
@@ -1529,7 +1650,7 @@ export function createChatHandler(options = {}) {
                 type: 'proactive_say',
                 message: summary,
                 gesture: 'nod',
-              }, { clientId: followupClientId ? normalizeClientId(followupClientId) : null });
+              }, { clientId: followupClientId ? normalizeClientId(followupClientId) : null, queue: activeN8nQueue });
             } catch {
               // follow-up é best-effort: nunca derruba o turno
             }
@@ -1539,8 +1660,8 @@ export function createChatHandler(options = {}) {
 
       let moodPayload = null;
       try {
-        moodPayload = moodStore
-          ? moodStore.recordChatTurn({
+        moodPayload = activeMoodStore
+          ? activeMoodStore.recordChatTurn({
             userMessage: parsedBody.message,
             reply: parsed.reply,
             gesture: parsed.gesture,
@@ -1578,7 +1699,7 @@ export function createChatHandler(options = {}) {
       });
     } finally {
       // Turno encerrado: a atividade some (o próximo turno publica a dele).
-      try { chatActivity.clear(activityClientId); } catch { /* best-effort */ }
+      try { activeChatActivity.clear(activityClientId); } catch { /* best-effort */ }
       activeTurns = Math.max(0, activeTurns - 1);
       if (activeTurns === 0) proactive?.setBusy(false);
     }
@@ -1805,6 +1926,57 @@ export function createN8nCommandHandler(options = {}) {
       return send(200, { ok: true });
     }
 
+    // POST /api/observability/client-log — recebe logs/panics do cliente desktop
+    // e encaminha para a pipeline de observabilidade sem vazar segredos.
+    if (req.method === 'POST' && url.pathname === '/api/observability/client-log') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+
+      const read = await readRequestBody(req, { limit: 16384 });
+      if (!read.ok) {
+        return send(413, { error: 'Log muito longo.' });
+      }
+
+      let body;
+      try {
+        body = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+
+      const level = String(body?.level || 'error').toLowerCase();
+      const kind = redactSecrets(body?.kind || (level === 'error' ? 'client_error' : 'client_log')).slice(0, 64);
+      const source = redactSecrets(body?.source || 'usami-desktop').slice(0, 64);
+      const message = redactSecrets(body?.message || '');
+      const location = body?.location ? redactSecrets(body.location).slice(0, 200) : null;
+      const isError = level === 'error' || level === 'fatal' || kind.includes('panic') || kind.includes('error');
+
+      if (isError) {
+        console.error(`[${source}] [${kind}] ${location ? `(${location}) ` : ''}${message}`);
+      } else {
+        console.log(`[${source}] [${kind}] ${message}`);
+      }
+
+      sendObservabilityEvent({
+        kind,
+        source,
+        route: '/api/observability/client-log',
+        clientId,
+        isError,
+        errorCode: kind,
+        errorMessage: message,
+        metadata: {
+          level,
+          location,
+          ...(body?.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata : {}),
+        },
+      }).catch(() => {});
+
+      return send(202, { ok: true });
+    }
+
     return send(404, { error: 'Não encontrado.' });
   };
 }
@@ -1820,6 +1992,8 @@ export function createRagContextHandler(options = {}) {
 
 export function createPersonalityHandler(options = {}) {
   return modularCreatePersonalityHandler({
+    characterRegistry: options.characterRegistry || resolveActiveRegistry(options),
+    isServerDefaultStore: !options.personalityStore,
     personalityStore: installPersonalityStore,
     ...options,
   });
@@ -1827,6 +2001,8 @@ export function createPersonalityHandler(options = {}) {
 
 export function createMemoryHandler(options = {}) {
   return modularCreateMemoryHandler({
+    characterRegistry: options.characterRegistry || resolveActiveRegistry(options),
+    isServerDefaultStore: !options.memoryStore,
     memoryStore: installMemoryStore,
     bondStore: installBondStore,
     useNvidia,
@@ -1836,6 +2012,8 @@ export function createMemoryHandler(options = {}) {
 
 export function createBondHandler(options = {}) {
   return modularCreateBondHandler({
+    characterRegistry: options.characterRegistry || resolveActiveRegistry(options),
+    isServerDefaultStore: !options.bondStore,
     bondStore: installBondStore,
     memoryStore: installMemoryStore,
     achievementsStore: installAchievementsStore,
@@ -1845,6 +2023,8 @@ export function createBondHandler(options = {}) {
 
 export function createMoodHandler(options = {}) {
   return modularCreateMoodHandler({
+    characterRegistry: options.characterRegistry || resolveActiveRegistry(options),
+    isServerDefaultStore: !options.moodStore,
     moodStore: installMoodStore,
     memoryStore: installMemoryStore,
     ...options,
@@ -1853,9 +2033,83 @@ export function createMoodHandler(options = {}) {
 
 export function createOperationalMemoryHandler(options = {}) {
   return modularCreateOperationalMemoryHandler({
+    characterRegistry: options.characterRegistry || resolveActiveRegistry(options),
+    isServerDefaultStore: !options.operationalStore,
     operationalStore: installOperationalStore,
     ...options,
   });
+}
+
+/**
+ * Handler multi-tenant de seleção e listagem de personagens (`GET /api/characters`,
+ * `GET/POST /api/characters/active`).
+ */
+export function createCharactersHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+
+  return async function handleCharacters(req, res) {
+    const send = (status, data) => sendJsonResponse(res, status, data);
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const registry = options.characterRegistry || resolveActiveRegistry(options);
+    const route = new URL(req.url || '/api/characters', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/characters') {
+      return send(200, {
+        ok: true,
+        activeCharacterId: registry.getActiveCharacterId(),
+        characters: registry.list(),
+      });
+    }
+
+    if (req.method === 'GET' && route === '/api/characters/active') {
+      const active = registry.getActive();
+      return send(200, {
+        ok: true,
+        characterId: active.characterId,
+        manifest: active.manifest,
+      });
+    }
+
+    if (req.method === 'POST' && route === '/api/characters/active') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+      const read = await readRequestBody(req, { limit: 4096 });
+      if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+      let payload;
+      try {
+        payload = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return send(400, { error: 'Corpo inválido.' });
+      }
+      const targetId = typeof payload.characterId === 'string' ? payload.characterId.trim() : '';
+      if (!targetId) {
+        return send(400, { error: 'characterId é obrigatório.' });
+      }
+
+      const activated = registry.setActive(targetId);
+      if (!activated.ok) {
+        return send(activated.status || 404, { error: activated.errors.join('; ') });
+      }
+      return send(200, {
+        ok: true,
+        characterId: activated.context.characterId,
+        manifest: activated.context.manifest,
+      });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
+  };
 }
 
 // Ferramentas do domínio agêntico: execução verificada e histórico. O executor
@@ -2389,12 +2643,12 @@ export { STYLE_INSTRUCTIONS, resolveGeminiStyleClause };
 // Monta a tag de estilo a partir da base configurada + cláusula da emoção. Uma base
 // legada em prosa (GEMINI_TTS_INSTRUCTION do .env) é convertida para tag, senão
 // voltaria a ser falada.
-export function buildGeminiInstruction(base, styleId) {
+export function buildGeminiInstruction(base, styleId, { clauseOverride = undefined } = {}) {
   let inner = String(base || '').trim()
     .replace(/:\s*$/, '')
     .replace(/^\[([\s\S]*)\]\s*$/, '$1')
     .trim();
-  const clause = resolveGeminiStyleClause(styleId);
+  const clause = clauseOverride !== undefined ? clauseOverride : resolveGeminiStyleClause(styleId);
   const lowerStyle = String(styleId || '').toLowerCase();
   // Se o estilo for tímido, envergonhado, bravo ou triste, suprime menções a sorriso/travessa
   // da instrução base para evitar que o modelo de áudio Gemini alucine risos incontroláveis
@@ -2611,7 +2865,13 @@ export function createTtsHandler(options = {}) {
       const hasElevenlabs = Boolean(parsed.ELEVENLABS_API_KEY && parsed.ELEVENLABS_VOICE_ID);
       // override explícito restringe o provedor; sem override, gemini vem primeiro
       if (hasGemini && (!providerOverride || providerOverride === 'gemini')) {
-        return { provider: 'gemini', apiKey: parsed.GEMINI_API_KEY, geminiModel: parsed.GEMINI_TTS_MODEL, geminiVoice: parsed.GEMINI_TTS_VOICE };
+        return {
+          provider: 'gemini',
+          apiKey: parsed.GEMINI_API_KEY,
+          geminiModel: parsed.GEMINI_TTS_MODEL,
+          geminiVoice: parsed.GEMINI_TTS_VOICE,
+          geminiInstruction: parsed.GEMINI_TTS_INSTRUCTION,
+        };
       }
       if (hasElevenlabs && (!providerOverride || providerOverride === 'elevenlabs')) {
         return { provider: 'elevenlabs', apiKey: parsed.ELEVENLABS_API_KEY, voiceId: parsed.ELEVENLABS_VOICE_ID };
@@ -2654,6 +2914,24 @@ export function createTtsHandler(options = {}) {
       return send(413, { error: 'Texto muito longo.' });
     }
 
+    const activeRegistry = resolveActiveRegistry(options);
+    const charReq = extractRequestCharacterId(req, activeRegistry.getActiveCharacterId());
+    if (!charReq.ok) {
+      return send(charReq.status, { error: charReq.error });
+    }
+    const useCharacterManifestVoice = Boolean(
+      options.manifest
+      || charReq.characterId !== DEFAULT_CHARACTER_ID
+      || activeRegistry.getActiveCharacterId() !== DEFAULT_CHARACTER_ID,
+    );
+    let tenantManifest = options.manifest || null;
+    if (!tenantManifest && (useCharacterManifestVoice || options.characterRegistry)) {
+      try {
+        tenantManifest = activeRegistry.getOrCreate(charReq.characterId)?.manifest || null;
+      } catch (error) {
+        return send(error?.status || 404, { error: error?.message || 'Personagem não encontrado.' });
+      }
+    }
     const parsedBody = parseTtsBody(read.body);
     if (!parsedBody.ok) {
       return send(parsedBody.status, { error: parsedBody.error });
@@ -2669,27 +2947,48 @@ export function createTtsHandler(options = {}) {
     // config legado { apiKey, voiceId } sem provider continua significando elevenlabs
     const provider = normalizeTtsProvider(options.provider || process.env.USAMI_TTS_PROVIDER)
       || (config?.provider === 'gemini' ? 'gemini' : 'elevenlabs');
-    if (!config?.apiKey || (provider === 'elevenlabs' && !config?.voiceId)) {
+    const envOrConfigVoice = process.env.GEMINI_TTS_VOICE || config?.geminiVoice || DEFAULT_GEMINI_TTS_VOICE;
+    const envOrConfigInstruction = process.env.GEMINI_TTS_INSTRUCTION || config?.geminiInstruction || DEFAULT_GEMINI_TTS_INSTRUCTION;
+    const voiceProsody = (useCharacterManifestVoice && tenantManifest)
+      ? resolveCharacterVoiceProsody(tenantManifest, parsedBody.styleId, {
+        fallbackVoice: envOrConfigVoice,
+        fallbackInstruction: envOrConfigInstruction,
+      })
+      : null;
+    const effectiveElevenlabsVoiceId = (voiceProsody?.engine === 'elevenlabs' && voiceProsody.voice)
+      ? voiceProsody.voice
+      : config?.voiceId;
+    if (!config?.apiKey || (provider === 'elevenlabs' && !effectiveElevenlabsVoiceId)) {
       return send(503, { error: 'TTS indisponível: configuração ausente.' });
     }
 
+    const manifestModel = (voiceProsody?.model && voiceProsody.model !== DEFAULT_GEMINI_TTS_MODEL)
+      ? voiceProsody.model
+      : null;
+    const manifestVoice = (voiceProsody?.voice && voiceProsody.voice !== DEFAULT_GEMINI_TTS_VOICE)
+      ? voiceProsody.voice
+      : null;
+    const manifestInstruction = (voiceProsody?.baseInstruction && voiceProsody.baseInstruction !== DEFAULT_GEMINI_TTS_INSTRUCTION)
+      ? voiceProsody.baseInstruction
+      : null;
+
     const geminiModel = provider === 'gemini'
-      ? (options.geminiModel || process.env.GEMINI_TTS_MODEL || config.geminiModel || DEFAULT_GEMINI_TTS_MODEL)
+      ? (options.geminiModel || manifestModel || process.env.GEMINI_TTS_MODEL || config?.geminiModel || DEFAULT_GEMINI_TTS_MODEL)
       : null;
     const geminiVoice = provider === 'gemini'
-      ? (options.geminiVoice || process.env.GEMINI_TTS_VOICE || config.geminiVoice || DEFAULT_GEMINI_TTS_VOICE)
+      ? (options.geminiVoice || manifestVoice || process.env.GEMINI_TTS_VOICE || config?.geminiVoice || DEFAULT_GEMINI_TTS_VOICE)
       : null;
     const audioFormat = provider === 'gemini' ? 'audio/wav' : 'audio/mpeg';
     // styleId conhecido ganha a cláusula da emoção; neutral/desconhecido fica na base.
     // Calculada antes da chave: mudar a direção de estilo muda a fala, e uma chave
     // que só vê o styleId serviria o áudio velho da cláusula anterior.
     const geminiInstruction = provider === 'gemini'
-      ? buildGeminiInstruction(options.geminiInstruction || process.env.GEMINI_TTS_INSTRUCTION || DEFAULT_GEMINI_TTS_INSTRUCTION, parsedBody.styleId)
+      ? buildGeminiInstruction(options.geminiInstruction || manifestInstruction || envOrConfigInstruction, parsedBody.styleId, { clauseOverride: voiceProsody?.styleClause })
       : '';
     const cacheKey = cache ? createTtsCacheKey({
       provider,
       model: provider === 'gemini' ? geminiModel : model,
-      voiceId: provider === 'gemini' ? geminiVoice : config.voiceId,
+      voiceId: provider === 'gemini' ? geminiVoice : effectiveElevenlabsVoiceId,
       styleId: parsedBody.styleId,
       instruction: geminiInstruction,
       rate: parsedBody.rate,
@@ -2803,7 +3102,7 @@ export function createTtsHandler(options = {}) {
             });
           }
         } else {
-          response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(config.voiceId) + '?output_format=mp3_44100_128', {
+          response = await fetchImpl(ttsUrl + '/v1/text-to-speech/' + encodeURIComponent(effectiveElevenlabsVoiceId) + '?output_format=mp3_44100_128', {
             method: 'POST',
             headers: { 'xi-api-key': config.apiKey, 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: parsedBody.text, model_id: model, output_format: 'mp3_44100_128' }),
@@ -3483,9 +3782,12 @@ export function createMediaAnalyzeHandler(options = {}) {
       result = { ...result, actions: filterActionsByCatalog(result.actions ?? [], capabilities) };
       try {
         const turnTimestamp = new Date().toISOString();
-        const mediaTypeLabel = mimeType?.startsWith('video/') ? 'Vídeo' : 'Imagem';
-        const visualSummary = result.crossReference || result.summary || (result.ocr?.length ? `Texto lido: ${result.ocr.join(', ')}` : 'mídia compartilhada');
-        const audioSummary = result.transcript ? ` [Áudio: ${result.transcript}]` : '';
+        const isVid = mimeType?.startsWith('video/') || /\.(mp4|webm|mkv|mov|avi)$/i.test(filename || '');
+        const isAud = mimeType?.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac|opus|weba)$/i.test(filename || '');
+        const isDoc = mimeType?.startsWith('text/') || mimeType === 'application/pdf' || mimeType === 'application/json' || /\.(pdf|txt|md|markdown|py|js|ts|tsx|jsx|json|csv|yaml|yml|xml|html|css|sql|toml|log|sh|rs|c|cpp|h|cs|java|go|php|env|ini|diff|patch)$/i.test(filename || '');
+        const mediaTypeLabel = isAud ? 'Áudio' : (isVid ? 'Vídeo' : (isDoc ? 'Arquivo' : 'Imagem'));
+        const visualSummary = result.crossReference || result.summary || (result.transcript ? `Fala: "${result.transcript}"` : (result.ocr?.length ? `Texto lido: ${result.ocr.join(', ')}` : 'conteúdo compartilhado'));
+        const audioSummary = result.transcript && isVid ? ` [Áudio: ${result.transcript}]` : '';
 
         const userTurnContent = `[${mediaTypeLabel}: ${filename || 'arquivo'}] ${prompt ? `"${prompt}" ` : ''}(Conteúdo visto/ouvido: ${visualSummary}${audioSummary})`.trim();
         const assistantTurnContent = result.reply;
@@ -3495,6 +3797,7 @@ export function createMediaAnalyzeHandler(options = {}) {
 
         const factText = `Compartilhou ${mediaTypeLabel.toLowerCase()} "${filename || 'mídia'}": ${visualSummary.slice(0, 180)}`;
         memoryStore.addRecentFact?.(factText, 7, 'other');
+        console.log(`[media] tipo=${mediaTypeLabel} arquivo=${filename || '-'} status=${result.ok ? 'ok' : 'erro'} reply="${(result.reply || '').slice(0, 100)}"`);
       } catch (err) {
         console.warn('[media-analyzer] Falha ao persistir na memória:', err.message);
       }
@@ -3650,6 +3953,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleRagContext = createRagContextHandler();
   const handleMemory = createMemoryHandler();
   const handleBond = createBondHandler();
+  const handleCharacters = createCharactersHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
   const handleTools = createToolHandler({ gate: installToolGate, skillCatalog: installSkillCatalog });
   const handlePlans = createPlansHandler();
@@ -3679,6 +3983,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       const served = await handleAvatarStatic(req, res);
       if (served) return;
     }
+    if (req.url === '/api/characters' || req.url === '/api/characters/active') return handleCharacters(req, res);
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);

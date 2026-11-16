@@ -9,11 +9,29 @@ import { embedText, EMBEDDING_DIMENSION } from './local-embedder.js';
 import { dataDir as defaultDataDir } from './data-paths.js';
 
 const TABLE_NAME = 'vault_memory';
+const SAFE_TENANT_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 export class LanceMemoryStore {
-  constructor({ dataDir = defaultDataDir() } = {}) {
+  constructor({
+    dataDir = defaultDataDir(),
+    characterId = null,
+    tableName = null,
+    embedder = embedText,
+  } = {}) {
     this.dataDir = dataDir;
-    this.dbDir = path.join(this.dataDir, 'lancedb');
+    this.embedder = embedder;
+    if (characterId !== null && characterId !== undefined) {
+      if (typeof characterId !== 'string' || !SAFE_TENANT_ID_RE.test(characterId)) {
+        throw new Error(`characterId inválido para LanceMemoryStore: "${String(characterId)}"`);
+      }
+      this.characterId = characterId;
+      this.dbDir = path.join(this.dataDir, 'characters', characterId, 'memory', 'lancedb');
+      this.tableName = tableName || `memories_${characterId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    } else {
+      this.characterId = null;
+      this.dbDir = path.join(this.dataDir, 'lancedb');
+      this.tableName = tableName || TABLE_NAME;
+    }
     this.db = null;
     this.table = null;
   }
@@ -24,12 +42,12 @@ export class LanceMemoryStore {
     this.db = await lancedb.connect(this.dbDir);
 
     const tables = await this.db.tableNames();
-    if (tables.includes(TABLE_NAME)) {
-      this.table = await this.db.openTable(TABLE_NAME);
+    if (tables.includes(this.tableName)) {
+      this.table = await this.db.openTable(this.tableName);
     } else {
       // Cria a tabela inicial com schema padrão
       const dummyVector = new Array(EMBEDDING_DIMENSION).fill(0);
-      this.table = await this.db.createTable(TABLE_NAME, [
+      this.table = await this.db.createTable(this.tableName, [
         {
           id: '__init__',
           file: '',
@@ -50,7 +68,7 @@ export class LanceMemoryStore {
    */
   async search({ query, limit = 5, minScore = 0.2 } = {}) {
     await this.init();
-    const queryVector = await embedText(query);
+    const queryVector = await this.embedder(query);
 
     const rows = await this.table
       .vectorSearch(queryVector)
@@ -96,7 +114,7 @@ export class LanceMemoryStore {
     const records = [];
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
-      const vector = await embedText(chunkText);
+      const vector = await this.embedder(chunkText);
       records.push({
         id: `${file}#${i}`,
         file,
@@ -128,6 +146,11 @@ export class LanceMemoryStore {
     const total = await this.table.countRows();
     // Desconta o __init__ se presente
     return Math.max(0, total - 1);
+  }
+
+  async close() {
+    this.table = null;
+    this.db = null;
   }
 }
 

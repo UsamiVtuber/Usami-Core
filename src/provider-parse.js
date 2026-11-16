@@ -116,7 +116,7 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
 export function stripLeakedJson(reply) {
   return String(reply ?? '')
     // Remove vazamento com separadores literais ou pipes, ex.: `.|gesture":"nod`, `.| gesture ": "nod` ou `,"gesture":"nod`
-    .replace(/(?:[\s,;|]+|\s*\.\s*[|]|\s*\.\s*(?=["']?gesture))\s*\\?["']?\b(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b[\s\S]*$/i, '')
+    .replace(/(?:[\s,;|]+|\s*\.\s*[|]|\s*\.\s*(?=["']?gesture))\s*\\?["']?\b(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b\s*\\?["']?\s*[:=][\s\S]*$/i, '')
     // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
     // Ex.: `','gesture': 'angry','actions': [{'type':` ou `"gesture":"angry","actions":[...`
     .replace(/['",\s|]*\\?["']?(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b\s*\\?["']?\s*:\s*[\s\S]*$/i, '')
@@ -167,9 +167,9 @@ function salvageLeakedGesture(rawText) {
   return GESTURE_NAMES.includes(candidate) ? candidate : null;
 }
 
-function cleanReply(reply) {
+function cleanReply(reply, replyCharLimit = REPLY_CHAR_LIMIT) {
   const { text, tags } = extractSpeechTags(stripStageDirections(stripLeakedJson(reply)));
-  return { display: capReplyLength(text), tags };
+  return { display: capReplyLength(text, replyCharLimit), tags };
 }
 
 // Extrai o valor da chave "reply" de JSON truncado/inválido: lê até a próxima
@@ -239,7 +239,7 @@ function extractReplyField(result) {
   return '';
 }
 
-export function parseProviderRaw(raw) {
+export function parseProviderRaw(raw, { replyCharLimit = REPLY_CHAR_LIMIT } = {}) {
   if (typeof raw !== 'string' || raw.length > 10000) {
     return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
   }
@@ -278,7 +278,7 @@ export function parseProviderRaw(raw) {
         if (!salvaged) {
           return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
         }
-        const cleaned = cleanReply(salvaged);
+        const cleaned = cleanReply(salvaged, replyCharLimit);
         if (!cleaned.display) {
           return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
         }
@@ -307,7 +307,7 @@ export function parseProviderRaw(raw) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }
   const salvagedFromReply = salvageLeakedGesture(replyText);
-  const cleaned = cleanReply(replyText);
+  const cleaned = cleanReply(replyText, replyCharLimit);
   if (!cleaned.display) {
     return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
   }

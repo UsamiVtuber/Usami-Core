@@ -50,18 +50,24 @@ export function createEmailAssistantTools({
     },
     async execute(args = {}) {
       if (typeof googleAuth.callN8nAssistant === 'function' && googleAuth.isN8nConfigured?.()) {
-        const res = await googleAuth.callN8nAssistant({
-          action: 'list_emails',
-          params: { query: args.query, maxResults: args.maxResults },
-        });
-        if (res && res.ok && Array.isArray(res.messages)) {
-          return {
-            ok: true,
-            schema: EMAIL_SCHEMA,
-            provider: 'gmail-n8n',
-            count: res.messages.length,
-            messages: res.messages,
-          };
+        try {
+          const res = await googleAuth.callN8nAssistant({
+            action: 'list_emails',
+            params: { query: args.query, maxResults: args.maxResults },
+            maxRetries: 0,
+            signal: AbortSignal.timeout(1500),
+          });
+          if (res && res.ok && Array.isArray(res.messages)) {
+            return {
+              ok: true,
+              schema: EMAIL_SCHEMA,
+              provider: 'gmail-n8n',
+              count: res.messages.length,
+              messages: res.messages,
+            };
+          }
+        } catch {
+          // n8n indisponível: cai para Gmail OAuth2 direto abaixo
         }
       }
       const limit = Number.isInteger(args.maxResults) ? Math.min(Math.max(args.maxResults, 1), 20) : 10;

@@ -211,5 +211,94 @@ test('media-analyzer: analyzeMedia recupera resposta via salvage se o JSON vier 
   assert.equal(result.gesture, 'surprised');
 });
 
+test('media-analyzer: analyzeMedia para documento analisa código ou texto e gera resposta', async () => {
+  let capturedBody = null;
+  const mockFetch = async (url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              reply: 'Esse script Python tá bem escrito, mas faltou tratar erro ali!',
+              gesture: 'thinking',
+              actions: [{ type: 'gesture', name: 'thinking' }],
+              summary: 'Script python com lógica de automação',
+            }),
+          },
+        }],
+      }),
+    };
+  };
+
+  const codeSnippet = 'def main():\n    print("Hello Usami")\n';
+  const result = await analyzeMedia({
+    mimeType: 'text/plain',
+    dataBase64: Buffer.from(codeSnippet, 'utf8').toString('base64'),
+    filename: 'main.py',
+    userPrompt: 'O que acha deste código?',
+    apiKey: 'test-key',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(capturedBody.messages[0].content[0].type, 'text');
+  assert.match(capturedBody.messages[0].content[0].text, /Hello Usami/);
+  assert.match(result.reply, /script Python/i);
+  assert.equal(result.gesture, 'thinking');
+});
+
+test('media-analyzer: analyzeMedia para áudio transcreve fala e gera resposta', async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const audioSamplePath = path.resolve('tmp/ingest-demo/fala.wav');
+  let audioBase64 = '';
+  try {
+    const buf = await fs.readFile(audioSamplePath);
+    audioBase64 = buf.toString('base64');
+  } catch {
+    return; // Pula se arquivo de demonstração não existir
+  }
+
+  let capturedBody = null;
+  const mockFetch = async (url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              reply: 'Ouvi seu áudio! Entendi direitinho os movimentos.',
+              gesture: 'nod',
+              actions: [{ type: 'gesture', name: 'nod' }],
+              transcript: 'primeiro levante o braço direito',
+              summary: 'Instruções de movimento em áudio',
+            }),
+          },
+        }],
+      }),
+    };
+  };
+
+  const result = await analyzeMedia({
+    mimeType: 'audio/wav',
+    dataBase64: audioBase64,
+    filename: 'fala.wav',
+    userPrompt: 'O que eu disse?',
+    apiKey: 'test-key',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(capturedBody.messages[0].content[0].type, 'text');
+  assert.match(capturedBody.messages[0].content[0].text, /MENSAGEM DE ÁUDIO/);
+  assert.equal(result.reply, 'Ouvi seu áudio! Entendi direitinho os movimentos.');
+  assert.equal(result.gesture, 'nod');
+});
+
 
 

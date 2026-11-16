@@ -6,38 +6,55 @@
 // - Cache do pipeline em memória
 // - Fallback gracioso com vetor determinístico em modo de teste ou falha de modelo
 
-let pipelineInstance = null;
-let isLoading = false;
-
 const DEFAULT_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const EMBEDDING_DIMENSION = 384;
 
+function getSharedCache() {
+  if (!(globalThis.__SHARED_EMBEDDER_CACHE__ instanceof Map)) {
+    globalThis.__SHARED_EMBEDDER_CACHE__ = new Map();
+  }
+  return globalThis.__SHARED_EMBEDDER_CACHE__;
+}
+
+export function getSharedEmbedderCacheStats() {
+  const cache = getSharedCache();
+  return {
+    size: cache.size,
+    models: Array.from(cache.keys()),
+  };
+}
+
+export function clearSharedEmbedderCache() {
+  getSharedCache().clear();
+}
+
 /**
- * Obtém a instância do pipeline de extração de embeddings.
+ * Obtém a instância compartilhada do pipeline de extração de embeddings por modelo.
+ * Múltiplos tenants reutilizam os pesos ONNX já carregados em memória RAM.
  */
 async function getPipeline(modelName = DEFAULT_MODEL) {
-  if (pipelineInstance) return pipelineInstance;
-  if (isLoading) {
-    while (isLoading) {
-      await new Promise((r) => setTimeout(r, 50));
+  const cache = getSharedCache();
+  let entry = cache.get(modelName);
+  if (entry?.instance) return entry.instance;
+  if (entry?.loadingPromise) return entry.loadingPromise;
+
+  const loadingPromise = (async () => {
+    try {
+      const { pipeline } = await import('@xenova/transformers');
+      const instance = await pipeline('feature-extraction', modelName, {
+        quantized: true,
+      });
+      cache.set(modelName, { instance, loadingPromise: null });
+      return instance;
+    } catch (err) {
+      console.warn('[embedder] Falha ao carregar pipeline local ONNX:', err?.message || err);
+      cache.delete(modelName);
+      return null;
     }
-    return pipelineInstance;
-  }
+  })();
 
-  isLoading = true;
-  try {
-    const { pipeline } = await import('@xenova/transformers');
-    pipelineInstance = await pipeline('feature-extraction', modelName, {
-      quantized: true,
-    });
-  } catch (err) {
-    console.warn('[embedder] Falha ao carregar pipeline local ONNX:', err?.message || err);
-    pipelineInstance = null;
-  } finally {
-    isLoading = false;
-  }
-
-  return pipelineInstance;
+  cache.set(modelName, { instance: null, loadingPromise });
+  return loadingPromise;
 }
 
 /**

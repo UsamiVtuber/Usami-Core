@@ -31,3 +31,12 @@ export function sttTmpDir() {
   const value = process.env.USAMI_STT_TMP_DIR;
   return typeof value === 'string' && value.trim() ? value.trim() : dataPath('tmp');
 }
+
+const SAFE_CHARACTER_ID_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/i;
+
+export function characterScopedDir(characterId = 'usami-classic', baseDir = dataDir()) {
+  if (typeof characterId !== 'string' || !SAFE_CHARACTER_ID_RE.test(characterId)) {
+    throw new Error(`characterId inválido para caminho isolado: "${String(characterId ?? '')}"`);
+  }
+  return join(baseDir, 'characters', characterId);
+}

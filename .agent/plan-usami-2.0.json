@@ -6,7 +6,10 @@
     {
       "id": "S1",
       "title": "Auditar o runtime atual e fixar o mapa arquitetural do USAMI 2.0",
-      "covers": ["§11", "§9"],
+      "covers": [
+        "§11",
+        "§9"
+      ],
       "tasks": [
         "Mapear rotas e handlers de `server.mjs`, módulos de `src/`, stores de `data/` e suítes de `tests/`.",
         "Classificar o que já existe para Core, Planner, Memory, Tool Executor, Skill Manager e Self-Introspection.",
@@ -25,7 +28,13 @@
     {
       "id": "S2",
       "title": "Definir contratos puros do domínio agêntico",
-      "covers": ["§2.1", "§2.2", "§2.4", "§2.5", "§7"],
+      "covers": [
+        "§2.1",
+        "§2.2",
+        "§2.4",
+        "§2.5",
+        "§7"
+      ],
       "tasks": [
         "Criar `src/agent-contracts.js` com validadores para Intent, Plan/PlanStep, ToolSpec, SkillManifest, PermissionLevel (1–4) e ExecutionRecord.",
         "Definir o namespace `/api/agent/*` e documentar que `/api/plan` continua sendo o planner de animação.",
@@ -37,13 +46,19 @@
       "demoBoundary": "Schemas validam manifesto/plano válidos e rejeitam entradas inválidas nos testes.",
       "scopeNotes": "Somente contratos puros; sem persistência, rota ou LLM.",
       "status": "done",
-      "blockedBy": ["S1"],
+      "blockedBy": [
+        "S1"
+      ],
       "techGuidance": "ESM + `node:test`, sem dependências novas. Nomes de campo em inglês no código e textos de UI em pt-BR, como o restante do runtime."
     },
     {
       "id": "S3",
       "title": "Persistir memória operacional de projetos, tarefas e compromissos",
-      "covers": ["§2.3", "§10.10", "§10.11"],
+      "covers": [
+        "§2.3",
+        "§10.10",
+        "§10.11"
+      ],
       "tasks": [
         "Criar `src/operational-memory-store.js` com registros `{id, kind, title, status, dueAt, projectId, origin, relevance, createdAt, updatedAt}`.",
         "Persistir em `data/operational-memory.json` via `src/data-paths.js`, com escrita atômica e validação de contrato.",
@@ -55,13 +70,20 @@
       "demoBoundary": "Uma tarefa e um projeto criados via API podem ser consultados e atualizados; a suíte não toca em `data/` real.",
       "scopeNotes": "Operacional é a camada ausente do Memory Engine; curto prazo, episódica e semântica existentes não são reescritas. Nada sensível sem flag explícita.",
       "status": "done",
-      "blockedBy": ["S2"],
+      "blockedBy": [
+        "S2"
+      ],
       "techGuidance": "Seguir o padrão `createBondHandler({bondStore})`: handler recebe o store e o depósito é redirecionável. Nunca importar o caminho padrão de `data/` em teste."
     },
     {
       "id": "S4",
       "title": "Registrar e executar ferramentas com resultado verificado",
-      "covers": ["§2.4", "§10.3", "§10.8", "§10.9"],
+      "covers": [
+        "§2.4",
+        "§10.3",
+        "§10.8",
+        "§10.9"
+      ],
       "tasks": [
         "Criar `src/tool-registry.js` para registrar ToolSpec, descobrir por nome e validar parâmetros.",
         "Criar `src/tool-executor.js` com timeout, captura de erro e `ExecutionRecord` append-only em `data/executions.json` com teto.",
@@ -74,13 +96,18 @@
       "demoBoundary": "Executar `memory.search` retorna `ok: true` com linha no histórico; verificação falsa retorna `failed`.",
       "scopeNotes": "Nenhuma ferramenta de escrita nesta story. O executor não decide permissão — isso é S5.",
       "status": "done",
-      "blockedBy": ["S2"],
+      "blockedBy": [
+        "S2"
+      ],
       "techGuidance": "Contrato de ferramenta vem de S2. Reaproveitar os índices existentes em vez de criar outro banco; não duplicar `technique-store`."
     },
     {
       "id": "S5",
       "title": "Aplicar níveis de permissão e confirmação humana",
-      "covers": ["§7", "§10.7"],
+      "covers": [
+        "§7",
+        "§10.7"
+      ],
       "tasks": [
         "Criar `src/permission-gate.js` mapeando níveis 1–4 e negando nível 4 sem confirmação explícita.",
         "Criar fluxo `POST /api/agent/confirmations` com token de uso único e TTL; execução só aceita token válido.",
@@ -92,13 +119,19 @@
       "demoBoundary": "Ação de nível 4 é negada até a confirmação e passa depois; revogar volta a negar.",
       "scopeNotes": "Reutiliza a borda `x-usami-token` e a confirmação escrita já usada na memória; não usa `confirm()` do navegador.",
       "status": "done",
-      "blockedBy": ["S4"],
+      "blockedBy": [
+        "S4"
+      ],
       "techGuidance": "A confirmação é um segundo fator de autorização, não um segredo novo em arquivo. Toda rota nova passa por `isAllowedRequest`."
     },
     {
       "id": "S6",
       "title": "Implementar o Planner Engine de tarefas",
-      "covers": ["§2.2", "§10.1", "§10.2"],
+      "covers": [
+        "§2.2",
+        "§10.1",
+        "§10.2"
+      ],
       "tasks": [
         "Criar `src/task-planner.js` que decompõe objetivo em passos com dependências, esforço, prioridade e informações ausentes.",
         "Gerar briefing pré-execução quando o plano exceder o limiar configurável.",
@@ -110,13 +143,20 @@
       "demoBoundary": "Um objetivo recebido via API devolve plano com etapas e briefing persistido.",
       "scopeNotes": "Distinto de `/api/plan` (planner de animação). Núcleo determinístico; LLM apenas por adapter injetável.",
       "status": "done",
-      "blockedBy": ["S2", "S3"],
+      "blockedBy": [
+        "S2",
+        "S3"
+      ],
       "techGuidance": "`generatePlan` injetável para testes sem rede. Não usar o orçamento do turno de chat para planejamento longo."
     },
     {
       "id": "S7",
       "title": "Criar catálogo de Skills com manifesto e estados",
-      "covers": ["§4", "§2.5", "§10.5"],
+      "covers": [
+        "§4",
+        "§2.5",
+        "§10.5"
+      ],
       "tasks": [
         "Implementar schema do manifesto (id, nome, versão, ferramentas, permissões, dependências, parâmetros, instruções, testes, estado).",
         "Criar loader de `data/skills/` com estados `installed | available | pending | disabled`.",
@@ -128,13 +168,20 @@
       "demoBoundary": "O catálogo lista a skill piloto por estado e explica por que uma skill inválida não pode ativar.",
       "scopeNotes": "Apenas descoberta e leitura; instalação fica em S8.",
       "status": "done",
-      "blockedBy": ["S2"],
+      "blockedBy": [
+        "S2"
+      ],
       "techGuidance": "Carregar manifestos como JSON validado por S2; nunca importar código da skill só para ler o manifesto."
     },
     {
       "id": "S8",
       "title": "Fechar o fluxo de proposta, autorização e instalação de Skill",
-      "covers": ["§4", "§2.5", "§10.6", "§10.7"],
+      "covers": [
+        "§4",
+        "§2.5",
+        "§10.6",
+        "§10.7"
+      ],
       "tasks": [
         "Implementar `POST /api/agent/skills/proposals` com benefício, riscos, dependências e permissões solicitadas.",
         "Exigir confirmação humana (S5) para instalar; status vai de `pending` para `installed`.",
@@ -146,13 +193,21 @@
       "demoBoundary": "Uma proposta só entra no catálogo ativo após autorização e teste isolado aprovado.",
       "scopeNotes": "Nesta versão a implementação da skill é do dev; o runtime instala apenas pacotes validados. Sem execução arbitrária de código do modelo.",
       "status": "done",
-      "blockedBy": ["S7", "S5"],
+      "blockedBy": [
+        "S7",
+        "S5"
+      ],
       "techGuidance": "Isolamento = cwd temporário, timeout e sem acesso a `data/` real. Falha de teste nunca promove a skill."
     },
     {
       "id": "S9",
       "title": "Roteamento de intenção e orquestração no Usami Core",
-      "covers": ["§2.1", "§10.1", "§10.3", "§10.8"],
+      "covers": [
+        "§2.1",
+        "§10.1",
+        "§10.3",
+        "§10.8"
+      ],
       "tasks": [
         "Criar `src/agent-core.js` que classifica mensagem em conversa, solicitação operacional ou tarefa complexa.",
         "Encaminhar operacional para o Tool Registry e complexo para o Planner + briefing.",
@@ -164,13 +219,22 @@
       "demoBoundary": "Mensagem de conversa continua idêntica; pedido operacional gera execução/plano rastreável.",
       "scopeNotes": "Não substituir o caminho ativo por `FlowExecutor`. Persona, JSON do provedor e latência do balão não mudam.",
       "status": "done",
-      "blockedBy": ["S4", "S6"],
+      "blockedBy": [
+        "S4",
+        "S6"
+      ],
       "techGuidance": "Classificador determinístico primeiro; LLM injetável para os casos ambíguos. Respeitar `USAMI_TURN_DEADLINE_MS` e o hedge de provedores."
     },
     {
       "id": "S10",
       "title": "Entregar a skill operacional Personal Planner",
-      "covers": ["§5-A", "§10.1", "§10.2", "§10.8", "§10.10"],
+      "covers": [
+        "§5-A",
+        "§10.1",
+        "§10.2",
+        "§10.8",
+        "§10.10"
+      ],
       "tasks": [
         "Publicar manifesto `personal-planner` com ferramentas, permissões nível 2–3 e testes declarados.",
         "Implementar criar/atualizar tarefa, priorizar, montar cronograma e detectar conflito de horário.",
@@ -182,13 +246,21 @@
       "demoBoundary": "Usami recebe 'organize minha semana' e devolve cronograma com conflitos apontados e tarefas persistidas.",
       "scopeNotes": "Primeira skill operacional da Fase A. Agenda e e-mail externos ficam fora; o cronograma usa a memória operacional local.",
       "status": "done",
-      "blockedBy": ["S6", "S8", "S3"],
+      "blockedBy": [
+        "S6",
+        "S8",
+        "S3"
+      ],
       "techGuidance": "A skill consome contratos e ferramentas; não acessa `data/` diretamente. Saída deve passar por `verify()`."
     },
     {
       "id": "S11",
       "title": "Implementar Self-Introspection somente leitura",
-      "covers": ["§3", "§10.4", "§10.5"],
+      "covers": [
+        "§3",
+        "§10.4",
+        "§10.5"
+      ],
       "tasks": [
         "Criar `src/self-introspection.js` que monta módulos, ferramentas, skills, versões e limitações a partir de fontes allowlisted.",
         "Registrar a ferramenta `self.describe` (nível 1) no Tool Registry e a rota `GET /api/agent/self`.",
@@ -200,13 +272,19 @@
       "demoBoundary": "Perguntar 'quais ferramentas você tem?' devolve a lista real e aponta limitações conhecidas.",
       "scopeNotes": "Somente leitura: alteração de código segue o fluxo proposta→risco→autorização de S8. Não ler segredos.",
       "status": "done",
-      "blockedBy": ["S4", "S7"],
+      "blockedBy": [
+        "S4",
+        "S7"
+      ],
       "techGuidance": "Allowlist explícita de arquivos (docs, package.json, manifests). Nunca varrer o vault nem o `.env`."
     },
     {
       "id": "S12",
       "title": "Sugestões proativas contextuais separadas de execução",
-      "covers": ["§6", "§10.12"],
+      "covers": [
+        "§6",
+        "§10.12"
+      ],
       "tasks": [
         "Adicionar fontes de sugestão ao `proactive-engine` (tarefa atrasada, reunião próxima, projeto parado, lacuna de skill) por injeção de relógio e dados.",
         "Persistir o ciclo `suggested → planned → authorized → verified` em `data/suggestions.json`.",
@@ -218,13 +296,20 @@
       "demoBoundary": "Tarefa vencida gera uma sugestão única; aceitar cria plano e muda o estado da sugestão.",
       "scopeNotes": "Não duplicar o motor de idle/afinidade; sugestão não é ordem de execução. Execução continua exigindo permissão.",
       "status": "done",
-      "blockedBy": ["S9", "S10"],
+      "blockedBy": [
+        "S9",
+        "S10"
+      ],
       "techGuidance": "`proactive-engine.js` já cobre idle, DND, afinidade e `proactive_say`; estender com fontes injetáveis sem alterar o comando de fala existente."
     },
     {
       "id": "S13",
       "title": "Entregar a skill Daily Briefing",
-      "covers": ["§5-C", "§10.11", "§10.12"],
+      "covers": [
+        "§5-C",
+        "§10.11",
+        "§10.12"
+      ],
       "tasks": [
         "Criar manifesto `daily-briefing` com permissão nível 1 e teste declarado.",
         "Montar o briefing com compromissos, tarefas prioritárias, pendências e projetos em andamento a partir da memória operacional, planos e execuções.",
@@ -236,13 +321,20 @@
       "demoBoundary": "Gerar o briefing do dia lista apenas dados reais e marca o que está pendente.",
       "scopeNotes": "Sem integrações externas; não inventar compromissos quando a base está vazia.",
       "status": "done",
-      "blockedBy": ["S10", "S3"],
+      "blockedBy": [
+        "S10",
+        "S3"
+      ],
       "techGuidance": "Saída determinística primeiro para o teste não depender de rede; o teto de ~220 caracteres vale para o chat, não para o briefing."
     },
     {
       "id": "S14",
       "title": "Adicionar Central de Skills e Histórico de Execuções na interface",
-      "covers": ["§8", "§10.5", "§10.9"],
+      "covers": [
+        "§8",
+        "§10.5",
+        "§10.9"
+      ],
       "tasks": [
         "Criar painel de Skills (instaladas, disponíveis, pendentes, desativadas) no padrão de painéis existente.",
         "Criar histórico de execuções com status verificado/falho, horário e motivo.",
@@ -254,13 +346,21 @@
       "demoBoundary": "A usuária vê as skills por estado e o histórico real de execuções, sem placeholders.",
       "scopeNotes": "Sem novo design system; reutilizar tokens e anatomia de painel. Sem dados inventados em estado vazio.",
       "status": "done",
-      "blockedBy": ["S7", "S8", "S4"],
+      "blockedBy": [
+        "S7",
+        "S8",
+        "S4"
+      ],
       "techGuidance": "Seguir `Usami.jsx`/`BondPanel.jsx` para foco e fechamento mútuo dos drawers. Testar no navegador, não só no build."
     },
     {
       "id": "S15",
       "title": "Adicionar Permissões, Confirmações e Notificações na interface",
-      "covers": ["§8", "§7", "§10.12"],
+      "covers": [
+        "§8",
+        "§7",
+        "§10.12"
+      ],
       "tasks": [
         "Criar painel de permissões por ferramenta/integração com nível e ação de revogar.",
         "Criar fila de confirmações pendentes com aprovar/negar usando token de uso único.",
@@ -272,13 +372,21 @@
       "demoBoundary": "A usuária autoriza uma ação sensível, vê a execução no histórico e revoga o acesso depois.",
       "scopeNotes": "Depende de S5/S12/S13. Não expor token nem credencial na UI; confirmação é ação explícita.",
       "status": "done",
-      "blockedBy": ["S5", "S12", "S13"],
+      "blockedBy": [
+        "S5",
+        "S12",
+        "S13"
+      ],
       "techGuidance": "Reutilizar o padrão de confirmação escrita da aba Memória quando a ação for irreversível."
     },
     {
       "id": "S16",
       "title": "Ingerir chat ao vivo (Twitch) como entrada não confiável",
-      "covers": ["Skill de streaming", "S5 (permissões)", "D2 (borda + token)"],
+      "covers": [
+        "Skill de streaming",
+        "S5 (permissões)",
+        "D2 (borda + token)"
+      ],
       "tasks": [
         "Criar `src/live-chat/` com adapter injetável (`connect`, `onMessage`, `disconnect`) e evento normalizado `{platform, user, text, ts, badges, isMod, trusted:false}`.",
         "Implementar o adapter Twitch por WebSocket (IRC/EventSub) com OAuth de leitura guardado no `.env`/cofre; YouTube Live Chat fica fora deste sprint.",
@@ -297,7 +405,12 @@
     {
       "id": "S17",
       "title": "Entregar a skill live-companion com fila de fala e guardrails",
-      "covers": ["§5 (skills)", "S4/S5 (tool + permissões)", "S8 (instalação)", "AGENTS.md (TTS uma em voo)"],
+      "covers": [
+        "§5 (skills)",
+        "S4/S5 (tool + permissões)",
+        "S8 (instalação)",
+        "AGENTS.md (TTS uma em voo)"
+      ],
       "tasks": [
         "Publicar `skills/live-companion/skill.json` (`usami.agent.skill.v1`) com `live.say` (nível 2), `live.caption` (nível 1), dependência da sessão de S16 e teste declarado.",
         "Tratar mensagem do chat como dado, nunca instrução: prompt separado com delimitadores, comandos `!x` fora do texto, tentativa de injeção recusada e registrada; chat jamais escolhe ferramenta nem nível ≥2.",
@@ -310,13 +423,19 @@
       "demoBoundary": "Habilitado `live.say`, uma mensagem do chat gera uma única frase curta em voz alta; 'ignore as instruções' é recusado e fica registrado.",
       "scopeNotes": "Falar é o único efeito. Chat não escreve memória/fatos, não lê vault e não dispara ferramenta de nível 3–4. Nada de memória privada, summaries ou contexto pessoal no prompt da live — o chat é público. A sessão só fala se o Lucas autorizar (start) e para no stop.",
       "status": "backlog",
-      "blockedBy": ["S16"],
+      "blockedBy": [
+        "S16"
+      ],
       "techGuidance": "A regra de uma requisição TTS em voo e o `onFirstAudio` são invariantes de AGENTS.md; não criar segundo pipeline de voz. Skill consome contrato e executor, nunca acessa `data/` direto, e o `verify()` da fala confirma que a síntese realmente saiu."
     },
     {
       "id": "S18",
       "title": "Superfície de transmissão e ensaio em live privada",
-      "covers": ["Overlay existente", "D2 (borda)", "Operação local"],
+      "covers": [
+        "Overlay existente",
+        "D2 (borda)",
+        "Operação local"
+      ],
       "tasks": [
         "Criar uma superfície de captura sem controles (ex.: `/live`): avatar + legenda, fundo transparente, sem token no bundle e sem acesso a painéis.",
         "Medir browser source no OBS (render VRM já existente) contra captura da janela do desktop e registrar a escolha com números de CPU/GPU.",
@@ -329,13 +448,19 @@
       "demoBoundary": "Uma live privada mostra a Usami em source transparente respondendo ao chat com a voz oficial, e a queda da sessão falha fechado (silêncio, não fala solta).",
       "scopeNotes": "Reaproveita avatar e overlay existentes; não é app de streaming. Sem relay em nuvem, sem RTMP próprio, sem upload de dados para fora da máquina. YouTube e multi-plataforma ficam para a fase seguinte.",
       "status": "backlog",
-      "blockedBy": ["S17"],
+      "blockedBy": [
+        "S17"
+      ],
       "techGuidance": "O overlay do LoL é Win32 in-game e não serve como fonte de captura; decidir entre browser source e captura de janela por medição, não por preferência. Rotas novas seguem a borda D2 e o proxy do Vite."
     },
     {
       "id": "S19",
       "title": "Bot Discord da Usami + monitoramento/alertas n8n",
-      "covers": ["Infra n8n", "Observabilidade", "Discord integration"],
+      "covers": [
+        "Infra n8n",
+        "Observabilidade",
+        "Discord integration"
+      ],
       "tasks": [
         "Criar bot Discord (discord.js) com comandos slash: /usami status, /usami ping, /usami memory, /usami n8n-health",
         "Endpoint no server.mjs: POST /api/discord/webhook (recebe interações) + GET /api/health/n8n (check n8n + workflows)",
@@ -351,6 +476,302 @@
       "status": "backlog",
       "blockedBy": [],
       "techGuidance": "discord.js v14 (ESM), interactions endpoint via createDiscordHandler({store}) padrão D2. Healthchecks UUIDs no vault (plane-api-key style). Error Workflow n8n usa nó HTTP Request para webhook Discord. Healthcheck: curl -fsS https://hc-ping.com/UUID no último nó (sucesso). Rate limit: 1 req/s no bot, cache 30s no /n8n-health."
+    },
+    {
+      "id": "S20",
+      "title": "[Fase 0] Desacoplamento de Singletons e Context Container em server.mjs",
+      "covers": [
+        "RFC-001 §1.1",
+        "RFC-001 §1.3",
+        "White-Labeling"
+      ],
+      "priority": "urgent",
+      "startDate": "2026-11-16",
+      "targetDate": "2026-11-17",
+      "tasks": [
+        "Substituir import estático 'import persona from ./src/persona.js' por container dinâmico CharacterContext.",
+        "Desacoplar instâncias globais em server.mjs (personalityStore, bondCore, lancedbStore) em registro multi-tenant por characterId.",
+        "Parametrizar endpoints HTTP e canais WebSocket para resolver o tenant via cabeçalho x-character-id com fallback seguro para usami-classic.",
+        "Garantir ciclo de vida isolado: recarga ou falha de uma instância não derruba o processo principal do Node.js.",
+        "Validar retrocompatibilidade total com as rotas legadas em tests/character-context.test.mjs."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "server.mjs sobe sem persona fixa; requisição com x-character-id: test-dummy carrega contexto isolado sem afetar usami-classic.",
+      "scopeNotes": "Fase 0 - Dia 1/2 (Sprint 16/11 a 22/11). Refatoração estrita da camada de inicialização do servidor. Sem alterações nos contratos de resposta.",
+      "status": "done",
+      "blockedBy": [],
+      "techGuidance": "Padrão Dependency Injection / Factory Container. Não usar variáveis globais de módulo; todo handler deve receber seu CharacterContext explícito."
+    },
+    {
+      "id": "S21",
+      "title": "[Fase 0] Schema e Parser Declarativo character.manifest.json com Validação Zod",
+      "covers": [
+        "RFC-001 §1.2",
+        "Declarative Persona"
+      ],
+      "priority": "urgent",
+      "startDate": "2026-11-17",
+      "targetDate": "2026-11-18",
+      "tasks": [
+        "Criar src/character-manifest-schema.js com schemas Zod completos para metadata, identity, voice, avatar, memory e personality.",
+        "Implementar src/character-loader.js para leitura assíncrona de data/characters/${id}/character.manifest.json.",
+        "Migrar dados da Usami atual para data/characters/usami-classic/character.manifest.json mantendo todas as diretrizes de prompt e arquétipo.",
+        "Implementar validação estrita em runtime: rejeitar manifestos malformados com diagnóstico detalhado sem crashar o processo.",
+        "Criar suíte completa de testes unitários em tests/character-manifest.test.mjs cobrindo schemas válidos, parciais e inválidos."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Loader carrega e valida o manifesto usami-classic com 100% de conformidade e rejeita manifestos corrompidos com erro amigável.",
+      "scopeNotes": "Fase 0 - Dia 2/3 (Sprint 16/11 a 22/11). Somente contratos e validação do manifesto em disco. Sem persistência vetorial nesta story.",
+      "status": "done",
+      "blockedBy": [
+        "S20"
+      ],
+      "techGuidance": "Usar Zod para validação declarativa com tipagem e mensagens em pt-BR nos erros de schema. Seguir o modelo JSON Schema especificado na RFC-001."
+    },
+    {
+      "id": "S22",
+      "title": "[Fase 0] Isolamento Multi-Tenant do LanceDB por Namespace de Personagem",
+      "covers": [
+        "RFC-001 §1.3",
+        "Memory Isolation"
+      ],
+      "priority": "high",
+      "startDate": "2026-11-18",
+      "targetDate": "2026-11-19",
+      "tasks": [
+        "Refatorar src/lancedb-store.js e src/rag.js para suportar caminho base isolado por tenant: data/characters/${characterId}/memory/lancedb.",
+        "Particionar tabelas vetoriais com identificador do personagem (memories_${characterId}).",
+        "Implementar cache estático global para pesos do modelo ONNX em src/local-embedder.js, compartilhando pesos sem duplicar RAM/VRAM.",
+        "Garantir isolamento estrito de buscas e inserções vetoriais entre múltiplos tenants.",
+        "Cobrir concorrência e isolamento em tests/lancedb-multitenant.test.mjs com dois personagens simultâneos em diretório temporário."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Inserções semânticas do personagem A nunca são retornadas em buscas realizadas pelo personagem B.",
+      "scopeNotes": "Fase 0 - Dia 3/4 (Sprint 16/11 a 22/11). Multi-tenancy local de base vetorial. O modelo ONNX de embedding é compartilhado para preservar memória RAM.",
+      "status": "done",
+      "blockedBy": [
+        "S20",
+        "S21"
+      ],
+      "techGuidance": "Evitar criar múltiplas instâncias de pipeline do @xenova/transformers. Cache estático via globalThis.__SHARED_EMBEDDER_CACHE__ com instâncias de banco isoladas."
+    },
+    {
+      "id": "S23",
+      "title": "[Fase 0] Abstração IMemoryProvider e NullMemoryProvider (Toggle Opt-In)",
+      "covers": [
+        "RFC-001 §1.3",
+        "Opt-In Performance"
+      ],
+      "priority": "high",
+      "startDate": "2026-11-19",
+      "targetDate": "2026-11-20",
+      "tasks": [
+        "Definir interface canônica IMemoryProvider com métodos initialize, query, store e close.",
+        "Encapsular LanceDB no LanceDbMemoryProvider respeitando a interface.",
+        "Implementar NullMemoryProvider com operações no-op imediatas (retornando arrays vazios sem I/O ou ONNX).",
+        "Ligar flag memory.ragEnabled do manifesto do personagem para injetar o provedor correspondente no container.",
+        "Otimizar injeção de prompt de sistema: pular busca RAG inteiramente quando o provedor for nulo.",
+        "Medir redução de latência e consumo de I/O em tests/memory-optin.test.mjs."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Instância com ragEnabled: false responde imediatamente sem encostar no disco ou invocar transformers, liberando 100% dos recursos de RAG.",
+      "scopeNotes": "Fase 0 - Dia 4/5 (Sprint 16/11 a 22/11). Padrão Null Object. Desacopla o loop conversacional da presença mandatória de memória vetorial.",
+      "status": "done",
+      "blockedBy": [
+        "S22"
+      ],
+      "techGuidance": "Seguir o princípio de substituição de Liskov. O manipulador de chat nunca deve checar if (ragEnabled); ele apenas invoca memoryProvider.query()."
+    },
+    {
+      "id": "S24",
+      "title": "[Fase 0] Desacoplamento Dinâmico de Vozes, Prosódia e Emoções",
+      "covers": [
+        "RFC-001 §1.1",
+        "RFC-001 §1.2",
+        "TTS Flexibility"
+      ],
+      "priority": "high",
+      "startDate": "2026-11-20",
+      "targetDate": "2026-11-21",
+      "tasks": [
+        "Refatorar src/tts-prosody.js para receber configurações dinâmicas de voz/prosódia a partir do manifesto do personagem ativo.",
+        "Suportar engines declaradas no manifesto (gemini_multimodal, elevenlabs, edge_tts, vits_local).",
+        "Remover vozes fixas (Puck, Zephyr, Aoede) do código-fonte central e migrá-las para a seção voice do usami-classic.",
+        "Implementar fallback seguro de síntese caso a voz especificada não esteja disponível no provedor.",
+        "Validar geração correta de parâmetros de síntese em tests/tts-prosody-dynamic.test.mjs."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Dois personagens distintos geram payloads de TTS com vozes, pitches e taxas de fala independentes sem colisão.",
+      "scopeNotes": "Fase 0 - Dia 5/6 (Sprint 16/11 a 22/11). Flexibilização de síntese de voz. Mantém o invariant de exatamente uma requisição TTS em voo.",
+      "status": "done",
+      "blockedBy": [
+        "S21"
+      ],
+      "techGuidance": "O motor de TTS deve ler a prosódia do contexto do personagem. Manter a fila de reprodução sequencial e lip-sync sem alterações na camada de áudio."
+    },
+    {
+      "id": "S25",
+      "title": "[Fase 0] Suíte de Testes Automatizados de Isolamento Multi-Tenant & Validação",
+      "covers": [
+        "RFC-001 §1.1-§1.3",
+        "RFC-001 §6.2",
+        "Quality Gate"
+      ],
+      "priority": "urgent",
+      "startDate": "2026-11-21",
+      "targetDate": "2026-11-22",
+      "tasks": [
+        "Construir teste de integração de ponta a ponta tests/white-label-e2e.test.mjs instanciando dois personagens com identidades e memórias opostas.",
+        "Verificar que a alteração de personalidade ou memórias do personagem A não vaza para o personagem B.",
+        "Testar concorrência de requisições simultâneas direcionadas a personagens distintos.",
+        "Verificar ausência de vazamento de memória (leak de listeners de eventos e conexões abertas do LanceDB).",
+        "Integrar execução dos testes no npm test garantindo cobertura completa da Fase 0."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "npm test passa com 100% de sucesso incluindo todos os testes de isolamento multi-tenant, sem quebra de retrocompatibilidade com a Usami.",
+      "scopeNotes": "Fase 0 - Dia 6/7 (Sprint 16/11 a 22/11). Quality Gate mandatório para encerramento da Fase 0.",
+      "status": "done",
+      "blockedBy": [
+        "S20",
+        "S21",
+        "S22",
+        "S23",
+        "S24"
+      ],
+      "techGuidance": "Usar isolamento com pastas temporárias via mkdtemp nos testes. Não tocar em arquivos reais de data/ durante a suíte."
+    },
+    {
+      "id": "S26",
+      "title": "[Fase 0] Integração com Cliente Desktop e Migração Completa da Usami",
+      "covers": [
+        "RFC-001 §1.1",
+        "RFC-001 §6.2",
+        "Desktop Verification"
+      ],
+      "priority": "high",
+      "startDate": "2026-11-22",
+      "targetDate": "2026-11-22",
+      "tasks": [
+        "Ajustar chamadas da API no cliente GPUI/Rust (usami-desktop) para enviar cabeçalho x-character-id ou consumir /api/characters/active.",
+        "Desacoplar textos fixos de Usami nas telas de HUD e VN Bond, consumindo metadados do personagem ativo.",
+        "Validar carregamento dinâmico do modelo VRM a partir do caminho apontado no manifesto do avatar.",
+        "Testar hot-reload de personagem no frontend sem travamentos do renderer WGPU.",
+        "Documentar guia de criação de novo personagem em docs/character-creation-guide.md."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Cliente desktop inicia conectado ao backend white-label, exibindo Usami via manifesto com fidelidade total e permitindo alternar de personagem.",
+      "scopeNotes": "Fase 0 - Conclusão do Sprint de 1 semana (Sprint 16/11 a 22/11). Entrega da fundação white-label operacional de ponta a ponta.",
+      "status": "done",
+      "blockedBy": [
+        "S25"
+      ],
+      "techGuidance": "Preservar quirks do GPUI 0.2.2 (occlude e identificadores estáveis). Seguir estritamente o KNOWN_ERRORS.md."
+    },
+    {
+      "id": "S27",
+      "title": "[Fase 1] Pipeline de Rigging Automático VRM & Multi-Avatar Stage",
+      "covers": [
+        "RFC-001 §4",
+        "VRM 1.0",
+        "Auto-Rigging"
+      ],
+      "priority": "high",
+      "startDate": "2026-11-23",
+      "targetDate": "2026-11-29",
+      "tasks": [
+        "Unificar parsers VRM 0.x e 1.0 dentro de gpui-vrm/src/loader.rs.",
+        "Implementar algoritmo vetorial de detecção de A-Pose vs T-Pose e rotação de compensação no ombro.",
+        "Implementar seletor de expressões em 3 camadas (Presets, FACS e Fuzzy Token Matching).",
+        "Criar filtro de conflito de piscada (Eyes-Closed Guard) para suprimir blink automático quando os olhos já estiverem fechados.",
+        "Habilitar renderização de múltiplos avatares no mesmo palco WGPU."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Carregar qualquer modelo VRM 0.x ou 1.0 da internet sem ajuste manual de bones e com expressões mapeadas automaticamente.",
+      "scopeNotes": "Fase 1 do Roadmap da RFC-001.",
+      "status": "backlog",
+      "blockedBy": [
+        "S26"
+      ],
+      "techGuidance": "Manter coordenadas glTF padronizadas e respeitar especificações do VRMC_vrm e VRMC_springBone."
+    },
+    {
+      "id": "S28",
+      "title": "[Fase 2] Meta-Agente de Engenharia & Sandbox Declarativo Ring 0/2",
+      "covers": [
+        "RFC-001 §2",
+        "Self-Modifying Backend",
+        "Sandboxing"
+      ],
+      "priority": "medium",
+      "startDate": "2026-11-30",
+      "targetDate": "2026-12-06",
+      "tasks": [
+        "Implementar separação estrita de anéis de privilégio (Ring 0 imutável vs Ring 2 mutável).",
+        "Criar toolset restrito do meta-agente (inspect_manifest, propose_manifest_patch, dry_run_validation).",
+        "Implementar FlowExecutor para execução de rotas declarativas baseadas em DAG sem eval arbitrário.",
+        "Implementar sistema de snapshots transacionais atômicos com probe de verificação canary de 60s e rollback automático."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Usuário pede para o meta-agente alterar parâmetros de personalidade e o sistema aplica com validação e rollback em caso de falha.",
+      "scopeNotes": "Fase 2 do Roadmap da RFC-001.",
+      "status": "backlog",
+      "blockedBy": [
+        "S26"
+      ],
+      "techGuidance": "Nenhum código arbitrário pode ser injetado no Ring 0. Todas as mutações passam por validação de schema Zod antes de persistir."
+    },
+    {
+      "id": "S29",
+      "title": "[Fase 3] Desktop OS-Style Shell & Conectores Plug-and-Play",
+      "covers": [
+        "RFC-001 §3",
+        "OS Desktop Shell",
+        "Plugin Ecosystem"
+      ],
+      "priority": "medium",
+      "startDate": "2026-12-07",
+      "targetDate": "2026-12-13",
+      "tasks": [
+        "Construir gerenciador de janelas flutuantes com foco dinâmico, arrasto e redimensionamento no GPUI.",
+        "Garantir uso de .occlude() em todas as janelas para evitar vazamento de cliques para o canvas 3D.",
+        "Implementar fluxo de autenticação OAuth2 PKCE com porta de loopback local e armazenamento seguro no keyring nativo.",
+        "Implementar seletor semântico Top-K de ferramentas para injeção dinâmica no prompt do LLM."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Janelas de plugins móveis sobre a viewport 3D sem conflito de cliques e com conectores OAuth2 autenticando via keychain.",
+      "scopeNotes": "Fase 3 do Roadmap da RFC-001.",
+      "status": "backlog",
+      "blockedBy": [
+        "S27",
+        "S28"
+      ],
+      "techGuidance": "Evitar overflow_hidden na raiz do WindowManager e manter IDs de componentes estáveis para evitar recriação de inputs."
+    },
+    {
+      "id": "S30",
+      "title": "[Fase 4] Rede Federada, Collabs ao Vivo & Agendamento Autônomo",
+      "covers": [
+        "RFC-001 §5",
+        "Agent Federation",
+        "Collab Engine"
+      ],
+      "priority": "medium",
+      "startDate": "2026-12-14",
+      "targetDate": "2026-12-20",
+      "tasks": [
+        "Desenvolver cliente WebSocket federado com identidade criptográfica baseada em chaves assimétricas Ed25519 (did:key).",
+        "Implementar mecanismo de FloorLease e otimização de latência PRE_YIELD com prefetching especulativo de fala e áudio.",
+        "Implementar Context Firewall para contenção de prompt injection em mensagens provenientes de avatares parceiros.",
+        "Integrar módulo de negociação autônoma de calendário com verificação de disponibilidade zero-knowledge (apenas blocos livres)."
+      ],
+      "executionFit": "fits-one-run",
+      "demoBoundary": "Duas instâncias independentes realizam collab ao vivo sincronizada com transições de fala fluidas (<150ms) e sem sobreposição.",
+      "scopeNotes": "Fase 4 do Roadmap da RFC-001.",
+      "status": "backlog",
+      "blockedBy": [
+        "S29"
+      ],
+      "techGuidance": "Toda mensagem de outro agente é untrusted. Jamais executar ferramentas administrativas a partir de diálogos de parceiros."
     }
   ]
 }

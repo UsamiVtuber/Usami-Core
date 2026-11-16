@@ -152,3 +152,75 @@ export function resolveGeminiStyleClause(styleId) {
   return [regClause, emoClause].filter(Boolean).join(', ');
 }
 
+export const DEFAULT_USAMI_VOICE_INSTRUCTION =
+  '[em português do Brasil, voz de personagem de anime, muito aguda e brilhante, timbre leve e expressivo, dicção rápida e nítida] ';
+
+/**
+ * Resolve dinamicamente as configurações de voz, modelo e prosódia a partir do
+ * manifesto do personagem ativo, mantendo fallback seguro quando campos faltarem.
+ * @param {object|null|undefined} manifest
+ * @param {string} [styleId='neutral']
+ * @param {Object} [options]
+ */
+export function resolveCharacterVoiceProsody(
+  manifest,
+  styleId = 'neutral',
+  {
+    fallbackVoice = 'Kore',
+    fallbackInstruction = DEFAULT_USAMI_VOICE_INSTRUCTION,
+  } = {},
+) {
+  const voiceCfg = manifest?.voice && typeof manifest.voice === 'object' ? manifest.voice : {};
+  const rawStyle = String(styleId ?? 'neutral').trim().toLowerCase() || 'neutral';
+  const prosodyMap = voiceCfg.prosodyMap && typeof voiceCfg.prosodyMap === 'object' ? voiceCfg.prosodyMap : null;
+
+  let override = null;
+  if (prosodyMap) {
+    if (Object.hasOwn(prosodyMap, rawStyle)) {
+      override = prosodyMap[rawStyle];
+    } else {
+      const sep = rawStyle.indexOf('_');
+      if (sep > 0) {
+        const baseEmotion = rawStyle.slice(sep + 1);
+        if (Object.hasOwn(prosodyMap, baseEmotion)) {
+          override = prosodyMap[baseEmotion];
+        }
+      }
+    }
+  }
+
+  const engine = typeof voiceCfg.engine === 'string' && voiceCfg.engine.trim()
+    ? voiceCfg.engine.trim()
+    : 'gemini_multimodal';
+  const voice = (typeof override?.voice === 'string' && override.voice.trim())
+    ? override.voice.trim()
+    : (typeof voiceCfg.defaultVoice === 'string' && voiceCfg.defaultVoice.trim()
+      ? voiceCfg.defaultVoice.trim()
+      : fallbackVoice);
+  const model = typeof voiceCfg.model === 'string' && voiceCfg.model.trim()
+    ? voiceCfg.model.trim()
+    : null;
+  const pitchOffset = Number.isFinite(override?.pitchOffset)
+    ? override.pitchOffset
+    : (Number.isFinite(voiceCfg.pitchOffset) ? voiceCfg.pitchOffset : 0);
+  const speakingRate = Number.isFinite(override?.rate)
+    ? override.rate
+    : (Number.isFinite(voiceCfg.speakingRate) ? voiceCfg.speakingRate : 1.0);
+  const styleClause = override?.styleClause !== undefined
+    ? String(override.styleClause)
+    : resolveGeminiStyleClause(rawStyle);
+  const baseInstruction = voiceCfg.baseInstruction !== undefined
+    ? String(voiceCfg.baseInstruction)
+    : fallbackInstruction;
+
+  return {
+    engine,
+    voice,
+    model,
+    pitchOffset,
+    speakingRate,
+    styleClause,
+    baseInstruction,
+  };
+}
+

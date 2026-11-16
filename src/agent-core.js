@@ -95,7 +95,7 @@ function deriveProposalTitle(message) {
   return fragment.slice(0, 180);
 }
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;
-const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status)\b/;
+const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|explic\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|arquitetura|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status|sua arquitetura)\b/;
 
 const COMPLEX_PATTERNS = [
   /\b(planej\w*|cronograma|roteiro|plano|etapas?|passo a passo|checklist|decompor|roadmap)\b/,
@@ -1289,10 +1289,12 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
     } catch {
       serialized = String(turn.result ?? '');
     }
-    const clean = redactSecrets(serialized).slice(0, maxChars);
+    const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect';
+    const effectiveMaxChars = isDetailedIntrospection ? Math.max(maxChars, 4000) : maxChars;
+    const clean = redactSecrets(serialized).slice(0, effectiveMaxChars);
     let toolInstruction = '';
     if (turn.tool === 'self.describe') {
-      toolInstruction = ' Confirme diretamente quais skills/ferramentas reais você possui usando essa lista (nunca diga que não sabe nem peça ao usuário para contar o que mudou).';
+      toolInstruction = ' EXCEÇÃO DE TAMANHO PARA ESTE TURNO: ignore qualquer regra anterior de 1-2 frases curtas. Entregue uma explicação completa e organizada (entre 400 e 1400 caracteres) detalhando: 1) Visão geral dos módulos em src/ (core, agent, voice, memory, animation, ui); 2) Lista real das skills ativas pelo nome; 3) Exemplos das ferramentas ativas; 4) Limitações reais conhecidas (nunca invente nada nem peça ao usuário para contar o que mudou).';
     } else if (turn.tool === 'code.propose') {
       toolInstruction = ' A proposta de código JÁ FOI ENVIADA com sucesso agora para o Code Agent/GitHub. Confirme o título e envio diretamente. NUNCA diga que você vai inspecionar, olhar ou programar o código agora, pois quem implementa é o Code Agent!';
     } else if (turn.tool === 'code.proposals') {
@@ -1306,7 +1308,10 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
     } else if (turn.tool === 'code.inspect') {
       toolInstruction = ' Avalie e comente diretamente o conteúdo do código inspecionado acima.';
     }
-    return `\n\n=== RESULTADO DA SKILL EXECUTADA AGORA (${turn.tool}) ===\nDados reais obtidos:\n${clean}\nREGRA CRÍTICA E OBRIGATÓRIA: A ferramenta '${turn.tool}' JÁ TERMINOU SUA EXECUÇÃO AGORA com os dados reais acima. NUNCA diga que "vai ver", "vai olhar", "deixa eu inspecionar" ou prometa fazer depois. Responda IMEDIATAMENTE entregando o resultado definitivo e os fatos reais obtidos em 1 a 2 frases objetivas no "reply".${toolInstruction}`;
+    const lengthRule = isDetailedIntrospection
+      ? 'Responda IMEDIATAMENTE entregando os fatos reais obtidos acima de forma clara e detalhada (citando módulos, skills/ferramentas, integrações e limitações reais, sem inventar dados).'
+      : 'Responda IMEDIATAMENTE entregando o resultado definitivo e os fatos reais obtidos em 1 a 2 frases objetivas no "reply".';
+    return `\n\n=== RESULTADO DA SKILL EXECUTADA AGORA (${turn.tool}) ===\nDados reais obtidos:\n${clean}\nREGRA CRÍTICA E OBRIGATÓRIA: A ferramenta '${turn.tool}' JÁ TERMINOU SUA EXECUÇÃO AGORA com os dados reais acima. NUNCA diga que "vai ver", "vai olhar", "deixa eu inspecionar" ou prometa fazer depois. ${lengthRule}${toolInstruction}`;
   }
   const errDetail = redactSecrets(
     String(turn.execution?.reason || (Array.isArray(turn.errors) ? turn.errors.join('; ') : 'falha ao executar ferramenta')).slice(0, 300),

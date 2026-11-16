@@ -13,6 +13,7 @@ import { LanceMemoryStore } from '../lancedb-store.js';
 import { dataDir as resolveDataDir } from '../data-paths.js';
 import { summarizeDay } from '../llm-router.js';
 import { OPERATIONAL_KINDS, OPERATIONAL_STATUSES } from '../agent-contracts.js';
+import { extractRequestCharacterId } from '../character-context.js';
 import {
   OPERATIONAL_DEFAULT_LIMIT,
   OPERATIONAL_MAX_LIMIT,
@@ -40,6 +41,29 @@ const FORGET_CONFIRMATION = 'APAGAR';
 const FORGET_KINDS = new Set(['fact', 'recent', 'section', 'summary', 'history', 'all']);
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const OPERATIONAL_RECORD_PATH_RE = /^\/api\/agent\/memory\/(op-[0-9a-f]{12})$/;
+
+function resolveTenantContext(req, options, hasExplicitStore = false) {
+  const registry = options.characterRegistry;
+  if (!registry) {
+    const charReq = extractRequestCharacterId(req);
+    if (!charReq.ok) return { errorStatus: charReq.status, errorMessage: charReq.error };
+    return { ctx: null, characterId: charReq.characterId };
+  }
+  const charReq = extractRequestCharacterId(req, registry.getActiveCharacterId?.() || 'usami-classic');
+  if (!charReq.ok) return { errorStatus: charReq.status, errorMessage: charReq.error };
+  if (hasExplicitStore && !charReq.explicit && charReq.characterId === 'usami-classic') {
+    return { ctx: null, characterId: charReq.characterId };
+  }
+  try {
+    const ctx = registry.getOrCreate(charReq.characterId);
+    return { ctx, characterId: charReq.characterId };
+  } catch (error) {
+    return {
+      errorStatus: error?.status || 404,
+      errorMessage: error?.message || 'Personagem não encontrado.',
+    };
+  }
+}
 
 /**
  * Normaliza e restringe números de cabeçalho do RAG.
@@ -132,7 +156,8 @@ export function createRagContextHandler(options = {}) {
  */
 export function createPersonalityHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.personalityStore;
+  const fallbackStore = options.personalityStore;
+  const hasExplicitStore = Boolean(options.personalityStore && !options.isServerDefaultStore);
   const traits = Object.entries(TRAITS).map(([key, value]) => ({ key, label: value.label }));
 
   return async function handlePersonality(req, res) {
@@ -144,6 +169,10 @@ export function createPersonalityHandler(options = {}) {
     if (denyWithoutToken(req, options, send)) return;
 
     if (req.url !== '/api/personality') return send(404, { error: 'Não encontrado.' });
+
+    const resolved = resolveTenantContext(req, options, hasExplicitStore);
+    if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
+    const store = resolved.ctx?.personalityStore || fallbackStore;
     if (!store) return send(500, { error: 'PersonalityStore não inicializado.' });
 
     if (req.method === 'GET') {
@@ -182,8 +211,9 @@ export function createPersonalityHandler(options = {}) {
  */
 export function createMemoryHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.memoryStore;
-  const bond = 'bondStore' in options ? options.bondStore : null;
+  const fallbackStore = options.memoryStore;
+  const fallbackBond = 'bondStore' in options ? options.bondStore : null;
+  const hasExplicitStore = Boolean(options.memoryStore && !options.isServerDefaultStore);
   const useNvidiaFn = options.useNvidia || (() => process.env.USE_NVIDIA !== 'false' && Boolean(process.env.NVIDIA_API_KEY));
 
   return async function handleMemory(req, res) {
@@ -195,6 +225,11 @@ export function createMemoryHandler(options = {}) {
       return send(403, { error: 'Origem não autorizada.' });
     }
     if (denyWithoutToken(req, options, send)) return;
+
+    const resolved = resolveTenantContext(req, options, hasExplicitStore);
+    if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
+    const store = resolved.ctx?.memoryStore || fallbackStore;
+    const bond = resolved.ctx?.bondStore ?? fallbackBond;
     if (!store) return send(500, { error: 'MemoryStore não inicializado.' });
 
     if (req.method === 'GET' && req.url === '/api/memory') {
@@ -226,12 +261,20 @@ export function createMemoryHandler(options = {}) {
       }
 
       let lanceDbCount = 0;
-      try {
-        const lanceStore = options.lanceStore || new LanceMemoryStore({ dataDir: resolveDataDir() });
-        await lanceStore.init();
-        lanceDbCount = await lanceStore.count();
-      } catch (err) {
-        console.warn('[maintenance] LanceDB check falhou:', err?.message || err);
+      const provider = resolved.ctx?.memoryProvider || null;
+      if (!provider || provider.isEnabled()) {
+        try {
+          const lanceStore = options.lanceStore
+            || provider?.lanceStore
+            || new LanceMemoryStore({
+              dataDir: resolveDataDir(),
+              characterId: resolved.characterId !== 'usami-classic' ? resolved.characterId : null,
+            });
+          await lanceStore.init();
+          lanceDbCount = await lanceStore.count();
+        } catch (err) {
+          console.warn('[maintenance] LanceDB check falhou:', err?.message || err);
+        }
       }
 
       return send(200, {
@@ -327,9 +370,10 @@ export function createMemoryHandler(options = {}) {
  */
 export function createBondHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.bondStore;
-  const memory = 'memoryStore' in options ? options.memoryStore : null;
-  const mirrorBond = (snapshot) => {
+  const fallbackStore = options.bondStore;
+  const fallbackMemory = 'memoryStore' in options ? options.memoryStore : null;
+  const hasExplicitStore = Boolean(options.bondStore && !options.isServerDefaultStore);
+  const mirrorBond = (memory, snapshot) => {
     if (!memory || typeof memory.setBondMirror !== 'function') return;
     try {
       memory.setBondMirror(snapshot);
@@ -337,8 +381,8 @@ export function createBondHandler(options = {}) {
       console.error('Aviso: espelho do vínculo na memória falhou:', error?.message || error);
     }
   };
-  const achievements = 'achievementsStore' in options ? options.achievementsStore : null;
-  const reevaluateAchievements = () => {
+  const fallbackAchievements = 'achievementsStore' in options ? options.achievementsStore : null;
+  const reevaluateAchievements = (store, achievements) => {
     if (!achievements) return;
     try {
       achievements.reevaluate(store.getAll());
@@ -356,6 +400,12 @@ export function createBondHandler(options = {}) {
       return send(403, { error: 'Origem não autorizada.' });
     }
     if (denyWithoutToken(req, options, send)) return;
+
+    const resolved = resolveTenantContext(req, options, hasExplicitStore);
+    if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
+    const store = resolved.ctx?.bondStore || fallbackStore;
+    const memory = resolved.ctx?.memoryStore ?? fallbackMemory;
+    const achievements = resolved.ctx?.achievementsStore ?? fallbackAchievements;
     if (!store) return send(500, { error: 'BondStore não inicializado.' });
 
     const route = new URL(req.url || '/api/bond', 'http://127.0.0.1:8787').pathname;
@@ -392,8 +442,8 @@ export function createBondHandler(options = {}) {
         }
         const called = store.awardCall(minutes);
         if (called.changed) {
-          reevaluateAchievements();
-          mirrorBond(called);
+          reevaluateAchievements(store, achievements);
+          mirrorBond(memory, called);
         }
         return send(200, { ok: true, bond: called });
       }
@@ -403,8 +453,8 @@ export function createBondHandler(options = {}) {
       const spoken = payload.spoken === true;
       const awarded = store.awardChat(payload.content, { spoken });
       if (awarded.changed) {
-        reevaluateAchievements();
-        mirrorBond(awarded);
+        reevaluateAchievements(store, achievements);
+        mirrorBond(memory, awarded);
       }
       return send(200, { ok: true, bond: awarded });
     }
@@ -412,8 +462,8 @@ export function createBondHandler(options = {}) {
     if (route === '/api/bond/import') {
       const imported = store.importState({ intimacy: payload.intimacy, log: payload.log });
       if (imported.imported) {
-        reevaluateAchievements();
-        mirrorBond(imported);
+        reevaluateAchievements(store, achievements);
+        mirrorBond(memory, imported);
       }
       return send(200, { ok: true, bond: imported });
     }
@@ -423,7 +473,7 @@ export function createBondHandler(options = {}) {
         return send(403, { error: 'Confirmação escrita necessária: envie confirm: "APAGAR".' });
       }
       const reset = store.reset();
-      mirrorBond(reset);
+      mirrorBond(memory, reset);
       return send(200, { ok: true, bond: reset });
     }
 
@@ -438,12 +488,13 @@ export function createBondHandler(options = {}) {
  */
 export function createMoodHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.moodStore;
-  const memoryStore = 'memoryStore' in options ? options.memoryStore : null;
+  const fallbackStore = options.moodStore;
+  const fallbackMemoryStore = 'memoryStore' in options ? options.memoryStore : null;
+  const hasExplicitStore = Boolean(options.moodStore && !options.isServerDefaultStore);
 
-  const currentAffinity = () => {
+  const currentAffinity = (memStore) => {
     try {
-      return memoryStore?.getAll?.()?.affinity?.score ?? 0;
+      return memStore?.getAll?.()?.affinity?.score ?? 0;
     } catch {
       return 0;
     }
@@ -456,12 +507,17 @@ export function createMoodHandler(options = {}) {
       return send(403, { error: 'Origem não autorizada.' });
     }
     if (denyWithoutToken(req, options, send)) return;
+
+    const resolved = resolveTenantContext(req, options, hasExplicitStore);
+    if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
+    const store = resolved.ctx?.moodStore || fallbackStore;
+    const memoryStore = resolved.ctx?.memoryStore ?? fallbackMemoryStore;
     if (!store) return send(500, { error: 'MoodStore não inicializado.' });
 
     const route = new URL(req.url || '/api/mood', 'http://127.0.0.1:8787').pathname;
 
     if (req.method === 'GET' && route === '/api/mood') {
-      return send(200, { ok: true, mood: store.getAll(currentAffinity()) });
+      return send(200, { ok: true, mood: store.getAll(currentAffinity(memoryStore)) });
     }
 
     if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
@@ -491,13 +547,13 @@ export function createMoodHandler(options = {}) {
         emotion: typeof payload.emotion === 'string' ? payload.emotion : 'neutral',
         gesture: typeof payload.gesture === 'string' ? payload.gesture : '',
         reason: typeof payload.reason === 'string' ? payload.reason : '',
-        affinity: currentAffinity(),
+        affinity: currentAffinity(memoryStore),
       });
       return send(200, { ok: true, mood });
     }
 
     if (route === '/api/mood/reset') {
-      const mood = store.reset(currentAffinity());
+      const mood = store.reset(currentAffinity(memoryStore));
       return send(200, { ok: true, mood });
     }
 
@@ -553,7 +609,8 @@ function parseOperationalQuery(searchParams, { forList }) {
  */
 export function createOperationalMemoryHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
-  const store = options.operationalStore;
+  const fallbackStore = options.operationalStore;
+  const hasExplicitStore = Boolean(options.operationalStore && !options.isServerDefaultStore);
 
   return async function handleOperationalMemory(req, res) {
     const send = (status, data) => sendJsonResponse(res, status, data);
@@ -562,6 +619,10 @@ export function createOperationalMemoryHandler(options = {}) {
       return send(403, { error: 'Origem não autorizada.' });
     }
     if (denyWithoutToken(req, options, send)) return;
+
+    const resolved = resolveTenantContext(req, options, hasExplicitStore);
+    if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
+    const store = resolved.ctx?.operationalStore || fallbackStore;
     if (!store) return send(500, { error: 'OperationalStore não inicializado.' });
 
     const url = new URL(req.url || '/api/agent/memory', 'http://127.0.0.1:8787');

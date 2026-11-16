@@ -90,7 +90,11 @@ function buildDescription(story) {
     .map(task => `<li data-checked="false" data-type="taskItem"><label><input type="checkbox"><span></span></label><div><p>${escapeHtml(task)}</p></div></li>`)
     .join('');
   const blocked = story.blockedBy.length ? story.blockedBy.join(', ') : 'Nenhuma';
+  const timeframe = (story.startDate && story.targetDate)
+    ? `<p><strong>Sprint / Prazo:</strong> ${escapeHtml(story.startDate)} até ${escapeHtml(story.targetDate)} | <strong>Importância:</strong> ${escapeHtml(story.priority ?? 'normal').toUpperCase()}</p>`
+    : '';
   return `<h2>Objetivo</h2><p>${escapeHtml(story.demoBoundary)}</p>`
+    + timeframe
     + `<h2>Tarefas</h2><ul data-type="taskList">${tasks}</ul>`
     + `<h2>Escopo</h2><p>${escapeHtml(story.scopeNotes)}</p>`
     + `<h2>Dependencias</h2><p>Bloqueado por: ${escapeHtml(blocked)}</p>`
@@ -210,6 +214,9 @@ for (const story of selectedStories) {
     external_id: externalId,
     external_source: 'usami-plan',
   };
+  if (story.priority) payload.priority = story.priority;
+  if (story.startDate || story.start_date) payload.start_date = story.startDate || story.start_date;
+  if (story.targetDate || story.target_date) payload.target_date = story.targetDate || story.target_date;
 
   // Sem `status` no plano, o estado do board é preservado (inclusive Done
   // marcado à mão); com `status`, o JSON vira a fonte da verdade.

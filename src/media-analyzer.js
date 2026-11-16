@@ -5,6 +5,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { parseJsonLoosely, sanitizeActions } from './provider-parse.js';
+import { transcribeAudio } from './stt.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,17 +16,23 @@ export const DEFAULT_GEMINI_VISION_MODEL = DEFAULT_VISION_MODEL;
 export const MAX_VIDEO_FRAMES = 6;
 export const MAX_FRAME_WIDTH = 800;
 
-// Extensões de vídeo aceitas no arquivo temporário. A extensão é o ÚNICO pedaço
-// do nome vindo do cliente que sobrevive, e só depois da allowlist.
+// Extensões aceitas no arquivo temporário.
 export const VIDEO_EXTENSIONS = Object.freeze(['mp4', 'webm', 'mkv', 'mov', 'avi']);
+export const AUDIO_EXTENSIONS = Object.freeze(['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac', 'opus', 'weba']);
 
-// Nome interno fixo dentro do mkdtemp: `filename` é dado do cliente e nunca vira
-// caminho (`../../escape.mp4` já escapou de um mkdtemp e escreveu fora dele).
 export function videoTempPath(tempDir, filename) {
   const match = /\.([A-Za-z0-9]{1,8})\s*$/.exec(String(filename ?? ''));
   const extension = match && VIDEO_EXTENSIONS.includes(match[1].toLowerCase())
     ? match[1].toLowerCase()
     : 'mp4';
+  return path.join(tempDir, `input.${extension}`);
+}
+
+export function audioTempPath(tempDir, filename) {
+  const match = /\.([A-Za-z0-9]{1,8})\s*$/.exec(String(filename ?? ''));
+  const extension = match && AUDIO_EXTENSIONS.includes(match[1].toLowerCase())
+    ? match[1].toLowerCase()
+    : 'mp3';
   return path.join(tempDir, `input.${extension}`);
 }
 
@@ -187,6 +194,8 @@ export async function analyzeMedia({
   }
 
   const isVideo = mimeType?.startsWith('video/') || /\.(mp4|webm|mkv|mov|avi)$/i.test(filename);
+  const isAudio = mimeType?.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac|opus|weba)$/i.test(filename);
+  const isDoc = mimeType?.startsWith('text/') || mimeType === 'application/pdf' || mimeType === 'application/json' || /\.(pdf|txt|md|markdown|py|js|ts|tsx|jsx|json|csv|yaml|yml|xml|html|css|sql|toml|log|sh|rs|c|cpp|h|cs|java|go|php|env|ini|diff|patch)$/i.test(filename);
   let parts = [];
   let tempDir = null;
 
@@ -206,10 +215,20 @@ export async function analyzeMedia({
         maxFrames: MAX_VIDEO_FRAMES,
       });
 
-      // O modelo VL é de visão: áudio não é processado. Anotamos a presença
-      // para o prompt, mas não enviamos bytes de áudio.
-      if (extracted.audio?.base64) {
-        parts.push({ text: '[Áudio presente no vídeo — transcrição não disponível no modelo de visão atual.]' });
+      // Tenta transcrever a fala do áudio do vídeo
+      let videoTranscript = '';
+      if (extracted.audio?.path) {
+        try {
+          videoTranscript = await transcribeAudio({ audioPath: extracted.audio.path });
+        } catch {
+          videoTranscript = '';
+        }
+      }
+
+      if (videoTranscript) {
+        parts.push({ text: `[Áudio transcrito das falas do vídeo: "${videoTranscript}"]` });
+      } else if (extracted.audio?.base64) {
+        parts.push({ text: '[Áudio presente no vídeo, sem falas nítidas identificadas.]' });
       }
 
       // Inclui frames picotados com timestamps
@@ -232,9 +251,8 @@ Mensagem do usuário sobre o vídeo: "${userPrompt || 'Dá uma olhada nisso aqui
 
 SUAS TAREFAS MULTIMODAIS:
 1. OCR DE FRAMES: Examine meticulosamente todos os frames em busca de textos na tela (títulos, legendas, código, slides, memes, placas, interfaces). Identifique cada texto relevante.
-2. RECONHECIMENTO DE ÁUDIO: Ouça a faixa de áudio, transcreva as falas e identifique o tom/efeitos sonoros.
-3. CRUZAMENTO ÁUDIO + VISUAL: Relacione o que está sendo dito no áudio com o que aparece na tela nos mesmos instantes (ex: o que o locutor aponta, o que acontece no vídeo enquanto ele fala).
-4. RESPOSTA DA USAMI: Responda em português como Usami reagindo ao vídeo de forma viva, curiosa e tsundere (comente o que você viu na tela e o que você ouviu no áudio).
+2. RECONHECIMENTO DE ÁUDIO E VISUAL: Relacione o que está sendo dito no áudio com o que aparece na tela nos mesmos instantes (ex: o que o locutor aponta, o que acontece no vídeo enquanto ele fala).
+3. RESPOSTA DA USAMI: Responda em português como Usami reagindo ao vídeo de forma viva, curiosa e tsundere (comente o que você viu na tela e o que você ouviu no áudio).
 
 FORMATO OBRIGATÓRIO (JSON PURO):
 {
@@ -242,11 +260,89 @@ FORMATO OBRIGATÓRIO (JSON PURO):
   "gesture": "surprised"|"thinking"|"blush"|"angry"|"nod"|"clap"|"jump"|"wave"|"scratchHead",
   "actions": [
     {"type": "set_expression", "name": "01-prefab_happy01", "weight": 1},
-    {"type": "gesture", "name": "..."}
+    {"type": "gesture", "name": "nod"}
   ],
   "ocr": ["textos detectados nos frames"],
-  "transcript": "transcrição sucinta do áudio",
+  "transcript": "${(videoTranscript || '').replace(/"/g, '\\"')}",
   "crossReference": "resumo de 1 linha cruzando o áudio e a cena"
+}`;
+
+      parts.push({ text: promptInstruction });
+    } else if (isAudio) {
+      // Processamento de áudio puro (mensagens de voz, podcasts, gravações)
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'usami-audio-'));
+      const audioPath = audioTempPath(tempDir, filename);
+      const audioBuffer = Buffer.from(dataBase64, 'base64');
+      await fs.writeFile(audioPath, audioBuffer);
+
+      let transcript = '';
+      try {
+        transcript = await transcribeAudio({ audioPath });
+      } catch (err) {
+        console.warn('[media-analyzer] Falha na transcrição de áudio:', err.message);
+      }
+
+      const audioDesc = transcript
+        ? `Transcrição das falas do áudio: "${transcript}"`
+        : `[Áudio sem falas humanas identificadas ou apenas com música/ruído]`;
+
+      const promptInstruction = `
+${personaSystemPrompt ? `=== SUA IDENTIDADE E HISTÓRICO ===\n${personaSystemPrompt}\n\n` : ''}Você é a Usami (companion virtual tsundere fofa, orgulhosa e expressiva).
+O usuário enviou para você uma MENSAGEM DE ÁUDIO / ARQUIVO DE SOM ("${filename}").
+${audioDesc}
+${userPrompt ? `Mensagem de texto acompanhando: "${userPrompt}"\n` : ''}
+
+SUAS TAREFAS:
+1. Responda diretamente ao que o usuário falou no áudio de forma viva, espontânea e atenta.
+2. Mantenha sua personalidade tsundere carinhosa (comente o que ele falou, tire sarro carinhoso ou responda o que ele pediu).
+
+FORMATO OBRIGATÓRIO (JSON PURO):
+{
+  "reply": "sua fala como Usami respondendo ao que o usuário falou no áudio (1 a 3 frases naturais, máx 250 caracteres, sem asteriscos ou emojis)",
+  "gesture": "surprised"|"thinking"|"blush"|"angry"|"nod"|"clap"|"jump"|"wave"|"scratchHead",
+  "actions": [
+    {"type": "set_expression", "name": "01-prefab_happy01", "weight": 1},
+    {"type": "gesture", "name": "nod"}
+  ],
+  "transcript": "${(transcript || '').replace(/"/g, '\\"')}",
+  "summary": "${audioDesc.slice(0, 160).replace(/"/g, '\\"')}"
+}`;
+
+      parts.push({ text: promptInstruction });
+    } else if (isDoc) {
+      // Processamento de documento / código / arquivo de texto
+      let docText = '';
+      try {
+        docText = Buffer.from(dataBase64, 'base64').toString('utf8');
+      } catch {
+        docText = '(conteúdo binário ou ilegível)';
+      }
+      const previewText = docText.slice(0, 18000);
+
+      const promptInstruction = `
+${personaSystemPrompt ? `=== SUA IDENTIDADE E HISTÓRICO ===\n${personaSystemPrompt}\n\n` : ''}Você é a Usami (companion virtual tsundere fofa, orgulhosa e expressiva).
+O usuário acabou de compartilhar um ARQUIVO / DOCUMENTO com você ("${filename}").
+${userPrompt ? `Comentário do usuário: "${userPrompt}"\n` : ''}
+
+CONTEÚDO DO ARQUIVO:
+\`\`\`
+${previewText}
+\`\`\`
+
+SUAS TAREFAS:
+1. LEITURA E ANÁLISE: Examine o código, documento, dados ou texto e entenda a lógica e o objetivo principal.
+2. RESPOSTA DA USAMI: Responda em português como Usami (faça uma avaliação ou resumo sincero, comente detalhes relevantes, aponte pontos fortes ou melhorias e mantenha seu charme tsundere).
+3. Seja expressiva e direta ao ponto: não fique apenas dizendo que recebeu o arquivo, diga o que você realmente achou do conteúdo lido!
+
+FORMATO OBRIGATÓRIO (JSON PURO):
+{
+  "reply": "sua fala como Usami comentando e analisando o arquivo em detalhes (2 a 5 frases naturais e expressivas, máx 600 caracteres, sem asteriscos ou emojis)",
+  "gesture": "thinking"|"surprised"|"nod"|"blush"|"angry"|"scratchHead",
+  "actions": [
+    {"type": "set_expression", "name": "01-prefab_happy01", "weight": 1},
+    {"type": "gesture", "name": "thinking"}
+  ],
+  "summary": "resumo conciso de 1 linha do arquivo"
 }`;
 
       parts.push({ text: promptInstruction });
@@ -302,8 +398,9 @@ FORMATO OBRIGATÓRIO (JSON PURO):
           model,
           messages: [{ role: 'user', content: parts.map(p => p.text ? { type: 'text', text: p.text } : { type: 'image_url', image_url: { url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}` } }).filter(Boolean) }],
           temperature: 0.7,
-          max_tokens: 2048,
+          max_tokens: 3072,
           response_format: { type: 'json_object' },
+          chat_template_kwargs: { enable_thinking: false },
         }),
         signal: controller.signal,
       });
@@ -329,7 +426,10 @@ FORMATO OBRIGATÓRIO (JSON PURO):
     }
 
     const resultJson = await res.json();
-    const candidateText = resultJson.choices?.[0]?.message?.content || '';
+    const choice = resultJson.choices?.[0] || {};
+    const message = choice.message || {};
+    const candidateText = message.content || '';
+    const reasoningText = message.reasoning_content || message.reasoning || '';
 
     let parsedObj = {};
     if (candidateText) {
@@ -337,26 +437,48 @@ FORMATO OBRIGATÓRIO (JSON PURO):
       // balanceado). Sem duplicar regex de fence aqui (B14).
       const loose = parseJsonLoosely(candidateText);
       parsedObj = loose.ok && loose.value && typeof loose.value === 'object' ? loose.value : {};
+    }
 
-      if (!parsedObj.reply) {
-        const replyMatch = candidateText.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
-        if (replyMatch) {
-          parsedObj.reply = replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/"\s*,\s*$/, '').trim();
-        } else {
-          const cleanText = candidateText.replace(/^[\s{"]*reply[\s":]*/i, '').replace(/[}"]*$/, '').trim();
-          if (cleanText) {
-            parsedObj.reply = cleanText.slice(0, 300);
-          }
-        }
-        const gestureMatch = candidateText.match(/"gesture"\s*:\s*"([a-zA-Z]+)"/);
-        if (gestureMatch) parsedObj.gesture = gestureMatch[1];
+    // Se o modelo escreveu o JSON no raciocínio (transbordamento de tokens ou fallback),
+    // tenta resgatar a chave reply e summary dele.
+    if (!parsedObj.reply && reasoningText) {
+      const looseReasoning = parseJsonLoosely(reasoningText);
+      if (looseReasoning.ok && looseReasoning.value && typeof looseReasoning.value === 'object') {
+        parsedObj = { ...looseReasoning.value, ...parsedObj };
       }
     }
 
+    if (!parsedObj.reply) {
+      const combined = (candidateText + '\n' + reasoningText).trim();
+      const replyMatch = combined.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (replyMatch) {
+        parsedObj.reply = replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/"\s*,\s*$/, '').trim();
+      } else {
+        const cleanText = candidateText.replace(/^[\s{"]*reply[\s":]*/i, '').replace(/[}"]*$/, '').trim();
+        if (cleanText) {
+          parsedObj.reply = cleanText.slice(0, 600);
+        }
+      }
+      const gestureMatch = combined.match(/"gesture"\s*:\s*"([a-zA-Z]+)"/);
+      if (gestureMatch) parsedObj.gesture = gestureMatch[1];
+      const summaryMatch = combined.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (summaryMatch) {
+        parsedObj.summary = summaryMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/"\s*,\s*$/, '').trim();
+      }
+    }
+
+    const defaultReply = isDoc
+      ? `Consegui ler o arquivo "${filename || 'documento'}", mas me dá um momento que estou organizando minhas anotações sobre ele. Me pergunta algo específico sobre o conteúdo!`
+      : (isAudio
+        ? 'Ouvi o áudio que você mandou, mas não consegui captar tudo perfeitamente. Pode me dizer mais?'
+        : (isVideo
+          ? 'Dei uma olhada no vídeo! O que você queria que eu notasse nele?'
+          : 'Vi o que você mandou!'));
+
     return {
       ok: true,
-      reply: parsedObj.reply || 'Vi o que você mandou!',
-      gesture: parsedObj.gesture || 'nod',
+      reply: parsedObj.reply || defaultReply,
+      gesture: parsedObj.gesture || (isDoc ? 'thinking' : 'nod'),
       // Mesmo contrato do /api/chat: a saída do modelo passa pela allowlist de
       // verbos/campos antes de virar ação no cliente (B15).
       actions: sanitizeActions(parsedObj.actions),
@@ -380,7 +502,7 @@ FORMATO OBRIGATÓRIO (JSON PURO):
     if (tempDir) {
       try {
         await fs.rm(tempDir, { recursive: true, force: true });
-      } catch {}
+      } catch { }
     }
   }
 }

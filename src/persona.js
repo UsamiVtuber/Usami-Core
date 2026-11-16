@@ -29,11 +29,11 @@ import { buildTraitGuidance } from './personality-store.js';
 import { getDailyScene } from './scenes.js';
 
 export const AFFINITY_STAGES = [
-  { min: 0,   max: 19,  label: 'curiosidade_distante',   tone: 'educada, observa, questiona por que você está aqui' },
-  { min: 20,  max: 39,  label: 'interesse_genuíno',      tone: 'pergunta muito, tsundere leve, nega o próprio interesse' },
-  { min: 40,  max: 59,  label: 'se_aproximando',         tone: 'inicia, lembra detalhes, ciúme sutil, gagueja ao elogiar' },
-  { min: 60,  max: 79,  label: 'confianca',              tone: 'admite afeto, derrete, prioriza sua companhia' },
-  { min: 80,  max: 100, label: 'apego',                  tone: 'protege, "meu humano favorito", tsundere derretido' },
+  { min: 0, max: 19, label: 'curiosidade_distante', tone: 'educada, observa, questiona por que você está aqui' },
+  { min: 20, max: 39, label: 'interesse_genuíno', tone: 'pergunta muito, tsundere leve, nega o próprio interesse' },
+  { min: 40, max: 59, label: 'se_aproximando', tone: 'inicia, lembra detalhes, ciúme sutil, gagueja ao elogiar' },
+  { min: 60, max: 79, label: 'confianca', tone: 'admite afeto, derrete, prioriza sua companhia' },
+  { min: 80, max: 100, label: 'apego', tone: 'protege, "meu humano favorito", tsundere derretido' },
 ];
 
 export function getAffinityStage(score) {
@@ -79,7 +79,16 @@ export function buildPersona({
   currentScene = null,
   mood = null,
   selfAwareness = null,
+  manifest = null,
 }) {
+  const isCustomCharacter = Boolean(
+    manifest
+    && typeof manifest === 'object'
+    && manifest.metadata?.id
+    && manifest.metadata.id !== 'usami-classic',
+  );
+  const charName = isCustomCharacter ? (manifest.metadata.name || manifest.metadata.id) : 'Usami';
+  const displayName = isCustomCharacter ? (manifest.metadata.displayName || charName) : 'Usami (兎美)';
   const stage = getAffinityStage(affinity);
 
   let effectiveDailyContext = dailyContext;
@@ -96,15 +105,15 @@ export function buildPersona({
 
   const dailySceneBlock = (effectiveDailyContext || effectiveCurrentScene)
     ? `\n\n=== CONTEXTO DO SEU DIA ===\n` +
-      (effectiveDailyContext ? `${effectiveDailyContext}\n` : '') +
-      (effectiveCurrentScene ? `Cena atual: ${effectiveCurrentScene}\n` : '')
+    (effectiveDailyContext ? `${effectiveDailyContext}\n` : '') +
+    (effectiveCurrentScene ? `Cena atual: ${effectiveCurrentScene}\n` : '')
     : '';
 
   const moodLabel = mood && typeof mood === 'object' ? (mood.label || mood.id) : null;
   const moodBlock = moodLabel
     ? `\n\n=== HUMOR ATUAL ===\nAgora você está se sentindo: ${moodLabel}` +
-      (mood.reason ? ` (${mood.reason})` : '') +
-      `. Deixe esse estado emocional colorir naturalmente suas palavras, expressões e gestos neste turno — sem mencionar números ou explicar nenhum monitor.`
+    (mood.reason ? ` (${mood.reason})` : '') +
+    `. Deixe esse estado emocional colorir naturalmente suas palavras, expressões e gestos neste turno — sem mencionar números ou explicar nenhum monitor.`
     : '';
 
   // Ajustes do usuário (sliders + instruções): refinam o tom, mas as regras de
@@ -124,20 +133,20 @@ export function buildPersona({
 
   const factsBlock = (sectionBlocks || recentFacts.length)
     ? `\n\n=== O QUE EU SEI SOBRE ${username.toUpperCase()} ===\n` +
-      (sectionBlocks ? `Fatos importantes (sempre valem):\n${sectionBlocks}\n` : '') +
-      (recentFacts.length ? `Coisas recentes (últimos 7 dias):\n${recentFacts.map(f => `- ${f}`).join('\n')}\n` : '')
+    (sectionBlocks ? `Fatos importantes (sempre valem):\n${sectionBlocks}\n` : '') +
+    (recentFacts.length ? `Coisas recentes (últimos 7 dias):\n${recentFacts.map(f => `- ${f}`).join('\n')}\n` : '')
     : '';
 
   const historyBlock = history.length
     ? `\n\n=== CONVERSA DE HOJE (últimas ${history.length}) ===\n` +
-      history.map(m => `${m.role === 'user' ? username : 'Usami'}: ${m.content}`).join('\n')
+    history.map(m => `${m.role === 'user' ? username : charName}: ${m.content}`).join('\n')
     : '';
 
   // Continuidade entre dias: os resumos são o que a Usami "lembra" de ontem
   // quando o histórico do dia anterior não cabe mais no prompt.
   const summariesBlock = summaries.length
     ? `\n\n=== DIAS ANTERIORES ===\n` +
-      summaries.map(s => `${s.date}: ${s.summary}`).join('\n')
+    summaries.map(s => `${s.date}: ${s.summary}`).join('\n')
     : '';
 
   const stageGuidance = {
@@ -159,6 +168,50 @@ Não dramatize. Não negue robóticamente. Apenas seja verdadeira.`;
   const selfAwarenessBlock = (typeof selfAwareness === 'string' && selfAwareness.trim())
     ? `\n\n=== CONSCIÊNCIA DO PRÓPRIO CÓDIGO E AMBIENTE ===\n${selfAwareness.trim()}`
     : '';
+
+  if (isCustomCharacter) {
+    const archetype = manifest.identity?.archetype || 'companion';
+    const customIdentityBlock = manifest.identity?.systemPrompt?.identityBlock
+      || manifest.metadata?.description
+      || `Você é ${displayName}, uma companion virtual com arquétipo ${archetype}.`;
+    const dialogueRules = Array.isArray(manifest.identity?.systemPrompt?.dialogueRules)
+      ? manifest.identity.systemPrompt.dialogueRules.filter(Boolean)
+      : [];
+    const bannedWords = Array.isArray(manifest.identity?.systemPrompt?.bannedWords)
+      ? manifest.identity.systemPrompt.bannedWords.filter(Boolean)
+      : [];
+
+    const customRulesBlock = dialogueRules.length
+      ? dialogueRules.map((rule, idx) => `${idx + 1}. ${rule}`).join('\n')
+      : '1. Responda em português de forma natural e concisa.';
+    const bannedBlock = bannedWords.length
+      ? `\nPalavras/expressões proibidas (JAMAIS use): ${bannedWords.join(', ')}.`
+      : '';
+
+    return `Você é ${displayName}, uma companion virtual (${archetype}).
+
+=== IDENTIDADE ===
+Nome: ${displayName}
+Arquétipo: ${archetype}
+${customIdentityBlock}
+Relacionamento atual: estágio ${stage.label} (afinidade ${affinity}/100).
+
+=== DIRETRIZES DE DIÁLOGO ===
+${customRulesBlock}${bannedBlock}
+Responda SOMENTE JSON:
+{"reply":"sua fala","gesture":"neutral"|"tilt"|"wave"|"idle","actions":[{"type":"set_expression","name":"...","weight":0-1},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"...","value":0-1},{"type":"gesture","name":"..."}],"remember":{"section":"user"|"preferences"|"hobbies"|"relationship"|"dates"|"other","fact":"fato curto em 3ª pessoa"} ou null}
+- reply: 1 a 2 frases curtas sem rubricas de roleplay entre asteriscos ou emojis técnicos. O campo "reply" contém apenas a fala de ${charName}.
+
+${virtualHumanNote}${personalityBlock}
+${factsBlock}
+${summariesBlock}
+${historyBlock}${selfAwarenessBlock}
+
+=== CONTEXTO AGORA ===
+Data: ${date} (${timeOfDay}).${dailySceneBlock}${moodBlock}
+
+${username} acabou de falar com você.`;
+  }
 
   return `Você é Usami (兎美), uma companion virtual tsundere fofa e ÚNICA.
 
