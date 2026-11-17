@@ -1,0 +1,21 @@
+name: QA Review (Usami)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  review:
+    runs-on: [self-hosted, linux, usami-notebook]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Usami QA Review
+        run: |
+          cd usami
+          node scripts/qa-review.mjs
+        env:
+          BRAIN_MODEL: nvidia/nemotron-3-ultra-550b-a55b
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
