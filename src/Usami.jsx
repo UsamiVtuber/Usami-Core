@@ -1616,7 +1616,7 @@ export function Usami() {
     const canStream = !quietRef.current && Boolean(audioLipSync.current?.getTap?.());
     // Nunca rejeita: a fila pode ser abandonada (fala nova ou mudo) com uma
     // requisição no ar — sem unhandled rejection.
-    const requestTtsOnce = (text, stream, partStyle) => apiFetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream }) })
+    const requestTtsOnce = (text, stream, partStyle, ttsParams = {}) => apiFetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, styleId: partStyle, stream, ...ttsParams }) })
       .then(async response => {
         if (!response || !response.ok) return null;
         // PCM cru atrás do header de stream; qualquer outra resposta de áudio é
@@ -1627,7 +1627,7 @@ export function Usami() {
         return { url: URL.createObjectURL(await response.blob()) };
       })
       .catch(() => null);
-    const askTts = async (text, stream, partStyle = styleId) => {
+    const askTts = async (text, stream, partStyle = styleId, ttsParams = {}) => {
       const cleanText = String(text ?? '')
         .replace(/['",\s]*\\?["'](?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\\?["']\s*:\s*[\s\S]*$/i, '')
         .replace(/[\s,'"]*\[\s*\{\s*\\?['"]?(?:type|name|section|fact)\\?['"]?\s*:?[\s\S]*$/i, '')
@@ -1638,12 +1638,12 @@ export function Usami() {
         .replace(/[ \t]{2,}/g, ' ')
         .trim();
       if (!cleanText || !/[a-zA-ZÀ-ÿ\u4e00-\u9fa5]/u.test(cleanText)) return null;
-      const first = await requestTtsOnce(cleanText, stream, partStyle);
+      const first = await requestTtsOnce(cleanText, stream, partStyle, ttsParams);
       if (first || !alive()) return first;
       // Retry único em modo WAV após pausa curta se o provedor oscilou (429/502/503/504)
       await new Promise(resolve => setTimeout(resolve, 300));
       if (!alive()) return null;
-      return requestTtsOnce(cleanText, false, partStyle);
+      return requestTtsOnce(cleanText, false, partStyle, ttsParams);
     };
     let attached = false;
     let played = false;
@@ -1651,7 +1651,7 @@ export function Usami() {
     // anexa ao elemento reutilizado e cria o grafo Web Audio (AudioContext +
     // AnalyserNode, RMS contínuo) de forma preguiçosa no primeiro rAF com o
     // áudio pronto. Sem duração do servidor, sem timeline textual.
-    const playWithElement = async url => {
+    const playWithElement = async (url, ttsParams = {}) => {
       if (!attached) {
         audioLipSync.current?.attach(audio);
         attached = true;
@@ -1672,7 +1672,11 @@ export function Usami() {
           runActionsAtSpeechStart();
         }
       }
-      audio.playbackRate = quietRef.current ? .8 : 1;
+      // Modo sono: usa playbackRate e volume do servidor; modo quieto local: 0.8
+      const playbackRate = ttsParams.rate ?? (quietRef.current ? 0.8 : 1);
+      const volume = ttsParams.volume ?? 1;
+      audio.playbackRate = playbackRate;
+      audio.volume = volume;
       await playAudioPart(audio, url, startTalking);
       URL.revokeObjectURL(url);
       played = true;
@@ -1680,7 +1684,9 @@ export function Usami() {
     const ensureNextPending = index => {
       if (!pending && index + 1 < parts.length && alive()) {
         const nextStyle = parts[index + 1].emotionKey || styleId;
-        pending = askTts(parts[index + 1].ttsText, canStream, nextStyle);
+        // Passa parâmetros de TTS do modo sono se ativo
+        const ttsParams = sleepCompanionRef.current ? { rate: 0.8, pitch: 1, volume: 0.4 } : {};
+        pending = askTts(parts[index + 1].ttsText, canStream, nextStyle, ttsParams);
       }
     };
     const waitInterBalloonPause = async (emotionKey, fallbackStyle) => {
@@ -1690,7 +1696,9 @@ export function Usami() {
       }
     };
     const firstStyle = parts[0]?.emotionKey || styleId;
-    let pending = askTts(parts[0].ttsText, canStream, firstStyle);
+    // Passa parâmetros de TTS do modo sono se ativo
+    const initialTtsParams = sleepCompanionRef.current ? { rate: 0.8, pitch: 1, volume: 0.4 } : {};
+    let pending = askTts(parts[0].ttsText, canStream, firstStyle, initialTtsParams);
     for (let index = 0; index < parts.length; index += 1) {
       let job = await pending;
       pending = null;
@@ -1746,7 +1754,8 @@ export function Usami() {
         }
         // Se o stream falhou antes da primeira amostra de áudio, tenta recuperar em WAV
         if (alive()) {
-          job = await requestTtsOnce(parts[index].ttsText, false, partStyle);
+          const ttsParams = sleepCompanionRef.current ? { rate: 0.8, pitch: 1, volume: 0.4 } : {};
+          job = await requestTtsOnce(parts[index].ttsText, false, partStyle, ttsParams);
         }
       }
       if (!shown) {
@@ -1759,7 +1768,9 @@ export function Usami() {
         applyVrmEmotion(parts[index].emotionKey, expressionDriverRef.current);
       }
       holdFace(parts[index].display);
-      await playWithElement(job.url);
+      // Passa parâmetros de TTS do modo sono se ativo
+      const ttsParams = sleepCompanionRef.current ? { rate: 0.8, pitch: 1, volume: 0.4 } : {};
+      await playWithElement(job.url, ttsParams);
       learnPace(parts[index].display, performance.now() - partStartedAt);
       if (index + 1 < parts.length && alive()) {
         await waitInterBalloonPause(parts[index].emotionKey, partStyle);
@@ -2042,6 +2053,24 @@ export function Usami() {
         throw failure;
       }
       if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new Error('Resposta inválida do servidor.');
+
+      // Sincroniza estado do modo sono com o servidor (fonte da verdade)
+      if (data.sleepCompanion) {
+        sleepCompanionRef.current = true;
+        setSleepCompanion(true);
+        if (data.sleepCompanion.minutesLeft !== undefined) {
+          setSleepCompanionMinutesLeft(data.sleepCompanion.minutesLeft);
+        }
+        if (data.sleepCompanion.startedAt) {
+          sleepCompanionStart.current = new Date(data.sleepCompanion.startedAt).getTime();
+        }
+      } else if (sleepCompanionRef.current) {
+        // Servidor diz que modo sono inativo -> desativa no cliente
+        sleepCompanionRef.current = false;
+        setSleepCompanion(false);
+        setSleepCompanionMinutesLeft(30);
+      }
+
       // Etapa 3: emoção confiável no texto aplica o engine e remove o set_expression
       // do LLM (evita blend duplo); sem confiança, as actions seguem intactas.
       const resolved = resolveReplyEmotion({ reply: data.reply, actions: data.actions, engine: emotionEngine.current });
@@ -2234,26 +2263,13 @@ export function Usami() {
   // Monitoramento de inatividade (10 min com 2 toques) e companion de sono (30 min)
   useEffect(() => {
     const interval = setInterval(() => {
-      // 1. Companion de Sono (30 minutos)
-      if (sleepCompanionRef.current) {
+      // 1. Companion de Sono (30 minutos) - atualiza contagem regressiva local baseada no startedAt do servidor
+      if (sleepCompanionRef.current && sleepCompanionStart.current) {
         const elapsed = Date.now() - sleepCompanionStart.current;
         const totalMs = 30 * 60 * 1000;
         const remainingMinutes = Math.max(0, Math.ceil((totalMs - elapsed) / 60000));
         setSleepCompanionMinutesLeft(remainingMinutes);
-
-        // Ao completar 30 minutos
-        if (elapsed >= totalMs) {
-          sleepCompanionRef.current = false;
-          setSleepCompanion(false);
-          setQuiet(true);
-          quietRef.current = true;
-          const endMsg = "[whisper_caring] Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
-          const endDisplay = "Deu nossos trinta minutos... você já deve estar dormindo tão bem. Boa noite... sonhe comigo, baka.";
-          const balloons = [{ display: endDisplay, ttsText: endMsg, emotionKey: 'whisper_caring', speechTags: [] }];
-          speakReplyRef.current(balloons, 'whisper', [], part => addTurn('assistant', part, 'text'));
-          setMessage(endDisplay);
-          showSpeechBubble(endDisplay, 'dormindo');
-        }
+        // Nota: expiração real é controlada pelo servidor; cliente só reflete o tempo
         return;
       }
 
