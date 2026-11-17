@@ -1404,6 +1404,7 @@ export function createChatHandler(options = {}) {
                 executeTool: executeToolForChat,
                 temperature,
                 maxTokens: 1800,
+                maxIterations: 4,
                 signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
               });
@@ -1471,6 +1472,11 @@ export function createChatHandler(options = {}) {
               tool: resolvedName,
               tools: parsed.executedTools.map(t => (toolRegistry && !toolRegistry.has(t.name)) ? (toolRegistry.names().find(n => n.replace(/\./g, '_') === t.name) || t.name) : t.name),
               result: lastExec.result,
+              executedTools: parsed.executedTools.map(t => ({
+                tool: (toolRegistry && !toolRegistry.has(t.name)) ? (toolRegistry.names().find(n => n.replace(/\./g, '_') === t.name) || t.name) : t.name,
+                args: t.args,
+                result: t.result,
+              })),
             };
             agentTurn = {
               id: executedAgentTurn.id,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyIntentWithLlm } from '../src/llm-router.js';
+import { classifyIntentWithLlm, generateReplyWithTools } from '../src/llm-router.js';
 import { createToolRegistry } from '../src/tool-registry.js';
 import { selectTopKTools } from '../src/tool-selector.js';
 
@@ -115,4 +115,108 @@ test('selectTopKTools: integra com toolRegistry e extrai candidatos semanticamen
   const topKCalendar = selectTopKTools('agendar reuniao amanha', tools, { k: 2 });
   assert.equal(topKCalendar.length > 0, true);
   assert.equal(topKCalendar[0].name, 'calendar.create');
+});
+
+test('generateReplyWithTools: encadeia múltiplas ferramentas em sequência (multi-tool chaining) e sintetiza resposta', async () => {
+  const prevKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'mock-key';
+
+  const executedOrder = [];
+  const mockTools = [
+    {
+      type: 'function',
+      function: {
+        name: 'calendar_list',
+        description: 'Lista eventos do calendário',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'spotify_control',
+        description: 'Controla a reprodução do Spotify',
+        parameters: { type: 'object', properties: { action: { type: 'string' } } },
+      },
+    },
+  ];
+
+  let turn = 0;
+  const mockClient = {
+    chatCompletions: async ({ messages, extra }) => {
+      turn += 1;
+      if (turn === 1) {
+        // Primeiro turno: modelo decide chamar calendar_list
+        return {
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: 'call_cal_1',
+                type: 'function',
+                function: { name: 'calendar_list', arguments: '{}' },
+              }],
+            },
+          }],
+        };
+      }
+      if (turn === 2) {
+        // Segundo turno: modelo vê o calendário e decide colocar música no spotify
+        const toolMsg = messages.find(m => m.role === 'tool' && m.tool_call_id === 'call_cal_1');
+        assert.ok(toolMsg, 'recebeu retorno da primeira ferramenta');
+        return {
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: 'call_spot_2',
+                type: 'function',
+                function: { name: 'spotify_control', arguments: '{"action":"play"}' },
+              }],
+            },
+          }],
+        };
+      }
+      // Terceiro turno: modelo vê que tudo foi feito e formula a resposta final
+      const spotMsg = messages.find(m => m.role === 'tool' && m.tool_call_id === 'call_spot_2');
+      assert.ok(spotMsg, 'recebeu retorno da segunda ferramenta');
+      return {
+        choices: [{
+          message: {
+            content: '{"reply":"Sua agenda está livre até as 15h! Já dei play numa música pra você focar.","gesture":"nod","actions":[]}',
+          },
+        }],
+      };
+    },
+  };
+
+  const executor = async (name, args) => {
+    executedOrder.push({ name, args });
+    if (name === 'calendar_list') return { events: ['Reunião às 15h'] };
+    if (name === 'spotify_control') return { status: 'playing', track: 'Focus Beats' };
+    return { ok: true };
+  };
+
+  try {
+    const res = await generateReplyWithTools(
+      'Você é a Usami.',
+      'Vê minha agenda de hoje e bota uma música pra eu focar',
+      {
+        tools: mockTools,
+        executeTool: executor,
+        client: mockClient,
+        maxIterations: 4,
+      },
+    );
+
+    assert.equal(res.ok, true);
+    assert.match(res.reply, /agenda está livre até as 15h/);
+    assert.equal(res.executedTools.length, 2);
+    assert.equal(res.executedTools[0].name, 'calendar_list');
+    assert.equal(res.executedTools[1].name, 'spotify_control');
+    assert.equal(executedOrder.length, 2);
+  } finally {
+    if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
+    else delete process.env.NVIDIA_API_KEY;
+  }
 });

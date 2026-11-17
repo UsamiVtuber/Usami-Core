@@ -189,11 +189,21 @@ export async function generateReplyWithActions(
   return jsonText(answer, 'reply');
 }
 
-// --- Tool calling nativo (Etapa 4b) -----------------------------------------
+function formatToolResultContent(result, maxChars = 3500) {
+  let str = '';
+  try {
+    str = JSON.stringify(result ?? {});
+  } catch {
+    str = String(result ?? '');
+  }
+  if (str.length <= maxChars) return str;
+  return str.slice(0, maxChars) + '... [truncado por tamanho]';
+}
+
+// --- Tool calling nativo & Multi-Tool Chaining (Etapa 4b) --------------------
 // Chama o provedor com `tools` no formato OpenAI function-calling. Se o modelo
-// devolver tool_calls, executa cada uma via `executeTool` e faz uma chamada de
-// follow-up para obter a resposta final. Retorna o mesmo contrato de
-// generateReplyWithActions. Limitado a `maxIterations` para evitar loop.
+// devolver tool_calls, executa cada uma via `executeTool` e faz chamadas de
+// follow-up permitindo encadeamento autônomo (multi-step ReAct).
 export async function generateReplyWithTools(
   systemPrompt,
   userMessage,
@@ -201,7 +211,7 @@ export async function generateReplyWithTools(
     model,
     tools = [],
     executeTool = async () => ({ ok: false, error: 'executor ausente' }),
-    maxIterations = 3,
+    maxIterations = 4,
     temperature = 0.7,
     maxTokens = 1800,
     client = sharedClient,
@@ -216,15 +226,23 @@ export async function generateReplyWithTools(
     finalSystem += `\n\n=== RECONCILIAÇÃO DO REFLEXO IMEDIATO ===\nVocê acabou de soltar a seguinte reação espontânea em voz alta: "${blurtReply.trim()}"\nO usuário JÁ OUVIU essa frase.\nREGRAS CRÍTICAS:\n1. NÃO repita e NÃO parafraseie essa frase de abertura.\n2. No JSON de resposta, o campo "reply" deve conter APENAS a continuação da conversa.\n`;
   }
 
+  if (tools && tools.length > 0) {
+    finalSystem += `\n\n=== DIRETRIZES DE USO DE FERRAMENTAS MULTI-PASSO (CHAINING) ===\n1. Você tem permissão e incentivo para encadear ferramentas em sequência caso a tarefa do usuário envolva mais de uma etapa ou dependa do resultado de uma ferramenta anterior.\n2. Analise os resultados recebidos antes de decidir a próxima chamada ou concluir.\n3. Quando obtiver todos os dados necessários, encerre as chamadas e formule a resposta final estritamente em JSON com "reply", "gesture" e "actions".\n`;
+  }
+
   const messages = [
     { role: 'system', content: finalSystem },
     { role: 'user', content: userMessage },
   ];
 
   const executedTools = [];
-  const extra = tools && tools.length ? { tools, tool_choice: 'auto' } : null;
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    const isLastIteration = iteration === maxIterations - 1;
+    const extra = tools && tools.length
+      ? { tools, tool_choice: isLastIteration ? 'none' : 'auto' }
+      : null;
+
     let answer;
     try {
       answer = await client.chatCompletions({
@@ -243,7 +261,7 @@ export async function generateReplyWithTools(
     if (!msg) throw new Error('resposta inválida do provedor (sem message)');
 
     const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-    if (toolCalls.length > 0) {
+    if (toolCalls.length > 0 && !isLastIteration) {
       messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
       for (const tc of toolCalls) {
         const name = tc?.function?.name;
@@ -256,7 +274,11 @@ export async function generateReplyWithTools(
           result = { ok: false, error: String(error?.message || error) };
         }
         executedTools.push({ name, args, result, id: tc.id });
-        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result ?? {}) });
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: formatToolResultContent(result),
+        });
       }
       continue;
     }
