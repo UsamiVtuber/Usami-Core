@@ -100,3 +100,12 @@ Quatro decisões do usuário fecham a Fase 0 do roadmap em `docs/auditoria-2026-
 ## Testes não tocam em `data/`
 
 - `npm test` já escreveu na memória real da companion: `createChatHandler` fechava sobre o `memoryStore` criado na avaliação do `server.mjs`, então cada rodada de testes empilhava turnos `oi`/`olá` em `data/memory.json`, movia a afinidade e fabricava fatos ("usuário cumprimenta compulsivamente") a partir desse lixo. O handler aceita `memoryStore` injetado e `USAMI_DATA_DIR` redireciona o depósito de módulo — os testes apontam ambos para `mkdtemp`. Ao adicionar rota com estado, injete o depósito no handler; não importe o caminho padrão. Vale igual para o vínculo: `createBondHandler({bondStore})` e `USAMI_DATA_DIR` (`tests/bond-*.test.mjs`).
+
+## QA-First e Validação de PRs pela Usami (Decisão do usuário, 2026-11-17)
+
+- **Fluxo de branches e PR:** Nenhuma mudança vai direto para a `main`. Toda alteração deve ser desenvolvida em branch de teste/feature (`fix/...`, `feat/...`) e aberta como Pull Request no GitHub.
+- **Revisão ativa da Usami com modelo avançado NVIDIA:** A Usami atua como agente de QA na validação do PR junto com o usuário. Para a análise de código, utiliza-se o modelo mais avançado da NVIDIA (`BRAIN_MODEL` / `nvidia/nemotron-3-ultra-550b-a55b` ou o modelo com maior capacidade de raciocínio da conta).
+- **Veredito na PR:** A Usami comenta na PR no GitHub:
+  - Se os testes passarem e a implementação estiver correta e segura, ela comenta aprovando e orienta o usuário a fechar/mergear a PR.
+  - Caso encontre falhas, regressões ou pontos de melhoria, ela comenta com as sugestões e ajustes necessários para atingir aprovação.
+
