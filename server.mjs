@@ -75,6 +75,8 @@ import { writeTechniqueNote } from './src/technique-docs.js';
 import { planAnimationSelection, planToActions, explainPlan, validatePlanRequest, intentFromText } from './src/animation-planner.js';
 import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
+import { createTimerService } from './src/timer-service.js';
+import { createTimerTools } from './src/timer-tools.js';
 import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
@@ -519,6 +521,19 @@ for (const metaTool of createMetaAgentTools({ manager: installMetaWorkspace })) 
   const registered = toolRegistry.register(metaTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${metaTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Serviço de Temporizadores, Pomodoro e Lembretes multicanal
+export const installTimerService = createTimerService({
+  dataDir: resolveDataDir(),
+  n8nQueue: sharedN8nQueue,
+});
+
+for (const timerTool of createTimerTools({ timerService: installTimerService })) {
+  const registered = toolRegistry.register(timerTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${timerTool.name} não registrada:`, registered.errors.join('; '));
   }
 }
 
@@ -2105,6 +2120,40 @@ export function createMemoryHandler(options = {}) {
     useNvidia,
     ...options,
   });
+}
+
+export function createTimerHandler(options = {}) {
+  const timerService = options.timerService || installTimerService;
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+
+  return async function handleTimer(req, res) {
+    const send = (status, data) => {
+      res.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify(data));
+    };
+
+    if (!isAllowedRequest(req.headers?.origin, req.headers?.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não permitida.' });
+    }
+
+    const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && url.pathname === '/api/timer/status') {
+      return send(200, { ok: true, ...timerService.getStatus() });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/timer/cancel') {
+      const read = await readRequestBody(req, { limit: 2048 });
+      let body = {};
+      try { body = JSON.parse(read.body || '{}'); } catch { body = {}; }
+      const cancelled = timerService.cancel(body);
+      return send(200, cancelled);
+    }
+
+    return send(404, { error: 'Rota de temporizador não encontrada.' });
+  };
 }
 
 export function createBondHandler(options = {}) {
@@ -4072,6 +4121,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
   });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
+  const handleTimer = createTimerHandler({
+    timerService: installTimerService,
+    allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
+  });
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/api/presence') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -4145,6 +4198,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.url.startsWith('/api/live/')) return handleLiveChat(req, res);
     if (req.url === '/oauth/callback' || req.url.startsWith('/oauth/callback?')
       || req.url.startsWith('/api/connectors/spotify/')) return handleSpotify(req, res);
+    if (req.url === '/api/timer/status' || req.url.startsWith('/api/timer/status?')
+      || req.url === '/api/timer/cancel' || req.url.startsWith('/api/timer/cancel?')) return handleTimer(req, res);
     if (req.method === 'GET' && req.url === '/api/llm/models') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ chat: FAST_MODEL, reasoning: BRAIN_MODEL, vision: VISION_MODEL }));
@@ -4162,8 +4217,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   });
   proactiveEngine.start(60000);
   sharedDiscordPresence.start();
+  installTimerService.start();
   server.on('close', () => {
     sharedDiscordPresence.stop();
+    installTimerService.stop();
   });
   const bindHost = process.env.USAMI_API_HOST || readEnvValue('USAMI_API_HOST') || '0.0.0.0';
   server.listen(8787, bindHost, () => console.log(`Usami API escutando em ${bindHost}:8787`));

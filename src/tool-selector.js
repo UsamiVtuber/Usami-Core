@@ -16,6 +16,7 @@ const SYNONYM_GROUPS = Object.freeze([
   ['memoria', 'lembrar', 'historico', 'rag', 'vault', 'obsidian'],
   ['musica', 'spotify', 'tocar', 'playlist', 'faixa', 'som'],
   ['workspace', 'fluxo', 'flow', 'meta', 'automacao', 'rota'],
+  ['timer', 'temporizador', 'pomodoro', 'lembrete', 'lembretes', 'lembrar', 'aviso', 'avisar', 'alarme', 'foco', 'pausa', 'descanso', 'cronometro'],
 ]);
 
 function tokenize(text) {
