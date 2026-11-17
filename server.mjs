@@ -79,6 +79,7 @@ import { createTimerService } from './src/timer-service.js';
 import { createTimerTools } from './src/timer-tools.js';
 import { parseDiscordSender, isOwnerUser, enforcePrivacy } from './src/privacy-guard.js';
 import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
+import { createSleepCompanionService, isSleepCompanionTrigger, isWakeUpTrigger, DEFAULT_SLEEP_PLAYBACK_RATE, DEFAULT_SLEEP_VOLUME, DEFAULT_SLEEP_EMOTION } from './src/sleep-companion.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
 import { createLiveChatHandler, createLiveChatStore } from './src/live-chat/live-chat-routes.js';
@@ -909,6 +910,9 @@ export function createChatHandler(options = {}) {
   // se já terminou a ferramenta e está só compitando a resposta.
   const chatActivity = options.chatActivity || sharedChatActivity;
   const discordPresence = options.discordPresence !== undefined ? options.discordPresence : sharedDiscordPresence;
+  // Serviço de companhia para dormir (modo sono): gerencia ciclo de vida de 30 min,
+  // prosódia lenta/sussurrada e detecção de intenção.
+  const sleepCompanion = options.sleepCompanion || createSleepCompanionService({ now });
   // Contador atômico de turnos em andamento: com um booleano, dois turnos
   // sobrepostos (duas abas) liberavam o motor proativo quando o primeiro
   // terminava, mesmo com o segundo ainda rodando.
@@ -1157,6 +1161,20 @@ export function createChatHandler(options = {}) {
           results: [{ file: 'obsidian_vault', content: ragContext }],
         });
         system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+      }
+
+      // Detecta gatilhos de ativação/desativação do modo sono
+      const sleepTriggered = isSleepCompanionTrigger(parsedBody.message);
+      const wakeTriggered = isWakeUpTrigger(parsedBody.message);
+
+      let sleepCompanionStatus = sleepCompanion.getStatus();
+      if (sleepTriggered && !sleepCompanionStatus.active) {
+        sleepCompanionStatus = sleepCompanion.start();
+      } else if (wakeTriggered && sleepCompanionStatus.active) {
+        sleepCompanionStatus = sleepCompanion.stop();
+      } else {
+        // Atualiza status (pode expirar automaticamente)
+        sleepCompanionStatus = sleepCompanion.getStatus();
       }
 
       if (parsedBody.input?.wakeUpJolt) {
@@ -1831,6 +1849,8 @@ export function createChatHandler(options = {}) {
         ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
         ...(agentTurn ? { agentTurn } : {}),
         ...(moodPayload ? { mood: moodPayload } : {}),
+        // Modo companhia para dormir: status e parâmetros de TTS (rate, volume, emotion)
+        ...(sleepCompanionStatus.active ? { sleepCompanion: sleepCompanionStatus } : {}),
         // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
         // renomear. contextMs é adição. animationMs é o que a animação custou
         // DENTRO do turno (pós-processamento síncrono); o refino do diretor é

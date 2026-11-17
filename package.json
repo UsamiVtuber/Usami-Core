@@ -19,6 +19,7 @@
     "test:interface": "node --test tests/ui-setup.mjs tests/menu-interface.test.mjs tests/vision-endpoint-interface.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "experiments": "node scripts/run-motion-experiments.mjs",
+    "qa:review": "node scripts/qa-review.mjs",
     "test": "npm run test:unit && npm run test:chat && npm run test:technique && npm run test:planner && npm run test:ingest && npm run test:sites"
   },
   "dependencies": {
