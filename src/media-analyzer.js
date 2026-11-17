@@ -173,6 +173,7 @@ export async function extractVideoFramesAndAudio({
 export async function analyzeMedia({
   mimeType,
   dataBase64,
+  url,
   filename = 'media',
   userPrompt = '',
   personaSystemPrompt = '',
@@ -193,21 +194,73 @@ export async function analyzeMedia({
     };
   }
 
+  if (!dataBase64 && !url) {
+    return {
+      ok: false,
+      reply: 'Ué, você disse que mandou algo, mas não veio nenhum arquivo ou link válido, baka!',
+      gesture: 'scratchHead',
+      actions: [{ type: 'gesture', name: 'scratchHead' }],
+      error: 'dataBase64 e url ausentes',
+    };
+  }
+
   const isVideo = mimeType?.startsWith('video/') || /\.(mp4|webm|mkv|mov|avi)$/i.test(filename);
   const isAudio = mimeType?.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac|opus|weba)$/i.test(filename);
   const isDoc = mimeType?.startsWith('text/') || mimeType === 'application/pdf' || mimeType === 'application/json' || /\.(pdf|txt|md|markdown|py|js|ts|tsx|jsx|json|csv|yaml|yml|xml|html|css|sql|toml|log|sh|rs|c|cpp|h|cs|java|go|php|env|ini|diff|patch)$/i.test(filename);
   let parts = [];
   let tempDir = null;
 
+  const downloadMedia = async (targetUrl) => {
+    const res = await fetchImpl(targetUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!res.ok) {
+      throw new Error(`Falha ao baixar mídia: HTTP ${res.status}`);
+    }
+    const arrayBuf = await res.arrayBuffer();
+    return Buffer.from(arrayBuf);
+  };
+
   try {
+    if (url && !dataBase64 && !isVideo) {
+      try {
+        const downloadedBuf = await downloadMedia(url);
+        dataBase64 = downloadedBuf.toString('base64');
+      } catch (err) {
+        return {
+          ok: false,
+          reply: 'Não consegui baixar o arquivo que você mandou... tenta me mandar de novo?',
+          gesture: 'scratchHead',
+          actions: [{ type: 'gesture', name: 'scratchHead' }],
+          error: err.message,
+        };
+      }
+    }
+
     if (isVideo) {
       // Processamento de vídeo: picota frames e extrai áudio
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'usami-media-'));
       // Nome interno fixo (só a extensão allowlistada do cliente sobrevive):
       // um `filename` com `../` nunca escolhe o caminho do arquivo.
       const videoPath = videoTempPath(tempDir, filename);
-      const videoBuffer = Buffer.from(dataBase64, 'base64');
-      await fs.writeFile(videoPath, videoBuffer);
+      if (url && !dataBase64) {
+        try {
+          const downloadedBuf = await downloadMedia(url);
+          await fs.writeFile(videoPath, downloadedBuf);
+        } catch (err) {
+          return {
+            ok: false,
+            reply: 'Não consegui baixar esse vídeo... me manda de novo depois?',
+            gesture: 'scratchHead',
+            actions: [{ type: 'gesture', name: 'scratchHead' }],
+            error: err.message,
+          };
+        }
+      } else {
+        const videoBuffer = Buffer.from(dataBase64 || '', 'base64');
+        await fs.writeFile(videoPath, videoBuffer);
+      }
 
       const extracted = await extractMedia({
         videoPath,
