@@ -1,0 +1,37 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "spotify-player",
+  "name": "Spotify Player",
+  "version": "1.0.0",
+  "description": "Consulta música atual, busca faixas/playlists e controla reprodução no Spotify via OAuth2 PKCE.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-16T00:00:00.000Z",
+  "tools": [
+    "spotify.now_playing",
+    "spotify.search",
+    "spotify.playlists",
+    "spotify.control"
+  ],
+  "permissions": [3],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "query",
+      "type": "string",
+      "required": false,
+      "description": "Termo de busca (faixa, artista, álbum ou playlist)."
+    },
+    {
+      "name": "action",
+      "type": "string",
+      "required": false,
+      "description": "Ação de controle (play, pause, next, previous, volume, shuffle)."
+    }
+  ],
+  "instructions": "Use spotify.now_playing para ver o que está tocando, spotify.search para localizar URIs antes de tocar e spotify.control para play/pause/next/previous/volume/shuffle.",
+  "tests": {
+    "files": ["test/spotify-player.test.mjs"],
+    "timeoutMs": 10000
+  }
+}

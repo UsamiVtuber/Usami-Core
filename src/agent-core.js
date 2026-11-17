@@ -95,6 +95,10 @@ function deriveProposalTitle(message) {
   return fragment.slice(0, 180);
 }
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;
+const SPOTIFY_NOW_PLAYING_RE = /\b(?:o que (?:ta|esta) tocando|que musica (?:e essa|ta tocando)|musica atual|tocando agora)\b|\bspotify\b.*\b(?:tocando|atual|agora|status)\b/i;
+const SPOTIFY_PLAYLISTS_RE = /\b(?:minhas?|ver|mostr\w*|list\w*)\s+playlists?\b|\bspotify\b.*\bplaylists?\b/i;
+const SPOTIFY_SEARCH_RE = /\b(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\b.*\b(?:no\s+spotify|spotify|musica|faixa|artista|album|playlist)\b/i;
+const SPOTIFY_CONTROL_RE = /\b(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da play|play|pausa|pausar|pause|para|parar|retoma|retomar|continua|continuar|proxima|proximo|pula|pular|avanca|avancar|volta|voltar|anterior|volume|abaixa|aumenta|aleatorio|shuffle)\b.*\b(?:spotify|musica|faixa|som|playlist|volume)\b|\bspotify\b.*\b(?:toca|tocar|play|pausa|pausar|pause|proxima|pular|anterior|volta|volume|shuffle)\b|\b(?:pausa|pausar|proxima|pula|anterior)\s+(?:a\s+)?(?:musica|faixa)\b/i;
 const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|explic\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|arquitetura|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status|sua arquitetura)\b/;
 
 const COMPLEX_PATTERNS = [
@@ -130,6 +134,10 @@ const OPERATIONAL_PATTERNS = [
   FINANCE_TX_RE,
   RESEARCH_SEARCH_RE,
   RESEARCH_FETCH_RE,
+  SPOTIFY_NOW_PLAYING_RE,
+  SPOTIFY_PLAYLISTS_RE,
+  SPOTIFY_SEARCH_RE,
+  SPOTIFY_CONTROL_RE,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -384,6 +392,51 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     toolName: 'finance.transactions',
     matches: normalized => FINANCE_TX_RE.test(normalized),
     buildArgs: () => ({ limit: 20 }),
+  },
+  {
+    toolName: 'spotify.now_playing',
+    matches: normalized => SPOTIFY_NOW_PLAYING_RE.test(normalized),
+    buildArgs: () => ({}),
+  },
+  {
+    toolName: 'spotify.playlists',
+    matches: normalized => SPOTIFY_PLAYLISTS_RE.test(normalized),
+    buildArgs: () => ({ limit: 15 }),
+  },
+  {
+    toolName: 'spotify.search',
+    matches: normalized => SPOTIFY_SEARCH_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message)
+        .replace(/^(?:usami[,\s]+)?(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\s+(?:por\s+|a\s+musica\s+|musica\s+)?/i, '')
+        .replace(/\b(?:no|do)\s+spotify\b/gi, '')
+        .replace(/[?!.]+$/, '')
+        .trim();
+      return { query: clean.slice(0, 180) || collapseText(message).slice(0, 180), type: 'track', limit: 5 };
+    },
+  },
+  {
+    toolName: 'spotify.control',
+    matches: normalized => SPOTIFY_CONTROL_RE.test(normalized),
+    buildArgs: (message, normalized) => {
+      if (/\b(?:pausa|pausar|pause|para|parar)\b/.test(normalized)) return { action: 'pause' };
+      if (/\b(?:proxima|proximo|pula|pular|avanca|avancar)\b/.test(normalized)) return { action: 'next' };
+      if (/\b(?:volta|voltar|anterior)\b/.test(normalized)) return { action: 'previous' };
+      if (/\b(?:shuffle|aleatorio)\b/.test(normalized)) {
+        return { action: 'shuffle', shuffleState: !/\b(?:desliga|desativ|off|nao)\b/.test(normalized) };
+      }
+      const volMatch = /\b(\d{1,3})\s*%?/.exec(normalized);
+      if (/\bvolume\b/.test(normalized) && volMatch) {
+        return { action: 'volume', volumePercent: Math.min(100, Math.max(0, Number(volMatch[1]))) };
+      }
+      const clean = collapseText(message)
+        .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da\s+play|play)\s+(?:a\s+musica\s+|musica\s+)?/i, '')
+        .replace(/\b(?:no|na|do)\s+spotify\b/gi, '')
+        .replace(/[?!.]+$/, '')
+        .trim();
+      const genericOnly = /^(?:uma?\s+musica|musica|som|algo|qualquer\s+coisa)?$/i.test(clean);
+      return clean && !genericOnly ? { action: 'play', query: clean.slice(0, 180) } : { action: 'play' };
+    },
   },
   {
     toolName: 'research.search',
@@ -1392,6 +1445,23 @@ export function formatExecutedTurnFallbackReply(turn) {
   }
   if (turn.tool === 'git.diff') {
     return r.stat ? `Diff do Git (${r.target || 'usami'}): ${r.stat.slice(0, 160)}.` : `Conferi o repositório (${r.target || 'usami'}): não há alterações pendentes.`;
+  }
+  if (turn.tool === 'spotify.now_playing') {
+    if (!r.track) return 'Nada tocando no Spotify agora.';
+    const artists = Array.isArray(r.track.artists) && r.track.artists.length ? ` — ${r.track.artists.join(', ')}` : '';
+    return `${r.playing ? 'Tocando agora' : 'Pausado'} no Spotify: ${r.track.name}${artists}.`;
+  }
+  if (turn.tool === 'spotify.playlists' && Array.isArray(r.playlists)) {
+    const names = r.playlists.slice(0, 4).map(p => p.name).filter(Boolean);
+    return names.length ? `Suas playlists no Spotify: ${names.join(', ')}.` : 'Não encontrei playlists na sua conta Spotify.';
+  }
+  if (turn.tool === 'spotify.search' && Array.isArray(r.items)) {
+    const top = r.items.slice(0, 3).map(i => i.name).filter(Boolean);
+    return top.length ? `Achei no Spotify: ${top.join(', ')}.` : 'Não encontrei resultados no Spotify.';
+  }
+  if (turn.tool === 'spotify.control') {
+    if (r.track?.name) return `Coloquei para tocar no Spotify: ${r.track.name}!`;
+    return `Comando Spotify (${r.action || 'control'}) executado!`;
   }
   if (turn.tool === 'code.inspect') {
     const syms = Array.isArray(r.symbols) && r.symbols.length ? ` Símbolos: ${r.symbols.slice(0, 4).join(', ')}.` : '';

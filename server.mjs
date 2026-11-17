@@ -47,6 +47,8 @@ import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/ema
 import { createFinanceObserverTools, publishFinanceObserverSkill } from './src/finance-observer-skill.js';
 import { createResearchAgentTools, publishResearchAgentSkill } from './src/research-agent-skill.js';
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
+import { createSpotifyAuthClient, createSpotifyConnectorHandler } from './src/spotify-auth.js';
+import { createSpotifyTools, publishSpotifySkill } from './src/spotify-skill.js';
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
@@ -416,6 +418,7 @@ for (const [label, publishFn] of [
   ['finance-observer', publishFinanceObserverSkill],
   ['research-agent', publishResearchAgentSkill],
   ['git-assistant', publishGitAssistantSkill],
+  ['spotify-player', publishSpotifySkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -423,6 +426,8 @@ for (const [label, publishFn] of [
     console.error(`Aviso: publicação do manifesto ${label} falhou:`, error?.message || error);
   }
 }
+
+const installSpotifyAuth = createSpotifyAuthClient({ dataDir: resolveDataDir() });
 
 for (const skillTool of [
   ...createStudyCompanionTools({
@@ -442,6 +447,19 @@ for (const skillTool of [
     },
   }),
   ...createGitAssistantTools({ gitClient: installGitClient, codeBridge: installCodeBridge }),
+  ...createSpotifyTools({
+    spotifyAuth: installSpotifyAuth,
+    onTelemetry: evt => sendObservabilityEvent({
+      kind: 'spotify_tool',
+      source: 'usami-spotify',
+      route: `/tools/${evt.tool}`,
+      statusCode: evt.ok ? 200 : 500,
+      durationMs: evt.durationMs,
+      isError: Boolean(evt.isError),
+      errorMessage: evt.errorMessage || null,
+      metadata: { tool: evt.tool, action: evt.action || null },
+    }),
+  }),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {
@@ -3761,9 +3779,9 @@ export function createMediaAnalyzeHandler(options = {}) {
       return send(400, { error: 'Corpo da requisição deve ser JSON válido.' });
     }
 
-    const { mimeType, data, filename, prompt } = parsed;
-    if (!data || typeof data !== 'string') {
-      return send(400, { error: 'Campo "data" (base64) é obrigatório.' });
+    const { mimeType, data, url, filename, prompt } = parsed;
+    if ((!data || typeof data !== 'string') && (!url || typeof url !== 'string')) {
+      return send(400, { error: 'Campo "data" (base64) ou "url" é obrigatório.' });
     }
     // Catálogo opcional no corpo (mesmo formato do /api/chat). O frontend atual
     // não envia, então sem catálogo o filtro mantém as ações válidas.
@@ -3804,6 +3822,7 @@ export function createMediaAnalyzeHandler(options = {}) {
       result = await analyzeMedia({
         mimeType,
         dataBase64: data,
+        url,
         filename,
         userPrompt: prompt,
         personaSystemPrompt: personaPrompt,
@@ -4009,6 +4028,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     bridge: installCodeBridge,
     allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
   });
+  const handleSpotify = createSpotifyConnectorHandler({
+    spotifyAuth: installSpotifyAuth,
+    allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
+  });
   const handleAvatarStatic = createStaticAssetHandler({ rootDir: pathResolve('public') });
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/api/presence') {
@@ -4081,6 +4104,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       || req.url.startsWith('/api/agent/proposals?')) return handleBridge(req, res);
     if (req.url.startsWith('/api/proactive/')) return handleProactive(req, res);
     if (req.url.startsWith('/api/live/')) return handleLiveChat(req, res);
+    if (req.url === '/oauth/callback' || req.url.startsWith('/oauth/callback?')
+      || req.url.startsWith('/api/connectors/spotify/')) return handleSpotify(req, res);
     if (req.method === 'GET' && req.url === '/api/llm/models') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ chat: FAST_MODEL, reasoning: BRAIN_MODEL, vision: VISION_MODEL }));

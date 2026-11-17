@@ -52,6 +52,7 @@ export function buildAuthorizeUrl({
  */
 export async function startLoopbackCallbackServer({
   expectedState,
+  port = 0,
   timeoutMs = 120_000,
 } = {}) {
   if (!expectedState) throw new Error('expectedState é obrigatório.');
@@ -98,7 +99,7 @@ export async function startLoopbackCallbackServer({
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
+    server.listen(port, '127.0.0.1', () => resolve());
   });
 
   const addr = server.address();
