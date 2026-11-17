@@ -38,8 +38,8 @@ const GITHUB_CREATE_REPO_RE = /\b(?:cria\w*|adiciona\w*|gerar?|fazer?)\b.*\b(?:r
 const IS_COMPLETION_OR_INSPECT_RE = /\b(?:como\s+ficou|finalizei|conclu[ií]|terminei|apliquei|comitei|ja\s+(?:fiz|apliquei|comitei))\b|\b(?:da\s+uma\s+olhada|olh\w*|veja?|mostr\w*)\s+(?:no\s+c[oó]digo|no\s+repo|no\s+commit|nos\s+commits|como\s+ficou)\b/i;
 // Verbos de ação explícitos: "sugestão" é substantivo e não pode transformar
 // uma pergunta sobre sugestões em proposta de código (issue automática).
-const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*|cri\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
-const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha|teria)\s+(?:(?:mais|outra?|algumas?)\s+)*(?:sugest\w*|melhoria\w*|proposta\w*|ideia\w*)\b/i;
+const CODE_PROPOSE_RE = /\b(?:propo(?:nha|r|sta|e|em|stas?)?|sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*|cri\w*|pass\w*)\b.*\b(?:melhoria\w*|mudanca\w*|alteracao|alteracoes|correcao|correcoes|fix|feature\w*|tarefa\w*|proposta\w*|codigo|funcao|retry|cache|modulo|skill|readme|documentacao)\b|\b(?:codigo|sistema|repo(?:sitorio)?)\b.*\b(?:sugest\w*|melhoria\w*|proposta\w*|ajust\w*|otimiz\w*)\b|\b(?:sugir\w*|suger\w*|manda\w*|envi\w*|ped\w*|pass\w*|repass\w*)\b.*\b(?:code\s*agent|coding\s*agent|agente|antigravity|claude|qoder|cursor)\b|\b(?:pass\w*|repass\w*|mand\w*|envi\w*)\b.*\b(?:(?:essa|esta|a)\s+)?(?:issue|tarefa|demanda|correcao|fix)\b|\b(?:code\s*agent|coding\s*agent|antigravity|claude\s*code|qoder|cursor)\b.*\b(?:faz\w*|cri\w*|arrum\w*|implement\w*|ajust\w*|propo\w*|suger\w*|mand\w*|adicion\w*|coloc\w*)\b|\b(?:proposta\s+de\s+codigo|proposta\s+para\s+(?:o\s+)?(?:agente|code\s*agent|coding\s*agent|antigravity))\b/i;
+const CODE_PROPOSALS_QUERY_RE = /\b(?:quais|lista\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|cade|o que (?:voce|vc|tu) (?:mandou|enviou|propos))\b.*\b(?:propostas?|sugestoes?)\b|\b(?:ja\s+mandou|mandou\s+mesmo|enviou\s+mesmo|mandou\s+o\s+que|o\s+que\s+foi\s+enviado)\b|\b(?:tem|ha|teria)\s+(?:(?:mais|outra?|algumas?)\s+)*(?:sugest\w*|melhoria\w*|proposta\w*|ideia\w*)\b|\b(?:code\s*agent|coding\s*agent|agente|antigravity)\b.*\b(?:ligado|online|ativo|trabalhando|pegou|recebeu|andamento)\b|\b(?:ver|v[eê]|veja|confer\w*|chec\w*)\b.*\b(?:se\s+(?:o\s+)?(?:code\s*agent|agente))\b/i;
 // Pergunta sobre sugestões nunca é pedido para abrir proposta/issue.
 const SUGGESTION_INQUIRY_RE = /\b(?:tem|ha|teria)\s+(?:(?:mais|outra?|algumas?)\s+)*(?:sugest\w*|melhoria\w*|proposta\w*|ideia\w*)\b/i;
 
@@ -83,15 +83,20 @@ function deriveIssueTitle(message) {
 
 function deriveProposalTitle(message) {
   const normalized = normalizeText(message);
-  const match = /(?:proposta|melhoria|tarefa|feature|mudanca|fix|sugestao|adicionar|sugerir|criar)(?:\s+de|\s+para|\s+um|\s+uma|\s+chamada|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+pro\s+agente|\s+pro\s+code\s*agent|\s+pro\s+coding\s*agent|\s*$)/i.exec(normalized);
+  const match = /(?:proposta|melhoria|tarefa|feature|mudanca|fix|sugestao|issue|adicionar|sugerir|criar|passar|passa)(?:\s+de|\s+para|\s+um|\s+uma|\s+chamada|\s*:\s*)?\s*["']?([^"'\n]+?)["']?(?:\s+pro\s+agente|\s+pro\s+code\s*agent|\s+pro\s+coding\s*agent|\s*$)/i.exec(normalized);
   let fragment = match ? cleanTitleFragment(match[1]) : '';
   if (fragment.length < 5 || ANAPHORIC_TITLE_RE.test(fragment)) {
     fragment = cleanTitleFragment(normalized
       .replace(/^.*?\b(?:code|coding)\s*agent\b\s*/i, '')
       .replace(/^.*?\b(?:antigravity|claude(?:\s+code)?|qoder|cursor)\b\s*/i, '')
-      .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:manda|mande|enviar|envie|pede|peca|sugira|sugere|proponha|propoe|cria|crie|criar|adiciona|adicionar)\b\s*/i, ''));
+      .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:manda|mande|enviar|envie|pede|peca|sugira|sugere|proponha|propoe|cria|crie|criar|adiciona|adicionar|passa|passe|passar)\b\s*/i, ''));
   }
-  if (fragment.length < 5 || ANAPHORIC_TITLE_RE.test(fragment)) return null;
+  if (fragment.length < 3 || ANAPHORIC_TITLE_RE.test(fragment)) {
+    if (/\b(?:issue|tarefa|fix|correcao|proposta)\b/i.test(normalized)) {
+      return 'Encaminhamento de tarefa para o Code Agent';
+    }
+    return null;
+  }
   return fragment.slice(0, 180);
 }
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;

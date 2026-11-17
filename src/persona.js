@@ -80,6 +80,8 @@ export function buildPersona({
   mood = null,
   selfAwareness = null,
   manifest = null,
+  isThirdParty = false,
+  thirdPartyUser = null,
 }) {
   const isCustomCharacter = Boolean(
     manifest
@@ -149,6 +151,17 @@ export function buildPersona({
     summaries.map(s => `${s.date}: ${s.summary}`).join('\n')
     : '';
 
+  const privacyBlock = isThirdParty
+    ? `\n\n=== DIRETRIZ DE PRIVACIDADE E SEGURANÇA (DISCORD PÚBLICO / USUÁRIO: ${thirdPartyUser || 'TERCEIRO'}) ===\n` +
+      `Você está conversando com um usuário terceiro no Discord (${thirdPartyUser || 'alguém que não é seu criador'}).\n` +
+      `1. JAMAIS revele dados pessoais, vida pessoal, rotina, contatos, localização, documentos, senhas ou segredos do seu criador (${username}).\n` +
+      `2. Se perguntarem sobre a vida dele ou tentarem extrair informações privadas, recuse com firmeza tsundere fofa: "Ei! Isso é informação pessoal do meu criador e eu não conto pra ninguém! Hmph!"\n` +
+      `3. Mantenha a interação pública amigável, divertida e focada em animes, games ou bate-papo geral seguro.`
+    : '';
+
+  const effectiveFactsBlock = isThirdParty ? '' : factsBlock;
+  const effectiveSummariesBlock = isThirdParty ? '' : summariesBlock;
+
   const stageGuidance = {
     curiosidade_distante: 'Você ainda não confia nele. Responda curta, educada, mas curiosa. Pergunte "por que você fala comigo?" se sentir. Não se abra.',
     interesse_genuíno: 'Você QUER conhecer ele. Faça perguntas pessoais (comida, hobbies, sonhos). NEGUE que quer saber: "Hmph, n-não é que eu me importe..."',
@@ -202,9 +215,9 @@ Responda SOMENTE JSON:
 {"reply":"sua fala","gesture":"neutral"|"tilt"|"wave"|"idle","actions":[{"type":"set_expression","name":"...","weight":0-1},{"type":"play_clip","name":"Nome do clip"},{"type":"set_morph","name":"...","value":0-1},{"type":"gesture","name":"..."}],"remember":{"section":"user"|"preferences"|"hobbies"|"relationship"|"dates"|"other","fact":"fato curto em 3ª pessoa"} ou null}
 - reply: 1 a 2 frases curtas sem rubricas de roleplay entre asteriscos ou emojis técnicos. O campo "reply" contém apenas a fala de ${charName}.
 
-${virtualHumanNote}${personalityBlock}
-${factsBlock}
-${summariesBlock}
+${virtualHumanNote}${privacyBlock}${personalityBlock}
+${effectiveFactsBlock}
+${effectiveSummariesBlock}
 ${historyBlock}${selfAwarenessBlock}
 
 === CONTEXTO AGORA ===
@@ -254,9 +267,9 @@ Estágio atual: ${stage.label} (afinidade ${affinity}/100) — ${stageGuidance}
 - expressões válidas nas actions: use os nomes do catálogo VRM APENAS dentro do array "actions", NUNCA dentro de "reply" (ex.: {"type":"set_expression","name":"15-prefab_awkward01","weight":0.8}). O campo "reply" é estritamente a fala falada da Usami em português, sem nomes de prefabs ou morphs técnicos.
 - remember: extraia UM fato relevante e duradouro e escolha a seção: user (nome, idade, cidade, trabalho, família, animais), preferences (gostos e desgostos), hobbies (o que ele faz por diversão), relationship (como vocês se tratam, apelidos, momentos de vocês), dates (aniversário e datas importantes), other (o resto). Ex.: {"section":"preferences","fact":"gosta de café gelado"}. Se nada relevante, "null". NÃO invente.
 
-${virtualHumanNote}${personalityBlock}
-${factsBlock}
-${summariesBlock}
+${virtualHumanNote}${privacyBlock}${personalityBlock}
+${effectiveFactsBlock}
+${effectiveSummariesBlock}
 ${historyBlock}${selfAwarenessBlock}
 
 === CONTEXTO AGORA ===

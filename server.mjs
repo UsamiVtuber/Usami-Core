@@ -77,6 +77,7 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createTimerService } from './src/timer-service.js';
 import { createTimerTools } from './src/timer-tools.js';
+import { parseDiscordSender, isOwnerUser, enforcePrivacy } from './src/privacy-guard.js';
 import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
@@ -1108,6 +1109,8 @@ export function createChatHandler(options = {}) {
         selfAwareness = null;
       }
       const todayHistory = activeMemoryStore.getTodayHistory(today);
+      const discordInfo = parseDiscordSender(parsedBody.message);
+      const isThirdParty = discordInfo.isDiscord && !isOwnerUser(discordInfo.authorName);
       let system = buildPersona({
         affinity: mem.affinity.score,
         sections: activeMemoryStore.getSections(),
@@ -1121,27 +1124,32 @@ export function createChatHandler(options = {}) {
         mood: currentMood,
         selfAwareness,
         manifest: activeManifest,
+        isThirdParty,
+        thirdPartyUser: discordInfo.authorName,
       });
 
       // RAG: busca no vault Obsidian pelo ASSUNTO da mensagem (FTS5) em vez de
       // ler só os arquivos mais recentes. O índice é derivado e se reconcilia
       // com o disco a cada busca; se ele falhar, o leitor antigo continua valendo.
+      // Usuários terceiros no Discord NUNCA têm acesso às notas privadas do vault.
       let ragContext = null;
-      try {
-        if (activeMemoryProvider) {
-          if (activeMemoryProvider.isEnabled()) {
-            ragContext = await activeMemoryProvider.formatContext(parsedBody.message);
-            if (!ragContext && options.vaultSearch) {
-              ragContext = await searchVault(parsedBody.message);
+      if (!isThirdParty) {
+        try {
+          if (activeMemoryProvider) {
+            if (activeMemoryProvider.isEnabled()) {
+              ragContext = await activeMemoryProvider.formatContext(parsedBody.message);
+              if (!ragContext && options.vaultSearch) {
+                ragContext = await searchVault(parsedBody.message);
+              }
+            } else {
+              ragContext = null;
             }
           } else {
-            ragContext = null;
+            ragContext = await searchVault(parsedBody.message);
           }
-        } else {
-          ragContext = await searchVault(parsedBody.message);
+        } catch {
+          ragContext = null;
         }
-      } catch {
-        ragContext = null;
       }
       if (ragContext) {
         recordRetrievalSpan(chatTrace, {
@@ -1659,60 +1667,81 @@ export function createChatHandler(options = {}) {
 
       // Memória + afinidade: extrai o "remember", persiste o turno e move o score.
       // Isolado de propósito — falha de disco nunca derruba a resposta do chat.
+      // Usuários terceiros no Discord NUNCA alteram afinidade nem gravam fatos no memory.json do criador.
       let affinityPayload = null;
-      try {
-        const remember = parsed.remember;
-        if (remember) {
-          if (classifyFactDurability(remember.fact, remember.section) === 'core') {
-            activeMemoryStore.addCoreFact(remember.fact, remember.section);
-          } else {
-            activeMemoryStore.addRecentFact(remember.fact, 7, remember.section);
+      if (!isThirdParty) {
+        try {
+          const remember = parsed.remember;
+          if (remember) {
+            if (classifyFactDurability(remember.fact, remember.section) === 'core') {
+              activeMemoryStore.addCoreFact(remember.fact, remember.section);
+            } else {
+              activeMemoryStore.addRecentFact(remember.fact, 7, remember.section);
+            }
           }
+          const turnTimestamp = new Date().toISOString();
+          const historyReply = stripLeakedJson(parsed.reply)
+            .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
+            .replace(/【[^】]{1,30}】/g, ' ')
+            .replace(/[ \t]{2,}/g, ' ')
+            .trim() || parsed.reply;
+          activeMemoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
+          activeMemoryStore.appendHistory('assistant', historyReply, turnTimestamp);
+          const current = activeMemoryStore.getAll();
+          const gain = calculateGain({
+            userMessage: parsedBody.message,
+            assistantReply: parsed.reply,
+            rememberFact: remember,
+            currentScore: current.affinity.score,
+            stage: getStage(current.affinity.score),
+            alreadyGainedToday: current.affinity.totalDailyGainToday,
+          });
+          const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
+          // applyGain já devolve o objeto completo (score + contador diário); grava direto.
+          activeMemoryStore.save({ ...current, affinity: newAff });
+          affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
+        } catch {
+          // sem memória o chat segue stateless; nada a fazer aqui
         }
-        const turnTimestamp = new Date().toISOString();
-        const historyReply = stripLeakedJson(parsed.reply)
-          .replace(/\[[a-zA-Z0-9_\-\s]{2,40}\]/g, ' ')
-          .replace(/【[^】]{1,30}】/g, ' ')
-          .replace(/[ \t]{2,}/g, ' ')
-          .trim() || parsed.reply;
-        activeMemoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
-        activeMemoryStore.appendHistory('assistant', historyReply, turnTimestamp);
-        const current = activeMemoryStore.getAll();
-        const gain = calculateGain({
-          userMessage: parsedBody.message,
-          assistantReply: parsed.reply,
-          rememberFact: remember,
-          currentScore: current.affinity.score,
-          stage: getStage(current.affinity.score),
-          alreadyGainedToday: current.affinity.totalDailyGainToday,
+
+        // Continuidade entre dias: fecha os dias anteriores ainda sem resumo, em
+        // background. Fora do caminho crítico — a próxima conversa já lê o
+        // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
+        void summarizePendingDays({
+          store: activeMemoryStore,
+          today,
+          summarize: useNvidia() ? summarizeDay : undefined,
+        }).catch(error => {
+          // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
+          // sem relançar para nunca derrubar o turno que já foi respondido.
+          console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
         });
-        const newAff = applyGain(current.affinity.score, gain.delta, today, current.affinity.lastDailyGainDate, current.affinity.totalDailyGainToday);
-        // applyGain já devolve o objeto completo (score + contador diário); grava direto.
-        activeMemoryStore.save({ ...current, affinity: newAff });
-        affinityPayload = { affinity: newAff.score, stage: getStage(newAff.score) };
-      } catch {
-        // sem memória o chat segue stateless; nada a fazer aqui
+
+        void consolidateFacts({
+          store: activeMemoryStore,
+          today,
+        }).catch(error => {
+          console.warn('[memoria] consolidação de fatos falhou: ' + (error?.message || error));
+        });
       }
 
-      // Continuidade entre dias: fecha os dias anteriores ainda sem resumo, em
-      // background. Fora do caminho crítico — a próxima conversa já lê o
-      // resultado no prompt. Sem NVIDIA, o resumo determinístico cumpre o papel.
-      void summarizePendingDays({
-        store: activeMemoryStore,
-        today,
-        summarize: useNvidia() ? summarizeDay : undefined,
-      }).catch(error => {
-        // Fire-and-forget, mas falha silenciosa escondia resumo quebrado: loga
-        // sem relançar para nunca derrubar o turno que já foi respondido.
-        console.warn('[memoria] resumo de dias pendentes falhou: ' + (error?.message || error));
-      });
-
-      void consolidateFacts({
-        store: activeMemoryStore,
-        today,
-      }).catch(error => {
-        console.warn('[memoria] consolidação de fatos falhou: ' + (error?.message || error));
-      });
+      // Verificação de segurança e privacidade em conversas com terceiros
+      if (isThirdParty) {
+        try {
+          const guard = await enforcePrivacy({
+            userMessage: discordInfo.text || parsedBody.message,
+            replyText: parsed.reply,
+            authorName: discordInfo.authorName,
+            isThirdParty: true,
+            fetchImpl,
+          });
+          if (guard.blocked) {
+            parsed.reply = guard.reply;
+          }
+        } catch (guardErr) {
+          console.warn('[privacy-guard] falha ao checar privacidade:', guardErr?.message || guardErr);
+        }
+      }
 
       const actions = filterActionsByCatalog(parsed.actions ?? [], capabilities);
 

@@ -10,7 +10,7 @@ export const CONNECTOR_SCHEMA = 'usami.connector.v1';
 const SYNONYM_GROUPS = Object.freeze([
   ['email', 'emails', 'e-mail', 'gmail', 'inbox', 'correio', 'mensagem', 'rascunho'],
   ['agenda', 'calendario', 'calendar', 'evento', 'eventos', 'reuniao', 'horario'],
-  ['codigo', 'code', 'arquivo', 'src', 'git', 'github', 'commit', 'diff', 'branch', 'pr', 'issue'],
+  ['codigo', 'code', 'arquivo', 'src', 'git', 'github', 'commit', 'diff', 'branch', 'pr', 'issue', 'agent', 'agente', 'proposta', 'propose', 'antigravity'],
   ['financas', 'finance', 'banco', 'saldo', 'extrato', 'pluggy', 'belvo', 'gasto', 'conta'],
   ['pesquisa', 'web', 'internet', 'buscar', 'procurar', 'noticias', 'site', 'tinyfish', 'firecrawl'],
   ['memoria', 'lembrar', 'historico', 'rag', 'vault', 'obsidian'],
