@@ -22,10 +22,10 @@ jobs:
       pull-requests: write  # para gh pr comment
 
     env:
-      # Modelo de raciocínio profundo (NVIDIA Nemotron 3 Ultra via OpenRouter)
+      # Modelo de raciocínio profundo (NVIDIA Nemotron 3 Ultra via API NVIDIA direta)
       BRAIN_MODEL: nvidia/nemotron-3-ultra-550b-a55b
-      # Chave do OpenRouter (secret do repo, não da conta Usamiin)
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Chave da NVIDIA (organization secret: Settings → Secrets → Actions → Organization secrets)
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
 
     steps:
       - name: Checkout PR

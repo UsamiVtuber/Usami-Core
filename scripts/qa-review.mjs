@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Usami QA Review - roda no self-hosted runner do notebook Linux
- * Usa BRAIN_MODEL (NVIDIA nemotron-3-ultra) via OpenRouter para code review
+ * Usa BRAIN_MODEL (NVIDIA nemotron-3-ultra) via API NVIDIA direta para code review
  * Posta comentário na PR como Usamiin via gh CLI (token no keychain)
  */
 
@@ -89,18 +89,17 @@ Responda **apenas** com o JSON acima.`;
 }
 
 async function callBrainModel(prompt) {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY não definido');
+  const apiKey = process.env.NVIDIA_API_KEY;
+  if (!apiKey) throw new Error('NVIDIA_API_KEY não definido (organization secret)');
 
   const model = process.env.BRAIN_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b';
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://github.com/UsamiVtuber/Usami-Core',
-      'X-Title': 'Usami QA Review'
+      'Accept': 'application/json'
     },
     body: JSON.stringify({
       model,
@@ -113,7 +112,7 @@ async function callBrainModel(prompt) {
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${err}`);
+    throw new Error(`NVIDIA API ${res.status}: ${err}`);
   }
 
   const data = await res.json();
