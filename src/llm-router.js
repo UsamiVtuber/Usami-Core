@@ -279,6 +279,65 @@ export async function generateReplyWithTools(
   return { ok: false, reply: 'Não consegui concluir a tarefa (muitas chamadas de ferramenta).', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
 }
 
+// --- Classificador Semântico de Intenção (FAST_MODEL) -----------------------
+// Analisa a mensagem do usuário para categorizar em conversation, operational
+// ou complex e identificar a ferramenta candidata sem depender de regexes.
+export async function classifyIntentWithLlm({
+  message,
+  tools = [],
+  signal,
+  model = FAST_MODEL,
+  client = sharedClient,
+} = {}) {
+  if (!process.env.NVIDIA_API_KEY) return null;
+  const toolNames = Array.isArray(tools)
+    ? tools.map(t => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
+    : [];
+
+  const toolsSummary = toolNames.length > 0
+    ? ` Ferramentas disponíveis: ${toolNames.slice(0, 30).join(', ')}.`
+    : '';
+
+  const prompt = `Classifique a intenção do usuário estritamente em JSON.
+kind:
+- "conversation": conversa normal, saudações, piadas, desabafos, opiniões ou perguntas gerais sem necessidade de ferramentas.
+- "operational": pedido para executar uma ação direta ou consultar dados de uma ferramenta (agenda, spotify, git, tarefas, email, finanças, pesquisa, etc.).
+- "complex": solicitação de planejamento detalhado, múltiplos passos, cronograma ou roadmap.
+tool: nome exato da ferramenta em caso operacional (ex: spotify.now_playing, calendar.list), ou null caso não seja aplicável.${toolsSummary}
+
+Responda ESTRITAMENTE o JSON no formato:
+{"kind":"conversation"|"operational"|"complex","goal":"descrição concisa","tool":null,"confidence":0.9}`;
+
+  try {
+    const answer = await client.chatJson({
+      model: model || FAST_MODEL,
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: String(message || '') },
+      ],
+      temperature: 0.1,
+      max_tokens: 300,
+      extra: llmExtra(),
+      ...(signal ? { signal } : {}),
+    });
+    const parsed = parseJsonSafe(jsonText(answer, 'kind'), { label: 'de intenção', answer });
+    if (parsed && typeof parsed === 'object') {
+      const kind = ['conversation', 'operational', 'complex'].includes(parsed.kind) ? parsed.kind : 'conversation';
+      return {
+        kind,
+        goal: typeof parsed.goal === 'string' && parsed.goal.trim() ? parsed.goal.trim() : String(message || '').trim(),
+        tool: typeof parsed.tool === 'string' && parsed.tool.trim() ? parsed.tool.trim() : null,
+        confidence: typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence)
+          ? Math.min(1, Math.max(0, parsed.confidence))
+          : 0.85,
+      };
+    }
+  } catch (error) {
+    console.warn('classifyIntentWithLlm falhou:', describeFetchError(error));
+  }
+  return null;
+}
+
 // --- Animação (planeja ações com base na resposta) -------------------------
 
 export async function planAnimation(reply, capabilities, { temperature = 0.3 } = {}) {

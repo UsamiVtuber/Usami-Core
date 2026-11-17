@@ -1,0 +1,118 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { classifyIntentWithLlm } from '../src/llm-router.js';
+import { createToolRegistry } from '../src/tool-registry.js';
+import { selectTopKTools } from '../src/tool-selector.js';
+
+test('classifyIntentWithLlm: classifica intenções operacional, conversa e complexa com mock client', async () => {
+  const mockTools = [
+    { name: 'calendar.create', description: 'Cria evento na agenda' },
+    { name: 'spotify.now_playing', description: 'Mostra música atual' },
+    { name: 'git.status', description: 'Mostra status do repositório' },
+  ];
+
+  const prevKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'mock-key';
+
+  try {
+    // 1. Operacional
+    const mockClientOperational = {
+      chatJson: async () => ({
+        content: '{"kind":"operational","goal":"Tocar música no Spotify","tool":"spotify.now_playing","confidence":0.95}',
+        reasoning: '',
+      }),
+    };
+    const resOp = await classifyIntentWithLlm({
+      message: 'que música tá tocando agora?',
+      tools: mockTools,
+      client: mockClientOperational,
+    });
+    assert.equal(resOp.kind, 'operational');
+    assert.equal(resOp.tool, 'spotify.now_playing');
+    assert.equal(resOp.confidence, 0.95);
+
+    // 2. Conversa
+    const mockClientChat = {
+      chatJson: async () => ({
+        content: '{"kind":"conversation","goal":"Conversa informal","tool":null,"confidence":0.92}',
+        reasoning: '',
+      }),
+    };
+    const resChat = await classifyIntentWithLlm({
+      message: 'você gosta de anime?',
+      tools: mockTools,
+      client: mockClientChat,
+    });
+    assert.equal(resChat.kind, 'conversation');
+    assert.equal(resChat.tool, null);
+
+    // 3. Complexa
+    const mockClientComplex = {
+      chatJson: async () => ({
+        content: '{"kind":"complex","goal":"Planejar sprint de desenvolvimento","tool":null,"confidence":0.88}',
+        reasoning: '',
+      }),
+    };
+    const resComplex = await classifyIntentWithLlm({
+      message: 'monta um cronograma passo a passo para o lançamento',
+      tools: mockTools,
+      client: mockClientComplex,
+    });
+    assert.equal(resComplex.kind, 'complex');
+    assert.equal(resComplex.tool, null);
+  } finally {
+    if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
+    else delete process.env.NVIDIA_API_KEY;
+  }
+});
+
+test('classifyIntentWithLlm: sem chave NVIDIA devolve null de forma segura', async () => {
+  const prevKey = process.env.NVIDIA_API_KEY;
+  delete process.env.NVIDIA_API_KEY;
+  try {
+    const res = await classifyIntentWithLlm({ message: 'ola' });
+    assert.equal(res, null);
+  } finally {
+    if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
+  }
+});
+
+test('selectTopKTools: integra com toolRegistry e extrai candidatos semanticamente', () => {
+  const registry = createToolRegistry();
+  const reg1 = registry.register({
+    schema: 'usami.agent.tool.v1',
+    name: 'spotify.now_playing',
+    version: '1.0.0',
+    description: 'Mostra a música atual no Spotify',
+    origin: 'runtime',
+    permissionLevel: 1,
+    timeoutMs: 5000,
+    parameters: [],
+    execute: async () => ({ ok: true }),
+    verify: () => true,
+  });
+  assert.equal(reg1.ok, true, reg1.errors?.join(', '));
+
+  const reg2 = registry.register({
+    schema: 'usami.agent.tool.v1',
+    name: 'calendar.create',
+    version: '1.0.0',
+    description: 'Cria evento ou compromisso na agenda',
+    origin: 'runtime',
+    permissionLevel: 2,
+    timeoutMs: 5000,
+    parameters: [],
+    execute: async () => ({ ok: true }),
+    verify: () => true,
+  });
+  assert.equal(reg2.ok, true, reg2.errors?.join(', '));
+
+  const tools = registry.list();
+  const topKSpotify = selectTopKTools('qual musica esta tocando?', tools, { k: 2 });
+  assert.equal(topKSpotify.length > 0, true);
+  assert.equal(topKSpotify[0].name, 'spotify.now_playing');
+
+  const topKCalendar = selectTopKTools('agendar reuniao amanha', tools, { k: 2 });
+  assert.equal(topKCalendar.length > 0, true);
+  assert.equal(topKCalendar[0].name, 'calendar.create');
+});

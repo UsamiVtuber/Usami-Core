@@ -60,8 +60,9 @@ import { classifyEmotion, DEFAULT_CONFIDENCE_THRESHOLD } from './src/emotion-cla
 import { createEmotionEngine } from './src/emotion-engine.js';
 import { createExpressionDriver } from './src/expression-driver.js';
 import { createVrmGestureLayer } from './src/vrm-gesture-layer.js';
-import { classifyUserMessage, describeFetchError, generateReplyWithActions, generateReplyWithTools, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL } from './src/llm-router.js';
-import { buildOpenAiTools } from './src/tool-registry.js';
+import { classifyIntentWithLlm, classifyUserMessage, describeFetchError, generateReplyWithActions, generateReplyWithTools, planAnimation, structureTechnique, summarizeDay, FAST_MODEL, BRAIN_MODEL } from './src/llm-router.js';
+import { buildOpenAiTools, toolToOpenAi } from './src/tool-registry.js';
+import { selectTopKTools } from './src/tool-selector.js';
 import { summarizePendingDays } from './src/memory-summaries.js';
 import { classifyFactDurability, consolidateFacts } from './src/memory-consolidation.js';
 import { readRagContext, resolveVaultDir } from './src/rag.js';
@@ -527,6 +528,9 @@ const installAgentCore = createAgentCore({
   planner: installTaskPlanner,
   skillCatalog: installSkillCatalog,
   turnDeadlineMs: TURN_DEADLINE_MS,
+  classifyWithLlm: async ({ message, tools, signal }) => {
+    return classifyIntentWithLlm({ message, tools, signal });
+  },
 });
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -1364,19 +1368,26 @@ export function createChatHandler(options = {}) {
           const nvidiaAbort = new AbortController();
           const alternateAbort = new AbortController();
           const routerKey = alternate?.key || null;
-          // Etapa 1: seleção por papel. Ferramenta rodou (operacional/complexo) →
-          // "chefão" (brain); conversa normal ou LoL fast tier → modelo rápido (fast).
-          const chatModel = (executedAgentTurn && !isFastTier) ? BRAIN_MODEL : FAST_MODEL;
-          // Em testes (generateReply mockado) ou sem registry, mantém o fluxo regex.
-          const useTools = !options.generateReply && !isFastTier && chatModel === BRAIN_MODEL && toolRegistry && typeof toolRegistry.toOpenAiTools === 'function';
-          const openAiTools = useTools ? toolRegistry.toOpenAiTools() : [];
+          // Seleção semântica Top-K de ferramentas candidatas para Function Calling
+          const candidateTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
+            ? selectTopKTools(parsedBody.message, toolRegistry.list(), { k: 6, minScore: 0.08 })
+            : [];
+          const openAiTools = (!options.generateReply && candidateTools.length > 0)
+            ? candidateTools.map(toolToOpenAi)
+            : [];
+          const useTools = openAiTools.length > 0;
+          // Etapa 1: seleção por papel. Ferramenta rodou ou disponível → BRAIN_MODEL; conversa normal → FAST_MODEL.
+          const chatModel = (executedAgentTurn || useTools) && !isFastTier ? BRAIN_MODEL : FAST_MODEL;
           const executeToolForChat = async (name, args) => {
             if (!installToolExecutor) return { ok: false, error: 'executor ausente' };
+            const resolvedName = (toolRegistry && !toolRegistry.has(name))
+              ? (toolRegistry.names().find(n => n.replace(/\./g, '_') === name) || name)
+              : name;
             // Tool calling nativo: aqui sabemos o NOME real da ferramenta que
             // está rodando — o cliente mostra "executando <tool>".
-            publishActivity({ phase: 'tool', tool: name, tools: [name] });
+            publishActivity({ phase: 'tool', tool: resolvedName, tools: [resolvedName] });
             try {
-              const exec = await installToolExecutor.execute(name, args, { origin: 'chat' });
+              const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'chat' });
               return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
             } catch (error) {
               return { ok: false, error: String(error?.message || error) };
@@ -1448,6 +1459,28 @@ export function createChatHandler(options = {}) {
               onHedge: () => { hedged = true; },
             })
             : await startNvidia();
+
+          if (parsed?.executedTools && parsed.executedTools.length > 0 && !executedAgentTurn) {
+            const lastExec = parsed.executedTools[parsed.executedTools.length - 1];
+            const resolvedName = (toolRegistry && !toolRegistry.has(lastExec.name))
+              ? (toolRegistry.names().find(n => n.replace(/\./g, '_') === lastExec.name) || lastExec.name)
+              : lastExec.name;
+            executedAgentTurn = {
+              id: `turn-${now()}`,
+              status: 'executed',
+              tool: resolvedName,
+              tools: parsed.executedTools.map(t => (toolRegistry && !toolRegistry.has(t.name)) ? (toolRegistry.names().find(n => n.replace(/\./g, '_') === t.name) || t.name) : t.name),
+              result: lastExec.result,
+            };
+            agentTurn = {
+              id: executedAgentTurn.id,
+              kind: 'operational',
+              route: 'tool',
+              status: 'executed',
+              tool: resolvedName,
+              tools: executedAgentTurn.tools,
+            };
+          }
 
           if (parsed?.ok && isDeferredToolPromise(parsed.reply)) {
             if (executedAgentTurn && executedAgentTurn.status === 'executed') {
@@ -2030,7 +2063,7 @@ export function createN8nCommandHandler(options = {}) {
           location,
           ...(body?.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata : {}),
         },
-      }).catch(() => {});
+      }).catch(() => { });
 
       return send(202, { ok: true });
     }

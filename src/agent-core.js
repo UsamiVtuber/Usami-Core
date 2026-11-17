@@ -1032,6 +1032,21 @@ export function createAgentCore({
     let intentGoal = clean;
     let intentConfidence = deterministic.confidence;
 
+    if (resolvedList.length === 0 && typeof classifyWithLlm === 'function') {
+      try {
+        const classified = await classifyIntent(clean);
+        if (classified?.intent?.kind === 'operational' && classified.matchedToolName) {
+          resolvedList = resolveToolCalls(clean, registry, toolMatchers, classified.matchedToolName, isToolActive);
+          if (resolvedList.length > 0) {
+            intentGoal = classified.intent.goal || clean;
+            intentConfidence = classified.intent.confidence;
+          }
+        }
+      } catch {
+        // Falha no classificador LLM: segue para confirmações de histórico
+      }
+    }
+
     if (resolvedList.length === 0) {
       const confirmed = resolveFromHistoryConfirmation(clean, history);
       if (confirmed) {
