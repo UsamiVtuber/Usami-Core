@@ -166,6 +166,21 @@ test('spotify-skill: publica manifesto e executa now_playing, search, playlists 
     const tools = createSpotifyTools({
       spotifyAuth: fakeAuth,
       onTelemetry: evt => telemetryEvents.push(evt),
+      statsUrlProvider: () => 'http://10.42.0.1:5678/webhook/usami-spotify-stats',
+      fetchImpl: async (url, opts) => {
+        assert.equal(url, 'http://10.42.0.1:5678/webhook/usami-spotify-stats');
+        const body = JSON.parse(opts.body);
+        assert.equal(body.period, '30d');
+        return new Response(JSON.stringify({
+          ok: true,
+          period: '30d',
+          totalScrobbles: 42,
+          uniqueTracks: 15,
+          topTracks: [{ name: 'Shelter', plays: 9 }],
+          topArtists: [{ artist: 'Porter Robinson', plays: 12 }],
+          recent: [],
+        }), { status: 200 });
+      },
     });
     const byName = Object.fromEntries(tools.map(t => [t.name, t]));
 
@@ -187,10 +202,16 @@ test('spotify-skill: publica manifesto e executa now_playing, search, playlists 
 
     const volRes = await byName['spotify.control'].execute({ action: 'volume', volumePercent: 80 });
     assert.equal(volRes.volumePercent, 80);
-    assert.equal(telemetryEvents.length, 5);
+
+    const statsRes = await byName['spotify.stats'].execute({ period: '30d', limit: 5 });
+    assert.equal(statsRes.totalScrobbles, 42);
+    assert.equal(statsRes.topArtists[0].artist, 'Porter Robinson');
+
+    assert.equal(telemetryEvents.length, 6);
     assert.equal(telemetryEvents[0].tool, 'spotify.now_playing');
     assert.equal(telemetryEvents[0].ok, true);
     assert.equal(telemetryEvents[3].action, 'play');
+    assert.equal(telemetryEvents[5].tool, 'spotify.stats');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -198,9 +219,31 @@ test('spotify-skill: publica manifesto e executa now_playing, search, playlists 
 
 test('agent-core: roteia pedidos de Spotify no chat/Discord para os matchers e formata fallback', () => {
   assert.equal(classifyDeterministic('o que tá tocando no spotify?').kind, 'operational');
+  assert.equal(classifyDeterministic('oq eu estava ouvindo?').kind, 'operational');
+  assert.equal(classifyDeterministic('qual música eu tô ouvindo agora?').kind, 'operational');
   assert.equal(classifyDeterministic('toca Idol no spotify').kind, 'operational');
   assert.equal(classifyDeterministic('pausa a música').kind, 'operational');
   assert.equal(classifyDeterministic('mostra minhas playlists').kind, 'operational');
+  assert.equal(classifyDeterministic('quais músicas eu mais ouvi no spotify?').kind, 'operational');
+
+  const statsMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.stats');
+  assert.ok(statsMatcher.matches('meu top artistas esse mes'));
+  assert.deepEqual(statsMatcher.buildArgs('meu top artistas esse mes', 'meu top artistas esse mes'), {
+    period: '30d',
+    limit: 5,
+  });
+
+  const statsReply = formatExecutedTurnFallbackReply({
+    status: 'executed',
+    tool: 'spotify.stats',
+    result: {
+      period: '7d',
+      totalScrobbles: 18,
+      topTracks: [{ name: 'STATIC', plays: 6 }],
+      topArtists: [{ artist: 'Virtual Riot', plays: 8 }],
+    },
+  });
+  assert.match(statsReply, /18 scrobbles/);
 
   const playMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.control');
   assert.ok(playMatcher.matches('toca idol no spotify'));

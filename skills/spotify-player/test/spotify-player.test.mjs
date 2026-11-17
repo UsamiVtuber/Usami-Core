@@ -5,6 +5,8 @@ import {
   buildSearchParams,
   normalizePlaybackState,
   normalizePlaylist,
+  normalizeStatsQuery,
+  normalizeStatsResponse,
   normalizeTrack,
   validatePlaybackCommand,
 } from '../spotify-core.mjs';
@@ -53,4 +55,10 @@ test('spotify-core: normaliza track, playback e playlist e valida comandos', () 
   assert.throws(() => validatePlaybackCommand({ action: 'destroy' }));
   assert.throws(() => validatePlaybackCommand({ action: 'volume', volumePercent: 150 }));
   assert.deepEqual(validatePlaybackCommand({ action: 'play', query: 'Idol' }), { action: 'play', query: 'Idol' });
+
+  assert.deepEqual(normalizeStatsQuery({ period: '30d', limit: 10 }), { period: '30d', limit: 10 });
+  assert.deepEqual(normalizeStatsQuery({ period: 'invalid', limit: 99 }), { period: '7d', limit: 20 });
+  const stats = normalizeStatsResponse({ totalScrobbles: 12, topTracks: [{ name: 'Idol', plays: 5 }] });
+  assert.equal(stats.totalScrobbles, 12);
+  assert.equal(stats.topTracks.length, 1);
 });

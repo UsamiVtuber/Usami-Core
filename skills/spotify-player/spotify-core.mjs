@@ -124,3 +124,33 @@ export function validatePlaybackCommand(args = {}) {
 
   return out;
 }
+
+const VALID_STATS_PERIODS = new Set(['24h', '7d', '30d', 'all']);
+
+export function normalizeStatsQuery({ period = '7d', limit = 5 } = {}) {
+  const cleanPeriod = String(period || '7d').trim().toLowerCase();
+  const safePeriod = VALID_STATS_PERIODS.has(cleanPeriod) ? cleanPeriod : '7d';
+  const cleanLimit = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 20) : 5;
+  return { period: safePeriod, limit: cleanLimit };
+}
+
+export function normalizeStatsResponse(raw, fallbackPeriod = '7d') {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      period: fallbackPeriod,
+      totalScrobbles: 0,
+      uniqueTracks: 0,
+      topTracks: [],
+      topArtists: [],
+      recent: [],
+    };
+  }
+  return {
+    period: typeof raw.period === 'string' ? raw.period : fallbackPeriod,
+    totalScrobbles: Number.isFinite(Number(raw.totalScrobbles)) ? Number(raw.totalScrobbles) : 0,
+    uniqueTracks: Number.isFinite(Number(raw.uniqueTracks)) ? Number(raw.uniqueTracks) : 0,
+    topTracks: Array.isArray(raw.topTracks) ? raw.topTracks : [],
+    topArtists: Array.isArray(raw.topArtists) ? raw.topArtists : [],
+    recent: Array.isArray(raw.recent) ? raw.recent : [],
+  };
+}

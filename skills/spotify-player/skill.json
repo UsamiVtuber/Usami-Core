@@ -11,7 +11,8 @@
     "spotify.now_playing",
     "spotify.search",
     "spotify.playlists",
-    "spotify.control"
+    "spotify.control",
+    "spotify.stats"
   ],
   "permissions": [3],
   "dependencies": [],

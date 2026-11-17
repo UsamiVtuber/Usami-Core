@@ -95,7 +95,8 @@ function deriveProposalTitle(message) {
   return fragment.slice(0, 180);
 }
 const GIT_STATUS_RE = /\b(?:status|branch|estado|situacao)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?(?:\s+local)?|projeto)\b|\b(?:em\s+qual|qual)\s+(?:a\s+)?branch\b|\b(?:mostr\w*|us\w*|test\w*|execut\w*|rod\w*|acion\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|da\s+uma\s+olhada)\b.*\b(?:git-assistant|git\s+assistant|status\s+do\s+git|meu\s+git|repo|repositorio|projeto)\b|\b(?:ver|v[eê]|veja|olh\w*|chec\w*|confer\w*|da\s+uma\s+olhada)\b.*\b(?:repos?|repositorios?|arquivos?|mudancas?|commits?|alteracoes)?\s*(?:locais|local|do\s+core|do\s+desktop)\b/i;
-const SPOTIFY_NOW_PLAYING_RE = /\b(?:o que (?:ta|esta) tocando|que musica (?:e essa|ta tocando)|musica atual|tocando agora)\b|\bspotify\b.*\b(?:tocando|atual|agora|status)\b/i;
+const SPOTIFY_NOW_PLAYING_RE = /\b(?:o que|oq|que musica|qual musica|qual som)\s+(?:(?:eu|vc|voce|a gente)\s+)?(?:(?:ta|esta|estava|to|estou)\s+)?(?:tocando|ouvindo|escutando|rolando)\b|\b(?:musica\s+atual|tocando\s+agora|ouvindo\s+agora)\b|\bspotify\b.*\b(?:tocando|ouvindo|atual|agora|status)\b/i;
+const SPOTIFY_STATS_RE = /\b(?:last\.?fm|scrobbles?|estatisticas?\s+(?:do\s+)?spotify|resumo\s+musical|historico\s+(?:do\s+)?spotify)\b|\b(?:top|mais\s+ouvid\w*|mais\s+tocad\w*|tenho\s+ouvido|ouvi\s+mais)\b.*\b(?:musicas?|faixas?|artistas?|spotify)\b|\b(?:musicas?|faixas?|artistas?)\s+(?:\w+\s+){0,2}mais\s+(?:ouvi|escu\w*|toquei)\b/i;
 const SPOTIFY_PLAYLISTS_RE = /\b(?:minhas?|ver|mostr\w*|list\w*)\s+playlists?\b|\bspotify\b.*\bplaylists?\b/i;
 const SPOTIFY_SEARCH_RE = /\b(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\b.*\b(?:no\s+spotify|spotify|musica|faixa|artista|album|playlist)\b/i;
 const SPOTIFY_CONTROL_RE = /\b(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da play|play|pausa|pausar|pause|para|parar|retoma|retomar|continua|continuar|proxima|proximo|pula|pular|avanca|avancar|volta|voltar|anterior|volume|abaixa|aumenta|aleatorio|shuffle)\b.*\b(?:spotify|musica|faixa|som|playlist|volume)\b|\bspotify\b.*\b(?:toca|tocar|play|pausa|pausar|pause|proxima|pular|anterior|volta|volume|shuffle)\b|\b(?:pausa|pausar|proxima|pula|anterior)\s+(?:a\s+)?(?:musica|faixa)\b/i;
@@ -135,6 +136,7 @@ const OPERATIONAL_PATTERNS = [
   RESEARCH_SEARCH_RE,
   RESEARCH_FETCH_RE,
   SPOTIFY_NOW_PLAYING_RE,
+  SPOTIFY_STATS_RE,
   SPOTIFY_PLAYLISTS_RE,
   SPOTIFY_SEARCH_RE,
   SPOTIFY_CONTROL_RE,
@@ -397,6 +399,17 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     toolName: 'spotify.now_playing',
     matches: normalized => SPOTIFY_NOW_PLAYING_RE.test(normalized),
     buildArgs: () => ({}),
+  },
+  {
+    toolName: 'spotify.stats',
+    matches: normalized => SPOTIFY_STATS_RE.test(normalized),
+    buildArgs: (_message, normalized) => {
+      let period = '7d';
+      if (/\b(?:hoje|24h|ultimo dia)\b/.test(normalized)) period = '24h';
+      else if (/\b(?:mes|30\s*dias)\b/.test(normalized)) period = '30d';
+      else if (/\b(?:sempre|geral|todo\s+tempo|tudo)\b/.test(normalized)) period = 'all';
+      return { period, limit: 5 };
+    },
   },
   {
     toolName: 'spotify.playlists',
@@ -1462,6 +1475,21 @@ export function formatExecutedTurnFallbackReply(turn) {
   if (turn.tool === 'spotify.control') {
     if (r.track?.name) return `Coloquei para tocar no Spotify: ${r.track.name}!`;
     return `Comando Spotify (${r.action || 'control'}) executado!`;
+  }
+  if (turn.tool === 'spotify.stats') {
+    const topTracks = Array.isArray(r.topTracks)
+      ? r.topTracks.slice(0, 3).map(t => `${t.name} (${t.plays}x)`)
+      : [];
+    const topArtists = Array.isArray(r.topArtists)
+      ? r.topArtists.slice(0, 3).map(a => `${a.artist} (${a.plays}x)`)
+      : [];
+    if (!r.totalScrobbles) {
+      return `Ainda não há scrobbles registrados no período (${r.period || '7d'}).`;
+    }
+    const parts = [`No período (${r.period || '7d'}): ${r.totalScrobbles} scrobbles`];
+    if (topTracks.length) parts.push(`top faixas: ${topTracks.join(', ')}`);
+    if (topArtists.length) parts.push(`top artistas: ${topArtists.join(', ')}`);
+    return `${parts.join(' · ')}.`;
   }
   if (turn.tool === 'code.inspect') {
     const syms = Array.isArray(r.symbols) && r.symbols.length ? ` Símbolos: ${r.symbols.slice(0, 4).join(', ')}.` : '';

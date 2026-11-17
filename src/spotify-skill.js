@@ -8,6 +8,7 @@
  *  - `spotify.control` (nível 3): play/pause/next/previous/volume/shuffle.
  */
 import { AGENT_SCHEMAS } from './agent-contracts.js';
+import { readEnvValue } from './api-security.js';
 import { publishSkillPackage } from './skill-package.js';
 import { createSpotifyAuthClient } from './spotify-auth.js';
 import {
@@ -15,6 +16,8 @@ import {
   buildSearchParams,
   normalizePlaybackState,
   normalizePlaylist,
+  normalizeStatsQuery,
+  normalizeStatsResponse,
   normalizeTrack,
   validatePlaybackCommand,
 } from '../skills/spotify-player/spotify-core.mjs';
@@ -25,7 +28,10 @@ export const SPOTIFY_TOOLS = Object.freeze([
   'spotify.search',
   'spotify.playlists',
   'spotify.control',
+  'spotify.stats',
 ]);
+
+const DEFAULT_SPOTIFY_STATS_URL = 'http://10.42.0.1:5678/webhook/usami-spotify-stats';
 
 const SPOTIFY_API_BASE = 'https://api.spotify.com/v1';
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -43,6 +49,8 @@ function appendDevice(url, deviceId) {
 export function createSpotifyTools({
   spotifyAuth = createSpotifyAuthClient(),
   onTelemetry = null,
+  statsUrlProvider = () => readEnvValue('N8N_SPOTIFY_STATS_URL') || DEFAULT_SPOTIFY_STATS_URL,
+  fetchImpl = (...args) => fetch(...args),
 } = {}) {
   function emitTelemetry(tool, extra = {}) {
     if (typeof onTelemetry !== 'function') return;
@@ -268,5 +276,48 @@ export function createSpotifyTools({
     },
   };
 
-  return [nowPlayingTool, searchTool, playlistsTool, controlTool].map(wrapTool);
+  const statsTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'spotify.stats',
+    version: '1.0.0',
+    description: 'Consulta estatísticas estilo Last.fm (top músicas, top artistas e histórico recente de scrobbles) no Postgres via n8n.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 8000,
+    parameters: [
+      { name: 'period', type: 'string', required: false, description: 'Janela: 24h | 7d | 30d | all (padrão 7d).' },
+      { name: 'limit', type: 'number', required: false, description: 'Quantidade de itens no ranking (1 a 20, padrão 5).' },
+    ],
+    verify(result) {
+      return isPlainObject(result)
+        && result.ok === true
+        && result.schema === SPOTIFY_SCHEMA
+        && Array.isArray(result.topTracks)
+        && Array.isArray(result.topArtists);
+    },
+    async execute(args = {}) {
+      const query = normalizeStatsQuery(args);
+      const url = String(statsUrlProvider() || '').trim();
+      if (!url) {
+        throw new Error('URL do webhook Spotify Stats não configurada.');
+      }
+      const response = await fetchImpl(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(query),
+        signal: AbortSignal.timeout(7000),
+      });
+      if (!response.ok) {
+        throw new Error(`Spotify Stats no n8n falhou (HTTP ${response.status}).`);
+      }
+      const raw = await response.json();
+      return {
+        ok: true,
+        schema: SPOTIFY_SCHEMA,
+        ...normalizeStatsResponse(raw, query.period),
+      };
+    },
+  };
+
+  return [nowPlayingTool, searchTool, playlistsTool, controlTool, statsTool].map(wrapTool);
 }
