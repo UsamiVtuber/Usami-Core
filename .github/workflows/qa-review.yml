@@ -38,8 +38,20 @@ jobs:
           gh auth status --hostname github.com
           echo "✅ gh CLI autenticado (token no keychain do SO)"
 
+      - name: Checagens rápidas
+        id: checks
+        # Falha de sintaxe é entregue ao modelo como dado, não derruba o review.
+        continue-on-error: true
+        run: |
+          QA_BASE_REF="origin/${GITHUB_BASE_REF:-main}" \
+          QA_CHECKS_OUT="$RUNNER_TEMP/qa-checks.json" \
+          node scripts/qa-checks.mjs
+        shell: bash
+
       - name: Roda QA Review
         id: review
+        env:
+          QA_CHECKS_FILE: ${{ runner.temp }}/qa-checks.json
         run: |
           PR_NUM="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
           echo "🔍 Revisando PR #$PR_NUM..."

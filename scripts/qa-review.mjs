@@ -5,7 +5,7 @@
  * Posta comentário na PR como Usamiin via gh CLI (token no keychain)
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const PR_NUMBER = process.argv[2];
@@ -44,7 +44,38 @@ async function postComment(body) {
   console.log('✅ Comentário postado na PR #' + PR_NUMBER);
 }
 
-function buildReviewPrompt(diff, prInfo) {
+function readChecks(filePath) {
+  if (!filePath) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function formatChecks(checks) {
+  if (!checks) return 'O runner não enviou checagens — trate testes e sintaxe como NA.';
+  const lines = [
+    `- Node: ${checks.node}`,
+    `- Arquivos alterados: ${checks.changedFiles}`,
+  ];
+  if (checks.diffError) lines.push(`- Diff indisponível: ${checks.diffError}`);
+  if (checks.syntax.length === 0) {
+    lines.push('- Sintaxe (`node --check`): nenhum arquivo JS/ESM alterado');
+  } else {
+    const failed = checks.syntax.filter(item => !item.ok);
+    lines.push(failed.length === 0
+      ? `- Sintaxe (\`node --check\`): ok em ${checks.syntax.length} arquivo(s)`
+      : `- Sintaxe (\`node --check\`): ${failed.length} de ${checks.syntax.length} arquivo(s) com erro`);
+    for (const item of failed) lines.push(`  - ${item.file}: ${item.error}`);
+  }
+  lines.push(checks.unit?.ran
+    ? `- Suíte unitária: ${checks.unit.summary || 'executada'}`
+    : `- Suíte unitária: não executada (${checks.unit?.reason || 'motivo não informado'})`);
+  return lines.join('\n');
+}
+
+function buildReviewPrompt(diff, prInfo, checks) {
   return `Você é a **Usami**, companheira virtual e agente de QA do projeto Usami-Core.
 Sua tarefa: fazer **code review completo** da PR #${PR_NUMBER} e emitir veredito.
 
@@ -79,6 +110,13 @@ Sua tarefa: fazer **code review completo** da PR #${PR_NUMBER} e emitir veredito
     "Sugestão opcional de melhoria não-bloqueante"
   ]
 }
+
+## Checagens do runner (fonte da verdade)
+${formatChecks(checks)}
+
+Regras sobre as checagens:
+- Use apenas o que está nesta seção. Se a suíte unitária não foi executada, o check "testes" é "NA" — nunca invente PASS nem FAIL.
+- O diff é a mudança contra a base, então linhas de contexto não aparecem nele. Um hunk de remoção não prova que o arquivo ficou vazio nem que um job ou bloco deixou de existir: só afirme remoção total quando o diff mostrar o conteúdo integral removido.
 
 ## Diff da PR
 \`\`\`diff
@@ -166,9 +204,10 @@ async function main() {
 
   try {
     const [diff, prInfo] = await Promise.all([getDiff(), getPRInfo()]);
+    const checks = readChecks(process.env.QA_CHECKS_FILE);
     console.log('📄 Diff obtido, chamando modelo...');
 
-    const prompt = buildReviewPrompt(diff, prInfo);
+    const prompt = buildReviewPrompt(diff, prInfo, checks);
     const review = await callBrainModel(prompt);
     console.log(`📋 Veredito: ${review.veredito}`);
 
