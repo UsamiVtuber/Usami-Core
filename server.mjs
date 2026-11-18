@@ -1121,9 +1121,10 @@ export function createChatHandler(options = {}) {
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
       const mem = activeMemoryStore.getAll();
-      const today = new Date().toISOString().slice(0, 10);
-      const hour = new Date().getHours();
-      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      // `today` é a chave do histórico no memory-store (dias em UTC); o prompt e a
+      // cena usam o instante local via `requestNow`, para não deslocar a hora do dia.
+      const requestNow = new Date();
+      const today = requestNow.toISOString().slice(0, 10);
       let currentMood = null;
       try {
         currentMood = activeMoodStore ? activeMoodStore.getAll(mem.affinity.score) : null;
@@ -1147,8 +1148,7 @@ export function createChatHandler(options = {}) {
         history: todayHistory,
         summaries: activeMemoryStore.getSummaries().slice(-3),
         username: mem.user.nickname || 'você',
-        date: today,
-        timeOfDay,
+        now: requestNow,
         personality: activePersonalityStore.get(),
         mood: currentMood,
         selfAwareness,
@@ -3993,9 +3993,8 @@ export function createMediaAnalyzeHandler(options = {}) {
     let personaPrompt = '';
     try {
       const mem = memoryStore.getAll?.() || {};
-      const today = new Date().toISOString().slice(0, 10);
-      const hour = new Date().getHours();
-      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      const requestNow = new Date();
+      const today = requestNow.toISOString().slice(0, 10);
       personaPrompt = buildPersona({
         affinity: mem.affinity?.score || 0,
         sections: memoryStore.getSections?.() || {},
@@ -4003,8 +4002,7 @@ export function createMediaAnalyzeHandler(options = {}) {
         history: memoryStore.getTodayHistory?.(today) || [],
         summaries: memoryStore.getSummaries?.().slice(-3) || [],
         username: mem.user?.nickname || 'você',
-        date: today,
-        timeOfDay,
+        now: requestNow,
         personality: personalityStore?.get?.(),
       });
     } catch {
