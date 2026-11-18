@@ -47,7 +47,7 @@ test('guidance só inclui traços fora da zona neutra, com intensidade', () => {
 });
 
 test('persona sem ajustes é idêntica à anterior; com ajustes ganha o bloco', () => {
-  const base = { affinity: 30, date: '2026-11-01', timeOfDay: 'noite' };
+  const base = { affinity: 30, date: '2026-11-01', timeOfDay: 'noite', now: new Date('2026-11-01T21:30:00') };
   assert.equal(buildPersona({ ...base, personality: defaultPersonality() }), buildPersona(base));
   const adjusted = buildPersona({ ...base, personality: { traits: { playfulness: 95 } } });
   assert.match(adjusted, /=== AJUSTES DE PERSONALIDADE/);

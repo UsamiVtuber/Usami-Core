@@ -42,6 +42,7 @@ test('buildPersona: mantém texto idêntico ao legado quando usami-classic ou se
     username: 'Lucas',
     date: '2026-11-16',
     timeOfDay: 'tarde',
+    now: new Date('2026-11-16T15:00:00'),
   };
   const legacyPrompt = buildPersona(opts);
   const manifestPrompt = buildPersona({ ...opts, manifest: createDefaultUsamiManifest() });
