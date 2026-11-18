@@ -13,7 +13,11 @@
     "timer.status",
     "timer.report",
     "timer.pomodoro",
-    "timer.block"
+    "timer.block",
+    "timer.export",
+    "timer.tags",
+    "timer.session.addTags",
+    "timer.session.removeTags"
   ],
   "permissions": [1, 2],
   "dependencies": [],

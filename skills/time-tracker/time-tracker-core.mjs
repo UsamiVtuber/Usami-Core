@@ -46,6 +46,37 @@ function formatDurationMs(ms) {
   return `${minutes}min`;
 }
 
+function escapeCsv(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function sessionsToCsv(sessions) {
+  const headers = ['id', 'title', 'kind', 'status', 'projectId', 'tags', 'startedAt', 'endedAt', 'durationMs', 'durationHuman', 'plannedDurationMinutes'];
+  const rows = sessions.map(s => [
+    s.id,
+    s.title,
+    s.kind,
+    s.status,
+    s.projectId || '',
+    Array.isArray(s.tags) ? s.tags.join(';') : '',
+    s.startedAt || '',
+    s.endedAt || '',
+    s.actualDurationMs || '',
+    s.actualDurationMs ? formatDurationMs(s.actualDurationMs) : (s.status === 'in_progress' ? 'em andamento' : ''),
+    s.plannedDurationMinutes || '',
+  ]);
+  return [headers.join(','), ...rows.map(r => r.map(escapeCsv).join(','))].join('\n');
+}
+
+function sessionsToJson(sessions) {
+  return JSON.stringify(sessions, null, 2);
+}
+
 export function createTimeTrackerCore({
   dataDir = resolveDataDir(),
   defaultPomodoroMinutes = 25,
@@ -424,6 +455,86 @@ export function createTimeTrackerCore({
     };
   }
 
+  /**
+   * Exporta sessões para CSV ou JSON.
+   * @param {{format?:'csv'|'json', period?:'day'|'week'|'all', projectId?:string, date?:string}} params
+   */
+  async function exportSessions({ format = 'csv', period = 'week', projectId, date } = {}) {
+    const report = await getReport({ period, projectId, date });
+    const sessions = report.sessions;
+
+    let content, mimeType, extension;
+    if (format === 'json') {
+      content = sessionsToJson(sessions);
+      mimeType = 'application/json';
+      extension = 'json';
+    } else {
+      content = sessionsToCsv(sessions);
+      mimeType = 'text/csv';
+      extension = 'csv';
+    }
+
+    const filename = `time-report-${period}-${new Date().toISOString().slice(0, 10)}.${extension}`;
+
+    return {
+      ok: true,
+      format,
+      filename,
+      mimeType,
+      content,
+      sessionCount: sessions.length,
+    };
+  }
+
+  /**
+   * Lista todas as tags usadas nas sessões.
+   * @param {{}} params
+   */
+  function getAllTags() {
+    const allSessions = timerStore.list({ limit: 5000 });
+    const tagSet = new Set();
+    for (const s of allSessions) {
+      for (const tag of s.tags || []) {
+        tagSet.add(tag);
+      }
+    }
+    return [...tagSet].sort();
+  }
+
+  /**
+   * Adiciona tags a uma sessão existente.
+   * @param {{sessionId:string, tags:string[]}} params
+   */
+  async function addTagsToSession({ sessionId, tags = [] }) {
+    const session = timerStore.get(sessionId);
+    if (!session) throw new Error(`sessão não encontrada (${sessionId})`);
+
+    const currentTags = session.tags || [];
+    const newTags = [...new Set([...currentTags, ...tags])];
+
+    const updated = timerStore.update(sessionId, { tags: newTags });
+    if (!updated.ok) throw new Error('falha ao atualizar tags');
+
+    return { ok: true, session: updated.session, addedTags: tags.filter(t => !currentTags.includes(t)) };
+  }
+
+  /**
+   * Remove tags de uma sessão.
+   * @param {{sessionId:string, tags:string[]}} params
+   */
+  async function removeTagsFromSession({ sessionId, tags = [] }) {
+    const session = timerStore.get(sessionId);
+    if (!session) throw new Error(`sessão não encontrada (${sessionId})`);
+
+    const currentTags = session.tags || [];
+    const newTags = currentTags.filter(t => !tags.includes(t));
+
+    const updated = timerStore.update(sessionId, { tags: newTags });
+    if (!updated.ok) throw new Error('falha ao atualizar tags');
+
+    return { ok: true, session: updated.session, removedTags: tags.filter(t => currentTags.includes(t)) };
+  }
+
   // --- Validadores das tools (para o tool-registry) ---
   const toolSpecs = [
     {
@@ -512,6 +623,61 @@ export function createTimeTrackerCore({
         { name: 'tags', type: 'array', required: false, description: 'Tags adicionais' },
       ],
       verify: (result) => result && result.ok === true && result.block && result.block.metadata?.timeBlock === true,
+    },
+    {
+      schema: 'usami.agent.tool.v1',
+      name: 'timer.export',
+      version: '1.0.0',
+      description: 'Exporta sessões de tempo para CSV ou JSON.',
+      origin: 'skill',
+      permissionLevel: 1,
+      timeoutMs: 5000,
+      parameters: [
+        { name: 'format', type: 'string', required: false, description: 'Formato: csv ou json', enum: ['csv', 'json'] },
+        { name: 'period', type: 'string', required: false, description: 'Período: day, week ou all', enum: ['day', 'week', 'all'] },
+        { name: 'projectId', type: 'string', required: false, description: 'Filtrar por projeto' },
+        { name: 'date', type: 'string', required: false, description: 'Data de referência (ISO-8601)' },
+      ],
+      verify: (result) => result && result.ok === true && result.content && typeof result.sessionCount === 'number',
+    },
+    {
+      schema: 'usami.agent.tool.v1',
+      name: 'timer.tags',
+      version: '1.0.0',
+      description: 'Lista todas as tags usadas nas sessões de tempo.',
+      origin: 'skill',
+      permissionLevel: 1,
+      timeoutMs: 2000,
+      parameters: [],
+      verify: (result) => result && result.ok === true && Array.isArray(result.tags),
+    },
+    {
+      schema: 'usami.agent.tool.v1',
+      name: 'timer.session.addTags',
+      version: '1.0.0',
+      description: 'Adiciona tags a uma sessão de timer existente.',
+      origin: 'skill',
+      permissionLevel: 2,
+      timeoutMs: 5000,
+      parameters: [
+        { name: 'sessionId', type: 'string', required: true, description: 'ID da sessão (timer-session store)' },
+        { name: 'tags', type: 'array', required: true, description: 'Tags a adicionar' },
+      ],
+      verify: (result) => result && result.ok === true && result.session && Array.isArray(result.addedTags),
+    },
+    {
+      schema: 'usami.agent.tool.v1',
+      name: 'timer.session.removeTags',
+      version: '1.0.0',
+      description: 'Remove tags de uma sessão de timer existente.',
+      origin: 'skill',
+      permissionLevel: 2,
+      timeoutMs: 5000,
+      parameters: [
+        { name: 'sessionId', type: 'string', required: true, description: 'ID da sessão (timer-session store)' },
+        { name: 'tags', type: 'array', required: true, description: 'Tags a remover' },
+      ],
+      verify: (result) => result && result.ok === true && result.session && Array.isArray(result.removedTags),
     },
   ];
 

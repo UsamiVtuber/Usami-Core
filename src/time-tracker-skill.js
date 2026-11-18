@@ -17,6 +17,10 @@ export const TIME_TRACKER_TOOLS = Object.freeze([
   'timer.report',
   'timer.pomodoro',
   'timer.block',
+  'timer.export',
+  'timer.tags',
+  'timer.session.addTags',
+  'timer.session.removeTags',
 ]);
 
 /**
@@ -87,5 +91,25 @@ export function createTimeTrackerTools({
     execute: async (args) => core.createTimeBlock(args),
   };
 
-  return [startTool, stopTool, statusTool, reportTool, pomodoroTool, blockTool];
+  const exportTool = {
+    ...core.toolSpecs.find(s => s.name === 'timer.export'),
+    execute: async (args) => core.exportSessions(args),
+  };
+
+  const tagsTool = {
+    ...core.toolSpecs.find(s => s.name === 'timer.tags'),
+    execute: async () => ({ ok: true, tags: core.getAllTags() }),
+  };
+
+  const addTagsTool = {
+    ...core.toolSpecs.find(s => s.name === 'timer.session.addTags'),
+    execute: async (args) => core.addTagsToSession(args),
+  };
+
+  const removeTagsTool = {
+    ...core.toolSpecs.find(s => s.name === 'timer.session.removeTags'),
+    execute: async (args) => core.removeTagsFromSession(args),
+  };
+
+  return [startTool, stopTool, statusTool, reportTool, pomodoroTool, blockTool, exportTool, tagsTool, addTagsTool, removeTagsTool];
 }

@@ -197,17 +197,21 @@ describe('time-tracker skill', () => {
 
   // --- Tool Specs ---
 
-  test('toolSpecs expõe 6 ferramentas com verify functions', () => {
+  test('toolSpecs expõe 10 ferramentas com verify functions', () => {
     const specs = tracker.toolSpecs;
-    assert.strictEqual(specs.length, 6);
+    assert.strictEqual(specs.length, 10);
     const names = specs.map(s => s.name).sort();
     assert.deepStrictEqual(names, [
       'timer.block',
+      'timer.export',
       'timer.pomodoro',
       'timer.report',
+      'timer.session.addTags',
+      'timer.session.removeTags',
       'timer.start',
       'timer.status',
       'timer.stop',
+      'timer.tags',
     ]);
     for (const spec of specs) {
       assert.strictEqual(typeof spec.verify, 'function');
