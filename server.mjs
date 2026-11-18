@@ -32,6 +32,8 @@ import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseB
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
 import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
+import { createTimeTrackerTools, publishTimeTrackerSkill } from './src/time-tracker-skill.js';
+import { createHabitGardenTools, publishHabitGardenSkill } from './src/habit-garden-skill.js';
 import {
   createDailyBriefingService,
   createDailyBriefingTool,
@@ -348,7 +350,14 @@ try {
 } catch {
   // load() já loga o aviso; o gate nega execuções até o arquivo ser corrigido.
 }
-const installToolExecutor = createToolExecutor({ registry: toolRegistry, gate: installToolGate, dataDir: resolveDataDir() });
+const { createToolMetrics } = await import('./src/tool-metrics.js');
+const toolMetrics = createToolMetrics();
+const installToolExecutor = createToolExecutor({ 
+  registry: toolRegistry, 
+  gate: installToolGate, 
+  dataDir: resolveDataDir(),
+  metrics: toolMetrics,
+});
 installToolExecutor.load();
 
 // Planner Engine de tarefas (data/plans/<pl-id>.json): objetivo vira plano com
@@ -379,6 +388,45 @@ for (const plannerTool of createPersonalPlannerTools({
   const registered = toolRegistry.register(plannerTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${plannerTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Time Tracker (Fase 1): publica manifesto (níveis 1–2) em dataDir/skills
+// quando ausente e registra ferramentas de timer, Pomodoro, time-blocking e relatórios.
+try {
+  publishTimeTrackerSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto time-tracker falhou:', error?.message || error);
+}
+for (const trackerTool of createTimeTrackerTools({
+  operationalStore: installOperationalStore,
+  dataDir: resolveDataDir(),
+  defaultPomodoroMinutes: Number(process.env.USAMI_TIMER_POMODORO_MINUTES) || 25,
+  defaultBreakMinutes: Number(process.env.USAMI_TIMER_BREAK_MINUTES) || 5,
+  weekStartDay: Number(process.env.USAMI_TIMER_WEEK_START_DAY) || 1,
+})) {
+  const registered = toolRegistry.register(trackerTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${trackerTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Habit Garden (Fase 1): publica manifesto (níveis 1–2) em dataDir/skills
+// quando ausente e registra ferramentas de hábitos, streaks, heatmap e sugestões.
+try {
+  publishHabitGardenSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto habit-garden falhou:', error?.message || error);
+}
+for (const habitTool of createHabitGardenTools({
+  operationalStore: installOperationalStore,
+  dataDir: resolveDataDir(),
+  defaultFrequency: process.env.USAMI_HABIT_DEFAULT_FREQUENCY || 'daily',
+  microHabitThreshold: Number(process.env.USAMI_HABIT_MICRO_THRESHOLD) || 5,
+})) {
+  const registered = toolRegistry.register(habitTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${habitTool.name} não registrada:`, registered.errors.join('; '));
   }
 }
 
@@ -567,6 +615,7 @@ const installAgentCore = createAgentCore({
   classifyWithLlm: async ({ message, tools, signal }) => {
     return classifyIntentWithLlm({ message, tools, signal });
   },
+  metrics: toolMetrics,
 });
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -952,6 +1001,9 @@ export function createChatHandler(options = {}) {
       return null;
     }
   });
+  
+  // Métricas de tool calling (observabilidade)
+  const toolMetrics = options.toolMetrics || null;
 
   // Retrato leve (cache 15s + atualização Git em background) sem bloquear o turno do chat.
   let cachedAwareness = { expiresAt: 0, text: null };
@@ -1105,10 +1157,7 @@ export function createChatHandler(options = {}) {
         activeChatActivity.set(activityClientId, activity);
         if (discordPresence) {
           if (activity?.phase === 'tool' && activity?.tool) {
-            discordPresence.setActivity({
-              details: `Executando: ${activity.tool}`,
-              state: `Afinidade: ${discordPresence.getStatus().affinityStage} • Em ação ⚡`,
-            });
+            discordPresence.setToolActivity(activity.tool);
           } else if (activity?.phase === 'thinking') {
             discordPresence.onChatTurnStart();
           }
@@ -1222,11 +1271,20 @@ export function createChatHandler(options = {}) {
       let sleepCompanionStatus = sleepCompanion.getStatus();
       if (sleepTriggered && !sleepCompanionStatus.active) {
         sleepCompanionStatus = sleepCompanion.start();
+        if (discordPresence) {
+          try { discordPresence.setSleep({ details: 'Modo Sono ativado 🌙' }); } catch {}
+        }
       } else if (wakeTriggered && sleepCompanionStatus.active) {
         sleepCompanionStatus = sleepCompanion.stop();
+        if (discordPresence) {
+          try { discordPresence.onChatTurnStart(); } catch {}
+        }
       } else {
         // Atualiza status (pode expirar automaticamente)
         sleepCompanionStatus = sleepCompanion.getStatus();
+        if (sleepCompanionStatus.active && discordPresence) {
+          try { discordPresence.setSleep(); } catch {}
+        }
       }
 
       if (parsedBody.input?.wakeUpJolt) {
@@ -1242,6 +1300,11 @@ export function createChatHandler(options = {}) {
       let agentTurn = null;
       let executedAgentTurn = null;
       const isFastTier = Boolean(parsedBody.input?.skipAgent || parsedBody.input?.fastTier);
+      // O path regex (runOperationalForChat) executa ferramentas de forma síncrona
+      // antes da chamada ao LLM. O path nativo (generateReplyWithTools) executa via
+      // function calling do LLM de forma assíncrona. Para evitar execução duplicada,
+      // rodamos o path regex mas, se o path nativo executar ferramentas, preferimos
+      // o resultado do path nativo (mais capaz: multi-step, encadeamento).
       if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
         try {
           let executedTurn = null;
@@ -1480,7 +1543,7 @@ export function createChatHandler(options = {}) {
             // está rodando — o cliente mostra "executando <tool>".
             publishActivity({ phase: 'tool', tool: resolvedName, tools: [resolvedName] });
             try {
-              const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'chat' });
+              const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'agent' });
               return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
             } catch (error) {
               return { ok: false, error: String(error?.message || error) };
@@ -1580,6 +1643,18 @@ export function createChatHandler(options = {}) {
               tools: executedAgentTurn.tools,
             };
           }
+          
+          // Record LLM tool calling metrics
+          if (toolMetrics && parsed?.executedTools && parsed.executedTools.length > 0) {
+            const chainLength = parsed.executedTools.length;
+            const totalLatency = parsed.executedTools.reduce((sum, t) => sum + (t.result?.durationMs || 0), 0);
+            const success = parsed.executedTools.every(t => t.result?.ok !== false);
+            toolMetrics.recordLlmToolChain(chainLength, totalLatency || 0, success);
+            
+            for (const t of parsed.executedTools) {
+              toolMetrics.recordLlmToolCall(t.name, 1, t.result?.durationMs || 0, t.result?.ok !== false);
+            }
+          }
 
           if (parsed?.ok && isDeferredToolPromise(parsed.reply)) {
             if (executedAgentTurn && executedAgentTurn.status === 'executed') {
@@ -1594,7 +1669,7 @@ export function createChatHandler(options = {}) {
               } catch {
                 parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
               }
-            } else if (!isFastTier && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
+            } else if (!isFastTier && !executedAgentTurn && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
               try {
                 // Caminho tardio: a ferramenta só é descoberta DEPOIS da
                 // primeira resposta (o modelo pediu algo acionável). Mesmos
@@ -4206,7 +4281,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
   // finalizada, sem trocar comportamento real por um pipeline parcial.
-  const handleChat = createChatHandler({ agentCore: installAgentCore });
+  const handleChat = createChatHandler({ agentCore: installAgentCore, toolMetrics });
   const handleAgentTurn = createAgentTurnHandler();
   const handleSelf = createSelfHandler();
   const handleSuggestions = createSuggestionsHandler();
@@ -4250,6 +4325,33 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       res.end(JSON.stringify({ ok: true, presence: sharedDiscordPresence.getStatus() }));
       return;
     }
+
+    // Discord integration health check
+    if (req.method === 'GET' && req.url === '/api/discord/health') {
+      const ds = sharedDiscordPresence.getStatus();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        ok: true,
+        discord: {
+          richPresence: {
+            active: ds.active,
+            connected: ds.connected,
+            user: ds.user ? { username: ds.user.username, id: ds.user.id } : null,
+            currentPipeIndex: ds.currentPipeIndex,
+            sessionStartTime: ds.sessionStartTime,
+            affinityStage: ds.affinityStage,
+            emotion: ds.emotion,
+          },
+          bridge: {
+            // Preenchido pelo discord-bridge se rodar no mesmo processo
+            status: 'external',
+          },
+        },
+        timestamp: new Date().toISOString(),
+      }));
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/api/presence') {
       const read = await readRequestBody(req, { limit: 4096 });
       if (!read.ok) {

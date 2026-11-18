@@ -223,6 +223,99 @@ export function classifyDeterministic(message, { toolNames = [] } = {}) {
   };
 }
 
+/**
+ * Classificação unificada de intenção: combina determinístico + LLM opcional.
+ * 
+ * Este é o ponto de entrada único para classificação de intenção, substituindo
+ * o uso separado de `classifyDeterministic` e `classifyIntentWithLlm`.
+ * 
+ * @param {string} message - Mensagem do usuário
+ * @param {Object} options
+ * @param {Function} options.classifyWithLlm - Função LLM opcional (ex: classifyIntentWithLlm)
+ * @param {string[]} options.toolNames - Nomes das ferramentas disponíveis para matching
+ * @param {AbortSignal} options.signal - Sinal de abortamento
+ * @param {number} options.turnDeadlineMs - Prazo máximo para classificação LLM
+ * @param {Function} options.now - Função de timestamp (para testes)
+ * @param {Function} options.onError - Callback de erro
+ * @returns {Promise<{intent, matchedToolName, deterministic, llmDecision?}>}
+ */
+export async function classifyIntentUnified(message, options = {}) {
+  const {
+    classifyWithLlm = null,
+    toolNames = [],
+    signal = null,
+    turnDeadlineMs = 8000,
+    now = Date.now,
+    onError = console.warn,
+  } = options;
+
+  const clean = collapseText(message);
+  const deterministic = classifyDeterministic(clean, { toolNames });
+
+  // Fast path: se não é ambíguo OU não tem LLM, usa só determinístico
+  if (!deterministic.ambiguous || typeof classifyWithLlm !== 'function') {
+    return {
+      intent: buildIntent({
+        kind: deterministic.kind,
+        goal: clean,
+        confidence: deterministic.confidence,
+        origin: 'classifier',
+        now,
+      }),
+      matchedToolName: deterministic.matchedToolName || null,
+      deterministic,
+      llmDecision: null,
+    };
+  }
+
+  // Caso ambíguo com LLM disponível: roda LLM com timeout
+  const llmAbort = new AbortController();
+  const llmTimer = setTimeout(() => llmAbort.abort(), turnDeadlineMs);
+  try {
+    const llmSignal = signal ? AbortSignal.any([signal, llmAbort.signal]) : llmAbort.signal;
+    const llmDecision = await classifyWithLlm({
+      message: clean,
+      tools: toolNames.map(name => ({ name })), // formato compatível
+      signal: llmSignal,
+    });
+    if (isPlainObject(llmDecision) && INTENT_KINDS.includes(llmDecision.kind)) {
+      const confidence = typeof llmDecision.confidence === 'number' && Number.isFinite(llmDecision.confidence)
+        ? Math.min(Math.max(llmDecision.confidence, 0), 1)
+        : AMBIGUITY_CONFIDENCE_THRESHOLD;
+      return {
+        intent: buildIntent({
+          kind: llmDecision.kind,
+          goal: typeof llmDecision.goal === 'string' && llmDecision.goal.trim() ? llmDecision.goal : clean,
+          confidence,
+          origin: 'llm',
+          now,
+        }),
+        matchedToolName: typeof llmDecision.tool === 'string' ? llmDecision.tool : null,
+        deterministic,
+        llmDecision,
+      };
+    }
+  } catch (error) {
+    onError(`Aviso: classificador LLM falhou (${error?.message || error}); usando fallback determinístico.`);
+  } finally {
+    clearTimeout(llmTimer);
+  }
+
+  // Fallback para determinístico
+  return {
+    intent: buildIntent({
+      kind: deterministic.kind,
+      goal: clean,
+      confidence: deterministic.confidence,
+      origin: 'classifier',
+      now,
+    }),
+    matchedToolName: null,
+    deterministic,
+    llmDecision: null,
+  };
+}
+
 export const DEFAULT_TOOL_MATCHERS = Object.freeze([
   {
     toolName: 'self.describe',
@@ -632,8 +725,15 @@ function buildResearchQuery(message) {
 
 const isScheduleGoal = normalized => /\b(semana|agenda|cronograma|tarefas?|compromissos?|prioriz\w*|conflit\w*|rotina)\b/.test(normalized);
 
-function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
+function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true, metrics = null) {
   const calls = resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive);
+  
+  // Record tool selection metrics
+  if (metrics) {
+    const totalAvailable = registry.names().filter(isToolActive).length;
+    metrics.recordToolSelection(message, calls.length, totalAvailable, false); // cacheHit = false for now
+  }
+  
   return calls.length > 0 ? calls[0] : null;
 }
 
@@ -681,6 +781,7 @@ export function createAgentCore({
   turnLimit = DEFAULT_TURN_LIMIT,
   now = () => Date.now(),
   onError = message => console.error(message),
+  metrics = null, // instância de createToolMetrics() para observabilidade
 } = {}) {
   if (!registry || typeof registry.has !== 'function' || typeof registry.names !== 'function') {
     throw new Error('createAgentCore: registry é obrigatório.');
@@ -727,61 +828,23 @@ export function createAgentCore({
   }
 
   async function classifyIntent(message, { signal } = {}) {
-    const clean = collapseText(message);
-    const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
-
-    if (!deterministic.ambiguous || typeof classifyWithLlm !== 'function') {
-      return {
-        intent: buildIntent({
-          kind: deterministic.kind,
-          goal: clean,
-          confidence: deterministic.confidence,
-          origin: 'classifier',
-          now,
-        }),
-        matchedToolName: deterministic.matchedToolName || null,
-      };
+    const result = await classifyIntentUnified(message, {
+      classifyWithLlm,
+      toolNames: registry.names(),
+      signal,
+      turnDeadlineMs,
+      now,
+      onError,
+    });
+    
+    // Record intent classification metrics
+    if (metrics) {
+      metrics.recordIntentClassification(result.intent.kind, result.intent.origin);
     }
-
-    const llmAbort = new AbortController();
-    const llmTimer = setTimeout(() => llmAbort.abort(), turnDeadlineMs);
-    try {
-      const llmSignal = signal ? AbortSignal.any([signal, llmAbort.signal]) : llmAbort.signal;
-      const llmDecision = await classifyWithLlm({
-        message: clean,
-        tools: registry.list(),
-        signal: llmSignal,
-      });
-      if (isPlainObject(llmDecision) && INTENT_KINDS.includes(llmDecision.kind)) {
-        const confidence = typeof llmDecision.confidence === 'number' && Number.isFinite(llmDecision.confidence)
-          ? Math.min(Math.max(llmDecision.confidence, 0), 1)
-          : AMBIGUITY_CONFIDENCE_THRESHOLD;
-        return {
-          intent: buildIntent({
-            kind: llmDecision.kind,
-            goal: typeof llmDecision.goal === 'string' && llmDecision.goal.trim() ? llmDecision.goal : clean,
-            confidence,
-            origin: 'llm',
-            now,
-          }),
-          matchedToolName: typeof llmDecision.tool === 'string' ? llmDecision.tool : null,
-        };
-      }
-    } catch (error) {
-      onError(`Aviso: classificador LLM falhou no turno (${error?.message || error}); usando fallback determinístico.`);
-    } finally {
-      clearTimeout(llmTimer);
-    }
-
+    
     return {
-      intent: buildIntent({
-        kind: deterministic.kind,
-        goal: clean,
-        confidence: deterministic.confidence,
-        origin: 'classifier',
-        now,
-      }),
-      matchedToolName: null,
+      intent: result.intent,
+      matchedToolName: result.matchedToolName,
     };
   }
 
@@ -798,7 +861,7 @@ export function createAgentCore({
     }
 
     if (intent.kind === 'operational') {
-      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName, isToolActive);
+      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName, isToolActive, metrics);
       if (!resolved) {
         return {
           id: turnId,
@@ -1171,6 +1234,7 @@ export function createAgentCore({
 
   return {
     classifyIntent,
+    classifyIntentUnified,
     processTurn,
     runOperationalForChat,
     dispatchAsync,
