@@ -34,6 +34,8 @@ import { createSkillManager } from './src/skill-manager.js';
 import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
 import { createTimeTrackerTools, publishTimeTrackerSkill } from './src/time-tracker-skill.js';
 import { createHabitGardenTools, publishHabitGardenSkill } from './src/habit-garden-skill.js';
+import { createNoteLinkerTools, publishNoteLinkerSkill } from './src/note-linker-skill.js';
+import { createFocusGuardianTools, publishFocusGuardianSkill } from './src/focus-guardian-skill.js';
 import {
   createDailyBriefingService,
   createDailyBriefingTool,
@@ -408,6 +410,38 @@ for (const habitTool of createHabitGardenTools({
   const registered = toolRegistry.register(habitTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${habitTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Note Linker (Fase 1): publica manifesto (níveis 1–3) em dataDir/skills
+// quando ausente e registra ferramentas de notas, links wiki, backlinks, grafo e tags.
+try {
+  publishNoteLinkerSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto note-linker falhou:', error?.message || error);
+}
+for (const noteTool of createNoteLinkerTools({
+  dataDir: resolveDataDir(),
+})) {
+  const registered = toolRegistry.register(noteTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${noteTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Focus Guardian (Fase 1): publica manifesto (níveis 1–3) em dataDir/skills
+// quando ausente e registra ferramentas de sessões, perfis, blocklists e verificação de bloqueio.
+try {
+  publishFocusGuardianSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto focus-guardian falhou:', error?.message || error);
+}
+for (const focusTool of createFocusGuardianTools({
+  dataDir: resolveDataDir(),
+})) {
+  const registered = toolRegistry.register(focusTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${focusTool.name} não registrada:`, registered.errors.join('; '));
   }
 }
 
@@ -1821,15 +1855,21 @@ export function createChatHandler(options = {}) {
       // Verificação de segurança e privacidade em conversas com terceiros
       if (isThirdParty) {
         try {
+          // guildId pode vir do payload do Discord bridge (parsedBody.input.guildId)
+          const guildId = parsedBody.input?.guildId || null;
           const guard = await enforcePrivacy({
             userMessage: discordInfo.text || parsedBody.message,
             replyText: parsed.reply,
             authorName: discordInfo.authorName,
             isThirdParty: true,
+            guildId,
             fetchImpl,
           });
           if (guard.blocked) {
             parsed.reply = guard.reply;
+          }
+          if (guard.skipped) {
+            console.log('[privacy-guard] verificação pulada: guild em allowlist', { guildId });
           }
         } catch (guardErr) {
           console.warn('[privacy-guard] falha ao checar privacidade:', guardErr?.message || guardErr);
@@ -4257,6 +4297,22 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     // Discord integration health check
     if (req.method === 'GET' && req.url === '/api/discord/health') {
       const ds = sharedDiscordPresence.getStatus();
+
+      // Tenta buscar métricas do discord-bridge (se rodando na mesma rede)
+      let bridgeMetrics = null;
+      const bridgeUrl = process.env.DISCORD_BRIDGE_METRICS_URL || 'http://nyarch:3001/metrics';
+      try {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 2000);
+        const resp = await fetch(bridgeUrl, { signal: ctrl.signal });
+        clearTimeout(timeout);
+        if (resp.ok) {
+          bridgeMetrics = await resp.json();
+        }
+      } catch {
+        // Bridge não disponível ou timeout - ignora silenciosamente
+      }
+
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         ok: true,
@@ -4270,9 +4326,20 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
             affinityStage: ds.affinityStage,
             emotion: ds.emotion,
           },
-          bridge: {
-            // Preenchido pelo discord-bridge se rodar no mesmo processo
+          bridge: bridgeMetrics?.bridge ? {
+            status: bridgeMetrics.ok ? 'healthy' : 'degraded',
+            uptimeMs: bridgeMetrics.bridge.uptimeMs,
+            messagesReceived: bridgeMetrics.bridge.messagesReceived,
+            messagesProcessed: bridgeMetrics.bridge.messagesProcessed,
+            messagesFailed: bridgeMetrics.bridge.messagesFailed,
+            slashCommandsReceived: bridgeMetrics.bridge.slashCommandsReceived,
+            slashCommandsSucceeded: bridgeMetrics.bridge.slashCommandsSucceeded,
+            slashCommandsFailed: bridgeMetrics.bridge.slashCommandsFailed,
+            avgWebhookLatencyMs: bridgeMetrics.bridge.avgWebhookLatencyMs,
+            recentErrors: bridgeMetrics.bridge.recentErrors,
+          } : {
             status: 'external',
+            metricsUrl: bridgeUrl,
           },
         },
         timestamp: new Date().toISOString(),

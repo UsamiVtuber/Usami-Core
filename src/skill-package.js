@@ -14,6 +14,7 @@ const SKILLS_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'skills'
 function copyPlainDirectory(srcDir, destDir) {
   mkdirSync(destDir, { recursive: true });
   for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.name === 'test') continue; // Skip test directory
     const srcPath = join(srcDir, entry.name);
     const destPath = join(destDir, entry.name);
     const stat = lstatSync(srcPath);

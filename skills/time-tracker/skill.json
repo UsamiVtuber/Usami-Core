@@ -1,0 +1,45 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "time-tracker",
+  "name": "Time Tracker",
+  "version": "1.0.0",
+  "description": "Rastreamento de tempo com Pomodoro, time-blocking e relatórios semanais usando memória operacional local.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-18T00:00:00.000Z",
+  "tools": [
+    "timer.start",
+    "timer.stop",
+    "timer.status",
+    "timer.report",
+    "timer.pomodoro",
+    "timer.block"
+  ],
+  "permissions": [1, 2],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "defaultPomodoroMinutes",
+      "type": "number",
+      "required": false,
+      "description": "Duração padrão do Pomodoro em minutos (padrão: 25)"
+    },
+    {
+      "name": "defaultBreakMinutes",
+      "type": "number",
+      "required": false,
+      "description": "Duração padrão da pausa em minutos (padrão: 5)"
+    },
+    {
+      "name": "weekStartDay",
+      "type": "number",
+      "required": false,
+      "description": "Dia de início da semana (0=Domingo, 1=Segunda, padrão: 1)"
+    }
+  ],
+  "instructions": "Gerencie sessões de foco, Pomodoros e blocos de tempo exclusivamente via memória operacional. Forneça relatórios agregados por dia/semana/projeto sem acessar calendários externos. Use timer.status para consultar sessão ativa.",
+  "tests": {
+    "files": ["test/time-tracker.test.mjs"],
+    "timeoutMs": 10000
+  }
+}

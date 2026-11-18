@@ -1,0 +1,41 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "focus-guardian",
+  "name": "Focus Guardian",
+  "version": "1.0.0",
+  "description": "Gerenciador de sessões de foco com perfis configuráveis, blocklists de sites/apps, pausas, estatísticas e integração para bloqueio de distrações.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-18T00:00:00.000Z",
+  "tools": [
+    "focus.start",
+    "focus.pause",
+    "focus.resume",
+    "focus.stop",
+    "focus.cancel",
+    "focus.break",
+    "focus.distraction",
+    "focus.status",
+    "focus.sessions",
+    "focus.stats",
+    "focus.profile.upsert",
+    "focus.profile.get",
+    "focus.profile.list",
+    "focus.profile.delete",
+    "focus.blocklist.upsert",
+    "focus.blocklist.get",
+    "focus.blocklist.list",
+    "focus.blocklist.delete",
+    "focus.settings.get",
+    "focus.settings.update",
+    "focus.checkBlocked"
+  ],
+  "permissions": [1, 2, 3],
+  "dependencies": [],
+  "parameters": [],
+  "instructions": "Gerencie sessões de foco exclusivamente via store dedicado (focus-sessions.json). Perfis pré-definidos: Deep Work (50min, blocklists ativas), Pomodoro (25/5), Light Focus (45min). Blocklists padrão: Redes Sociais, Entretenimento. Use focus.checkBlocked para integração com bloqueio de URL no navegador/OS. Não acesse sistemas de arquivos externos.",
+  "tests": {
+    "files": ["test/focus-guardian.test.mjs"],
+    "timeoutMs": 15000
+  }
+}
