@@ -1360,8 +1360,8 @@ export function createChatHandler(options = {}) {
           if (confirmation) {
             system += `\n\n=== CONTINUIDADE DA CONVERSA ===\nSua última fala terminou em pergunta: "${confirmation.previousReply}"\n${isThirdParty ? 'A pessoa' : 'Ele'} respondeu apenas confirmando, sem repetir o assunto. Interprete como "sim, pode seguir com o que você perguntou" e continue a partir daí — nunca diga que não entendeu nem peça contexto.`;
           }
-        } catch {
-          // dica opcional: não interrompe o turno
+        } catch (error) {
+          console.warn('[chat] dica de continuidade falhou: ' + (error?.message || error));
         }
       }
 
