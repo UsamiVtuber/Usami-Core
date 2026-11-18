@@ -230,10 +230,19 @@ export function createMemoryHandler(options = {}) {
     if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
     const store = resolved.ctx?.memoryStore || fallbackStore;
     const bond = resolved.ctx?.bondStore ?? fallbackBond;
+    const episodic = resolved.ctx?.episodicMemory || options.episodicMemory || null;
     if (!store) return send(500, { error: 'MemoryStore não inicializado.' });
 
     if (req.method === 'GET' && req.url === '/api/memory') {
-      return send(200, { ok: true, memory: memorySnapshot(store) });
+      let episodes = 0;
+      if (episodic) {
+        try {
+          episodes = await episodic.count();
+        } catch {
+          // índice ainda não inicializado: reporta 0
+        }
+      }
+      return send(200, { ok: true, memory: memorySnapshot(store), episodes });
     }
 
     if (req.method === 'POST' && req.url === '/api/memory/maintenance') {
@@ -260,6 +269,19 @@ export function createMemoryHandler(options = {}) {
         console.warn('[maintenance] getVaultIndex refresh falhou:', err?.message || err);
       }
 
+      let episodicCount = 0;
+      let episodicPruned = null;
+      if (episodic) {
+        try {
+          await episodic.flush();
+          await episodic.backfill(store.getAll()?.dailyHistory || {});
+          episodicPruned = await episodic.prune({});
+          episodicCount = await episodic.count();
+        } catch (err) {
+          console.warn('[maintenance] memória episódica falhou:', err?.message || err);
+        }
+      }
+
       let lanceDbCount = 0;
       const provider = resolved.ctx?.memoryProvider || null;
       if (!provider || provider.isEnabled()) {
@@ -282,6 +304,8 @@ export function createMemoryHandler(options = {}) {
         maintenanceAt: new Date().toISOString(),
         today,
         lanceDbChunks: lanceDbCount,
+        episodicEpisodes: episodicCount,
+        episodicPruned,
         memory: memorySnapshot(store),
       });
     }

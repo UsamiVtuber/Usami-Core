@@ -105,6 +105,7 @@ import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpa
 import { sendObservabilityEvent, observeApiRequest, redactSecrets } from './src/n8n-observability.js';
 export { sendObservabilityEvent, observeApiRequest, redactSecrets };
 import { LanceMemoryStore } from './src/lancedb-store.js';
+import { createEpisodicMemory } from './src/episodic-memory.js';
 import {
   isAllowedOrigin as routeIsAllowedOrigin,
   denyWithoutToken as routeDenyWithoutToken,
@@ -322,8 +323,26 @@ try {
 
 // Ferramentas do domínio agêntico: registry + gate de permissões + executor com
 // histórico auditável (data/executions.json e data/permissions.json).
+// Memória episódica vetorial dos turnos de conversa (tabela episodes_<personagem>).
+// Instância padrão do personagem principal; contextos multi-tenant criam a sua.
+const installEpisodicMemory = createEpisodicMemory({
+  dataDir: resolveDataDir(),
+  characterId: DEFAULT_CHARACTER_ID,
+});
+
+// Stores injetados (testes/servidor embarcado) não herdam a memória global:
+// evita gravar conversa de teste no índice real da companion.
+function resolveDefaultEpisodic(options = {}) {
+  if (options.episodicMemory) return options.episodicMemory;
+  if (options.memoryStore) return null;
+  return installEpisodicMemory;
+}
+
 const toolRegistry = createToolRegistry();
-const memorySearchRegistration = toolRegistry.register(createMemorySearchTool({ memoryStore: installMemoryStore }));
+const memorySearchRegistration = toolRegistry.register(createMemorySearchTool({
+  memoryStore: installMemoryStore,
+  episodicStore: installEpisodicMemory,
+}));
 if (!memorySearchRegistration.ok) {
   console.error('Aviso: ferramenta memory.search não registrada:', memorySearchRegistration.errors.join('; '));
 }
@@ -731,6 +750,7 @@ export const characterRegistry = createCharacterRegistry({
     moodStore: installMoodStore,
     achievementsStore: installAchievementsStore,
     operationalStore: installOperationalStore,
+    episodicMemory: installEpisodicMemory,
     n8nQueue: sharedN8nQueue,
     chatActivity: sharedChatActivity,
   },
@@ -1147,6 +1167,11 @@ export function createChatHandler(options = {}) {
     const activeMoodStore = (tenantCtx && !('moodStore' in options)) ? tenantCtx.moodStore : moodStore;
     const activeManifest = options.manifest || tenantCtx?.manifest || null;
     const activeMemoryProvider = options.memoryProvider || tenantCtx?.memoryProvider || null;
+    const episodicAllowed = activeManifest?.memory?.ragEnabled !== false
+      && activeManifest?.memory?.storageBackend !== 'none';
+    const activeEpisodic = episodicAllowed
+      ? (options.episodicMemory || tenantCtx?.episodicMemory || resolveDefaultEpisodic(options))
+      : null;
     const activeChatActivity = (tenantCtx && !options.chatActivity) ? tenantCtx.chatActivity : chatActivity;
     const activeN8nQueue = (tenantCtx && !options.n8nQueue) ? tenantCtx.n8nQueue : n8nQueue;
 
@@ -1244,6 +1269,33 @@ export function createChatHandler(options = {}) {
           results: [{ file: 'obsidian_vault', content: ragContext }],
         });
         system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
+      }
+
+      // Memória episódica: lembranças de turnos antigos, só para o dono. Usa o
+      // decaimento do manifesto; o texto não entra no trace (privacidade).
+      if (!isThirdParty && activeEpisodic) {
+        try {
+          const episodes = await activeEpisodic.search({
+            query: parsedBody.message,
+            limit: 3,
+            decayFactorPerDay: activeManifest?.memory?.decayFactorPerDay,
+          });
+          if (episodes.length) {
+            const briefing = episodes
+              .map(item => `[${(item.isoDate || '').slice(0, 10)}]\n${item.text}`)
+              .join('\n---\n');
+            system += '\n\n--- Lembranças de conversas anteriores (podem estar incompletas; use só se ajudar) ---\n'
+              + briefing
+              + '\n--- Fim das lembranças ---\n';
+          }
+          recordRetrievalSpan(chatTrace, {
+            query: parsedBody.message,
+            source: 'episodic_memory',
+            results: episodes.map(item => ({ file: 'episodic_memory', score: item.score })),
+          });
+        } catch {
+          // memória episódica é melhor-esforço: nunca derruba o turno
+        }
       }
 
       // Detecta gatilhos de ativação/desativação do modo sono
@@ -1814,6 +1866,17 @@ export function createChatHandler(options = {}) {
             .trim() || parsed.reply;
           activeMemoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
           activeMemoryStore.appendHistory('assistant', historyReply, turnTimestamp);
+          // Indexação vetorial do turno (buffer assíncrono; nunca bloqueia a resposta).
+          try {
+            activeEpisodic?.recordTurn({
+              userText: parsedBody.message,
+              assistantText: historyReply,
+              ts: Date.parse(turnTimestamp) || Date.now(),
+              sessionId: typeof parsedBody.input?.sessionId === 'string' ? parsedBody.input.sessionId : 'chat',
+            });
+          } catch {
+            // melhor-esforço
+          }
           const current = activeMemoryStore.getAll();
           const gain = calculateGain({
             userMessage: parsedBody.message,
@@ -3990,6 +4053,7 @@ export function createMediaAnalyzeHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const getKey = options.getKey || (async () => readEnvValue('NVIDIA_API_KEY'));
   const memoryStore = options.memoryStore || installMemoryStore;
+  const episodicMemory = resolveDefaultEpisodic(options);
   const personalityStore = options.personalityStore || installPersonalityStore;
   // Base64 + JSON.parse + frames multiplicam o payload em RAM: uma análise por
   // vez, fila curta. O limite é por BYTES lidos (48 MB de corpo JSON), não pelo
@@ -4103,6 +4167,12 @@ export function createMediaAnalyzeHandler(options = {}) {
 
         memoryStore.appendHistory?.('user', userTurnContent, turnTimestamp);
         memoryStore.appendHistory?.('assistant', assistantTurnContent, turnTimestamp);
+        episodicMemory?.recordTurn({
+          userText: userTurnContent,
+          assistantText: assistantTurnContent,
+          ts: Date.parse(turnTimestamp) || Date.now(),
+          sessionId: 'media',
+        });
 
         const factText = `Compartilhou ${mediaTypeLabel.toLowerCase()} "${filename || 'mídia'}": ${visualSummary.slice(0, 180)}`;
         memoryStore.addRecentFact?.(factText, 7, 'other');
@@ -4260,7 +4330,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleN8nCommand = createN8nCommandHandler();
   const handleChatActivity = createChatActivityHandler();
   const handleRagContext = createRagContextHandler();
-  const handleMemory = createMemoryHandler();
+  const handleMemory = createMemoryHandler({ episodicMemory: installEpisodicMemory });
   const handleBond = createBondHandler();
   const handleCharacters = createCharactersHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
@@ -4440,4 +4510,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   });
   const bindHost = process.env.USAMI_API_HOST || readEnvValue('USAMI_API_HOST') || '0.0.0.0';
   server.listen(8787, bindHost, () => console.log(`Usami API escutando em ${bindHost}:8787`));
+  // Fora do caminho de resposta: o primeiro chat não paga o ONNX/LanceDB.
+  installEpisodicMemory.warmUp().catch(() => {});
 }

@@ -280,7 +280,9 @@ function validateMemory(raw, errors) {
   if (!isIntInRange(maxContextChunks, 1, 50)) {
     errors.push('memory.maxContextChunks: deve ser um inteiro entre 1 e 50.');
   }
-  const decayFactorPerDay = raw.decayFactorPerDay === undefined ? 0.05 : raw.decayFactorPerDay;
+  // Meia-vida de ~100 dias: 0,05/dia apagava lembranças de semanas mesmo
+  // quando eram as mais relevantes.
+  const decayFactorPerDay = raw.decayFactorPerDay === undefined ? 0.01 : raw.decayFactorPerDay;
   if (!isFiniteNumberInRange(decayFactorPerDay, 0, 1)) {
     errors.push('memory.decayFactorPerDay: deve ser um número entre 0 e 1.');
   }
@@ -497,7 +499,7 @@ export function createDefaultUsamiManifest() {
       embeddingModel: 'Xenova/all-MiniLM-L6-v2',
       similarityThreshold: 0.2,
       maxContextChunks: 4,
-      decayFactorPerDay: 0.05,
+      decayFactorPerDay: 0.01,
     },
     personality: {
       traits: {

@@ -84,7 +84,7 @@ Schema oficial (`character.manifest.v1`), validado por `src/character-manifest-s
     "embeddingModel": "Xenova/all-MiniLM-L6-v2",
     "similarityThreshold": 0.25,
     "maxContextChunks": 4,
-    "decayFactorPerDay": 0.05
+    "decayFactorPerDay": 0.01
   },
   "personality": {
     "traits": {

@@ -100,7 +100,7 @@ Para possibilitar o carregamento dinâmico ("White-Label") de qualquer personage
     "embeddingModel": "Xenova/all-MiniLM-L6-v2",
     "similarityThreshold": 0.72,
     "maxContextChunks": 4,
-    "decayFactorPerDay": 0.05
+    "decayFactorPerDay": 0.01
   },
   "personality": {
     "traits": {

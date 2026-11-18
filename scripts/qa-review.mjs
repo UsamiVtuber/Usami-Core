@@ -126,37 +126,84 @@ ${diff}
 Responda **apenas** com o JSON acima.`;
 }
 
+const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const MAX_ATTEMPTS = 4;
+const BASE_BACKOFF_MS = 2000;
+const MAX_BACKOFF_MS = 60000;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Retry-After vem em segundos ou data HTTP; valor ilegível cai no backoff exponencial.
+function parseRetryAfter(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
+}
+
+function isRetryableStatus(status) {
+  return status === 429 || status === 408 || status >= 500;
+}
+
+function backoffDelay(attempt, retryAfterMs) {
+  if (retryAfterMs !== null) return Math.min(retryAfterMs, MAX_BACKOFF_MS);
+  const base = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (attempt - 1));
+  return Math.round(base * (0.5 + Math.random() * 0.5));
+}
+
 async function callBrainModel(prompt) {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) throw new Error('NVIDIA_API_KEY não definido (organization secret)');
 
   const model = process.env.BRAIN_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b';
 
-  const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-      temperature: 0.2,
-      max_tokens: 3000
-    })
+  const body = JSON.stringify({
+    model,
+    messages: [{ role: 'user', content: prompt }],
+    response_format: { type: 'json_object' },
+    temperature: 0.2,
+    max_tokens: 3000
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`NVIDIA API ${res.status}: ${err}`);
-  }
+  for (let attempt = 1; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(NVIDIA_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body
+      });
+    } catch (err) {
+      if (attempt >= MAX_ATTEMPTS) throw err;
+      const wait = backoffDelay(attempt, null);
+      console.warn(`⚠️ Falha de rede na NVIDIA (${err.message}); nova tentativa ${attempt}/${MAX_ATTEMPTS - 1} em ${wait}ms`);
+      await sleep(wait);
+      continue;
+    }
 
-  const data = await res.json();
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Resposta vazia do modelo');
-  return JSON.parse(content);
+    if (!res.ok) {
+      const err = await res.text();
+      if (!isRetryableStatus(res.status) || attempt >= MAX_ATTEMPTS) {
+        throw new Error(`NVIDIA API ${res.status}: ${err}`);
+      }
+      const wait = backoffDelay(attempt, parseRetryAfter(res.headers.get('retry-after')));
+      console.warn(`⚠️ NVIDIA API ${res.status}; nova tentativa ${attempt}/${MAX_ATTEMPTS - 1} em ${wait}ms`);
+      await sleep(wait);
+      continue;
+    }
+
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error('Resposta vazia do modelo');
+    return JSON.parse(content);
+  }
 }
 
 function formatComment(review) {
