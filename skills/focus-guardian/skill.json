@@ -19,7 +19,6 @@
     "focus.sessions",
     "focus.stats",
     "focus.profile.upsert",
-    "focus.profile.get",
     "focus.profile.list",
     "focus.profile.delete",
     "focus.blocklist.upsert",
@@ -28,12 +27,12 @@
     "focus.blocklist.delete",
     "focus.settings.get",
     "focus.settings.update",
-    "focus.checkBlocked"
+    "focus.check-blocked"
   ],
   "permissions": [1, 2, 3],
   "dependencies": [],
   "parameters": [],
-  "instructions": "Gerencie sessões de foco exclusivamente via store dedicado (focus-sessions.json). Perfis pré-definidos: Deep Work (50min, blocklists ativas), Pomodoro (25/5), Light Focus (45min). Blocklists padrão: Redes Sociais, Entretenimento. Use focus.checkBlocked para integração com bloqueio de URL no navegador/OS. Não acesse sistemas de arquivos externos.",
+  "instructions": "Gerencie sessões de foco exclusivamente via store dedicado (focus-sessions.json). Perfis pré-definidos: Deep Work (50min, blocklists ativas), Pomodoro (25/5), Light Focus (45min). Blocklists padrão: Redes Sociais, Entretenimento. Use focus.check-blocked para integração com bloqueio de URL no navegador/OS. Não acesse sistemas de arquivos externos.",
   "tests": {
     "files": ["test/focus-guardian.test.mjs"],
     "timeoutMs": 15000

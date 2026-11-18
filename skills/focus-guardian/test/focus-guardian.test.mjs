@@ -492,9 +492,8 @@ describe('focus-guardian skill', () => {
 
   test('toolSpecs expõe todas as ferramentas com verify functions', () => {
     const specs = guardian.toolSpecs;
-    // Count: session control (9) + profiles (4) + blocklists (4) + settings (2) + checkBlocked (1) = 20
-    // Actually 21 because session control is 9 (start, pause, resume, stop, cancel, break, distraction, status, sessions, stats = 10)
-    assert.strictEqual(specs.length, 21);
+    // session control (10) + profiles (3) + blocklists (4) + settings (2) + check-blocked (1)
+    assert.strictEqual(specs.length, 20);
     const names = specs.map(s => s.name).sort();
     assert.ok(names.includes('focus.start'));
     assert.ok(names.includes('focus.pause'));
@@ -507,7 +506,6 @@ describe('focus-guardian skill', () => {
     assert.ok(names.includes('focus.sessions'));
     assert.ok(names.includes('focus.stats'));
     assert.ok(names.includes('focus.profile.upsert'));
-    assert.ok(names.includes('focus.profile.get'));
     assert.ok(names.includes('focus.profile.list'));
     assert.ok(names.includes('focus.profile.delete'));
     assert.ok(names.includes('focus.blocklist.upsert'));
@@ -516,7 +514,7 @@ describe('focus-guardian skill', () => {
     assert.ok(names.includes('focus.blocklist.delete'));
     assert.ok(names.includes('focus.settings.get'));
     assert.ok(names.includes('focus.settings.update'));
-    assert.ok(names.includes('focus.checkBlocked'));
+    assert.ok(names.includes('focus.check-blocked'));
 
     for (const spec of specs) {
       assert.strictEqual(typeof spec.verify, 'function');

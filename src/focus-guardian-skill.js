@@ -21,7 +21,6 @@ export const FOCUS_GUARDIAN_TOOLS = Object.freeze([
   'focus.sessions',
   'focus.stats',
   'focus.profile.upsert',
-  'focus.profile.get',
   'focus.profile.list',
   'focus.profile.delete',
   'focus.blocklist.upsert',
@@ -30,7 +29,7 @@ export const FOCUS_GUARDIAN_TOOLS = Object.freeze([
   'focus.blocklist.delete',
   'focus.settings.get',
   'focus.settings.update',
-  'focus.checkBlocked',
+  'focus.check-blocked',
 ]);
 
 /**
@@ -113,11 +112,6 @@ export function createFocusGuardianTools({
     execute: async (args) => core.upsertProfile(args),
   };
 
-  const profileGetTool = {
-    ...core.toolSpecs.find(s => s.name === 'focus.profile.get'),
-    execute: async (args) => core.getProfile(args),
-  };
-
   const profileListTool = {
     ...core.toolSpecs.find(s => s.name === 'focus.profile.list'),
     execute: async (args) => core.listProfiles(args),
@@ -159,7 +153,7 @@ export function createFocusGuardianTools({
   };
 
   const checkBlockedTool = {
-    ...core.toolSpecs.find(s => s.name === 'focus.checkBlocked'),
+    ...core.toolSpecs.find(s => s.name === 'focus.check-blocked'),
     execute: async (args) => core.checkBlocked(args),
   };
 
@@ -175,7 +169,6 @@ export function createFocusGuardianTools({
     sessionsTool,
     statsTool,
     profileUpsertTool,
-    profileGetTool,
     profileListTool,
     profileDeleteTool,
     blocklistUpsertTool,

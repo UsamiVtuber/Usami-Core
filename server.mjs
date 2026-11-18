@@ -634,6 +634,7 @@ export const installTimerService = createTimerService({
 });
 
 for (const timerTool of createTimerTools({ timerService: installTimerService })) {
+  if (toolRegistry.has(timerTool.name)) continue; // skill time-tracker já cobre o nome
   const registered = toolRegistry.register(timerTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${timerTool.name} não registrada:`, registered.errors.join('; '));

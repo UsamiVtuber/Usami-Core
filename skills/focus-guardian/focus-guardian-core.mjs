@@ -617,20 +617,6 @@ export function createFocusGuardianCore({
     },
     {
       schema: 'usami.agent.tool.v1',
-      name: 'focus.profile.get',
-      version: '1.0.0',
-      description: 'Obtém um perfil por ID ou nome.',
-      origin: 'skill',
-      permissionLevel: 1,
-      timeoutMs: 2000,
-      parameters: [
-        { name: 'id', type: 'string', required: false, description: 'ID do perfil' },
-        { name: 'name', type: 'string', required: false, description: 'Nome do perfil' },
-      ],
-      verify: (result) => result && result.ok === true && result.profile && typeof result.profile.id === 'string',
-    },
-    {
-      schema: 'usami.agent.tool.v1',
       name: 'focus.profile.list',
       version: '1.0.0',
       description: 'Lista todos os perfis de foco.',
@@ -742,7 +728,7 @@ export function createFocusGuardianCore({
     // Integration
     {
       schema: 'usami.agent.tool.v1',
-      name: 'focus.checkBlocked',
+      name: 'focus.check-blocked',
       version: '1.0.0',
       description: 'Verifica se uma URL está bloqueada pelas blocklists do perfil atual/ativo.',
       origin: 'skill',
