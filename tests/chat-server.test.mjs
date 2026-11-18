@@ -768,3 +768,25 @@ test('sem chave do OpenRouter não há corrida: NVIDIA falha e cai no modo offli
     assert.equal(JSON.parse(res.body).source, 'offline');
   });
 });
+
+test('memória episódica: turno do chat é indexado com usuário e resposta, sem bloquear', async () => {
+  await withNvidiaRoute(async () => {
+    const recorded = [];
+    const handler = chatHandler({
+      getKey: async () => 'k',
+      generateReply: async () => '{"reply":"lembro sim","gesture":"nod"}',
+      episodicMemory: {
+        search: async () => [],
+        recordTurn: turn => { recorded.push(turn); return { ok: true, queued: true }; },
+      },
+    });
+
+    const res = mockRes();
+    await handler(chatRequest(), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].userText, 'oi');
+    assert.equal(recorded[0].assistantText, 'lembro sim');
+    assert.equal(typeof recorded[0].ts, 'number');
+  });
+});
