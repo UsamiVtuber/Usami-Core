@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { createDocumentStore } from './document-store.mjs';
 
 export const DOCUMENT_SCHEMA = 'usami.document.v1';
 export const DOCUMENT_FORMATS = Object.freeze(['note', 'checklist', 'adr', 'summary']);
@@ -29,6 +30,9 @@ export function slugifyFilename(title, ext = '.md') {
   const safeExt = ext === '.txt' ? '.txt' : '.md';
   return `${base}${safeExt}`;
 }
+
+// Re-export store functions
+export { createDocumentStore };
 
 export function validateDocumentFilename(filename) {
   const clean = String(filename ?? '').trim();
