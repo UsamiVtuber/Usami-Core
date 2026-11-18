@@ -13,6 +13,7 @@ import { createOperationalMemoryStore } from './operational-memory-store.js';
 import { createN8nCommandQueue } from './n8n-queue.js';
 import { createChatActivityRegistry } from './chat-activity.js';
 import { createMemoryProvider } from './memory-provider.js';
+import { createEpisodicMemory } from './episodic-memory.js';
 import {
   CHARACTER_MANIFEST_SCHEMA_ID,
   DEFAULT_CHARACTER_ID,
@@ -160,6 +161,15 @@ export function createCharacterContext({
     vaultFallback,
   });
 
+  // Respeita o opt-out de memória do manifesto: sem RAG, sem índice episódico.
+  const episodicEnabled = resolvedManifest?.memory?.ragEnabled !== false
+    && resolvedManifest?.memory?.storageBackend !== 'none';
+  const episodicMemory = stores.episodicMemory || (episodicEnabled ? createEpisodicMemory({
+    characterId,
+    dataDir,
+    embedder,
+  }) : null);
+
   const n8nQueue = stores.n8nQueue || createN8nCommandQueue();
   const chatActivity = stores.chatActivity || createChatActivityRegistry();
 
@@ -175,11 +185,15 @@ export function createCharacterContext({
     achievementsStore,
     operationalStore,
     memoryProvider,
+    episodicMemory,
     n8nQueue,
     chatActivity,
     async close() {
       if (memoryProvider && typeof memoryProvider.close === 'function') {
         await memoryProvider.close();
+      }
+      if (episodicMemory && typeof episodicMemory.close === 'function') {
+        await episodicMemory.close();
       }
     },
   };

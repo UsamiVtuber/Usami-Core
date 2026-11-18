@@ -192,7 +192,7 @@ test('arquivo ilegível é preservado ao lado e o executor começa vazio', () =>
   }
 });
 
-test('memory.search busca seções, recentes e resumos sem caixa/acento', () => {
+test('memory.search busca seções, recentes e resumos sem caixa/acento', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'usami-mem-search-'));
   try {
     const memoryStore = createMemoryStore({ dataDir: dir, now: () => '2026-11-11T12:00:00.000Z' });
@@ -203,18 +203,18 @@ test('memory.search busca seções, recentes e resumos sem caixa/acento', () => 
     memoryStore.upsertSummary('2026-11-10', 'Conversaram sobre café e gatos');
 
     const tool = createMemorySearchTool({ memoryStore });
-    const result = tool.execute({ query: 'cafe' });
+    const result = await tool.execute({ query: 'cafe' });
     assert.equal(result.count, 2);
     assert.equal(result.results.some(item => item.source === 'section'), true);
     assert.equal(result.results.some(item => item.source === 'summary'), true);
     assert.equal(tool.verify(result), true);
 
-    const andTerms = tool.execute({ query: 'gato mochi' });
+    const andTerms = await tool.execute({ query: 'gato mochi' });
     assert.equal(andTerms.count, 1);
     assert.match(andTerms.results[0].text, /Mochi/);
 
-    assert.equal(tool.execute({ query: 'compromisso', limit: 1 }).count, 1);
-    assert.throws(() => tool.execute({ query: 'cafe', limit: 0 }), /limit/);
+    assert.equal((await tool.execute({ query: 'compromisso', limit: 1 })).count, 1);
+    await assert.rejects(() => tool.execute({ query: 'cafe', limit: 0 }), /limit/);
     assert.equal(tool.verify({ query: 'x', results: [{ text: '' }], count: 1 }), false);
     assert.equal(tool.verify(null), false);
   } finally {
