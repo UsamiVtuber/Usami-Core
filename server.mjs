@@ -133,7 +133,7 @@ import {
 
 // Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
 // e chamadores antigos; a implementação agora é o módulo puro de src/.
-export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
+export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, stripXmlToolCalls, SPEECH_TRIGGERS } from './src/provider-parse.js';
 export { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
