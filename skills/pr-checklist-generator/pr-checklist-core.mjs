@@ -208,6 +208,7 @@ export async function generateChecklist({
   saveToGithub = false,
   githubRepo = null,
   githubBranch = null,
+  persist = true,
 } = {}) {
   const gitClient = createGitAssistantClient();
 
@@ -267,9 +268,10 @@ export async function generateChecklist({
 
   // 6. Salva
   let saveResult;
-  if (saveToGithub && githubRepo) {
+  if (!persist) {
+    saveResult = { location: 'none' };
+  } else if (saveToGithub && githubRepo) {
     const { createOrUpdateFile } = gitClient;
-    const encoded = Buffer.from(draft.content, 'utf8').toString('base64');
     const res = await createOrUpdateFile({
       repo: githubRepo,
       path: resolvedFilename,

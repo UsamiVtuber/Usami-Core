@@ -92,6 +92,7 @@ export function createPrChecklistGeneratorTools({} = {}) {
         repo: args.repo || 'UsamiVtuber/Usami-Core',
         includeCommits: args.includeCommits || [],
         format: args.format || 'checklist',
+        persist: false,
       });
       return {
         ok: true,
