@@ -48,7 +48,7 @@ export function createPrChecklistGeneratorTools({} = {}) {
         && result.schema === PR_CHECKLIST_SCHEMA
         && typeof result.title === 'string'
         && typeof result.filename === 'string'
-        && result.saveResult && (result.saveResult.location === 'local' || result.saveResult.location === 'github');
+        && result.saveResult && (result.saveResult.location === 'local' || result.saveResult.location === 'github' || result.saveResult.location === 'none');
     },
     async execute(args = {}) {
       return generateChecklist({

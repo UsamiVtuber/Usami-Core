@@ -67,8 +67,10 @@ export function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, in
     const commitDetails = includeCommits.map(hash => {
       const commit = commits.find(c => c.hash.startsWith(hash.slice(0, 7))) || commits.find(c => c.hash === hash);
       if (!commit) return `- ${hash}: não encontrado`;
+      // Note: diffStat is from the base ref to HEAD, not per-commit.
+      // For per-commit file lists, we'd need separate git.diff calls per commit.
       const files = diffStat.split('\n').filter(l => l.includes('.mjs') || l.includes('.js') || l.includes('.json'));
-      return `- ${commit.hash} ${commit.subject}\n  ${files.slice(0, 5).join('\n  ') || 'arquivos não listados no stat'}`;
+      return `- ${commit.hash} ${commit.subject}\n  ${files.slice(0, 5).join('\n  ') || 'arquivos não listados no stat (diff global do baseRef)'}`;
     }).join('\n');
     sections.push({
       heading: 'Commits Analisados',
@@ -273,7 +275,12 @@ export async function generateChecklist({
     diffStat = diffData.stat;
     diffPatch = diffData.diff;
   } else if (prInfo?.mergeCommit) {
-    const mergeIdx = commits.findIndex(c => c.hash === prInfo.mergeCommit.hash);
+    // Try exact hash match first, then fallback to finding by subject
+    let mergeIdx = commits.findIndex(c => c.hash === prInfo.mergeCommit.hash);
+    if (mergeIdx < 0) {
+      // Fallback: find by subject containing PR number
+      mergeIdx = commits.findIndex(c => c.subject.includes(`#${prNumber}`) || c.subject.includes(`pull request #${prNumber}`));
+    }
     if (mergeIdx >= 0 && mergeIdx + 1 < commits.length) {
       const diffStart = Date.now();
       let diffData;
@@ -314,6 +321,9 @@ export async function generateChecklist({
     saveResult = { location: 'none' };
   } else if (saveToGithub && githubRepo) {
     const { createOrUpdateFile } = gitClient;
+    if (typeof createOrUpdateFile !== 'function') {
+      throw new Error('gitClient.createOrUpdateFile não disponível (verifique versão do git-assistant)');
+    }
     const writeStart = Date.now();
     let res;
     try {
