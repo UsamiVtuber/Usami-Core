@@ -653,7 +653,7 @@ export function createTimeTrackerCore({
     },
     {
       schema: 'usami.agent.tool.v1',
-      name: 'timer.session.addTags',
+      name: 'timer.session_add_tags',
       version: '1.0.0',
       description: 'Adiciona tags a uma sessão de timer existente.',
       origin: 'skill',
@@ -667,7 +667,7 @@ export function createTimeTrackerCore({
     },
     {
       schema: 'usami.agent.tool.v1',
-      name: 'timer.session.removeTags',
+      name: 'timer.session_remove_tags',
       version: '1.0.0',
       description: 'Remove tags de uma sessão de timer existente.',
       origin: 'skill',

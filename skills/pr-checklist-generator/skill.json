@@ -1,0 +1,35 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "pr-checklist-generator",
+  "name": "PR Checklist Generator",
+  "version": "1.0.0",
+  "description": "Gera checklist de testes automatizado a partir de PR/commits do GitHub. Usa git-assistant para buscar dados e document-creator para formatar/salvar.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-19T00:00:00.000Z",
+  "tools": [
+    "pr.checklist.generate",
+    "pr.checklist.preview"
+  ],
+  "permissions": [1, 3, 4],
+  "dependencies": ["git-assistant", "document-creator"],
+  "parameters": [
+    {
+      "name": "defaultRepo",
+      "type": "string",
+      "required": false,
+      "description": "Repositório GitHub padrão (owner/repo)."
+    },
+    {
+      "name": "defaultOutputDir",
+      "type": "string",
+      "required": false,
+      "description": "Diretório local padrão para salvar (padrão: data/documents)."
+    }
+  ],
+  "instructions": "Gere checklists de testes para PRs usando: pr.checklist.generate({ prNumber, repo, includeCommits[], format, saveToGithub, githubRepo, githubBranch }). Use pr.checklist.preview para ver o conteúdo sem salvar. Requer git-assistant (github.repos, git.diff) e document-creator (document.draft, document.write).",
+  "tests": {
+    "files": ["test/pr-checklist-generator.test.mjs"],
+    "timeoutMs": 30000
+  }
+}

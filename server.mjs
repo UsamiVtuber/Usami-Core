@@ -45,6 +45,7 @@ import {
 import { createStudyCompanionTools, publishStudyCompanionSkill } from './src/study-companion-skill.js';
 import { createDocumentCreatorTools, publishDocumentCreatorSkill } from './src/document-creator-skill.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from './src/code-inspector-skill.js';
+import { createPrChecklistGeneratorTools, publishPrChecklistGeneratorSkill } from './src/pr-checklist-generator-skill.js';
 import { createSkillArchitectTools, publishSkillArchitectSkill } from './src/skill-architect-skill.js';
 import { createCalendarManagerTools, publishCalendarManagerSkill } from './src/calendar-manager-skill.js';
 import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/email-assistant-skill.js';
@@ -525,6 +526,7 @@ for (const [label, publishFn] of [
   ['research-agent', publishResearchAgentSkill],
   ['git-assistant', publishGitAssistantSkill],
   ['spotify-player', publishSpotifySkill],
+  ['pr-checklist-generator', publishPrChecklistGeneratorSkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -566,6 +568,7 @@ for (const skillTool of [
       metadata: { tool: evt.tool, action: evt.action || null },
     }),
   }),
+  ...createPrChecklistGeneratorTools(),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {

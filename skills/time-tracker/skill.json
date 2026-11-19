@@ -16,8 +16,8 @@
     "timer.block",
     "timer.export",
     "timer.tags",
-    "timer.session.addTags",
-    "timer.session.removeTags"
+    "timer.session_add_tags",
+    "timer.session_remove_tags"
   ],
   "permissions": [1, 2],
   "dependencies": [],
