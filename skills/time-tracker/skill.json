@@ -2,7 +2,7 @@
   "schema": "usami.agent.skill.v1",
   "id": "time-tracker",
   "name": "Time Tracker",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Rastreamento de tempo com Pomodoro, time-blocking e relatórios semanais usando memória operacional local.",
   "state": "installed",
   "origin": "dev",
@@ -16,8 +16,8 @@
     "timer.block",
     "timer.export",
     "timer.tags",
-    "timer.session.addTags",
-    "timer.session.removeTags"
+    "timer.session_add_tags",
+    "timer.session_remove_tags"
   ],
   "permissions": [1, 2],
   "dependencies": [],

@@ -19,8 +19,8 @@ export const TIME_TRACKER_TOOLS = Object.freeze([
   'timer.block',
   'timer.export',
   'timer.tags',
-  'timer.session.addTags',
-  'timer.session.removeTags',
+  'timer.session_add_tags',
+  'timer.session_remove_tags',
 ]);
 
 /**
@@ -102,12 +102,12 @@ export function createTimeTrackerTools({
   };
 
   const addTagsTool = {
-    ...core.toolSpecs.find(s => s.name === 'timer.session.addTags'),
+    ...core.toolSpecs.find(s => s.name === 'timer.session_add_tags'),
     execute: async (args) => core.addTagsToSession(args),
   };
 
   const removeTagsTool = {
-    ...core.toolSpecs.find(s => s.name === 'timer.session.removeTags'),
+    ...core.toolSpecs.find(s => s.name === 'timer.session_remove_tags'),
     execute: async (args) => core.removeTagsFromSession(args),
   };
 
