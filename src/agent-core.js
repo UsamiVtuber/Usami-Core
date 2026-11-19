@@ -519,8 +519,11 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     matches: normalized => SPOTIFY_SEARCH_RE.test(normalized),
     buildArgs: message => {
       const clean = collapseText(message)
+        .replace(/^\[[^\]]{1,60}\]:\s*/, '')
         .replace(/^(?:usami[,\s]+)?(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\s+(?:por\s+|a\s+musica\s+|musica\s+)?/i, '')
         .replace(/\b(?:no|do)\s+spotify\b/gi, '')
+        .replace(/\b(?:pra|para)\s+mim\b/gi, '')
+        .replace(/\bpor\s+favor\b/gi, '')
         .replace(/[?!.]+$/, '')
         .trim();
       return { query: clean.slice(0, 180) || collapseText(message).slice(0, 180), type: 'track', limit: 5 };
@@ -541,8 +544,11 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         return { action: 'volume', volumePercent: Math.min(100, Math.max(0, Number(volMatch[1]))) };
       }
       const clean = collapseText(message)
+        .replace(/^\[[^\]]{1,60}\]:\s*/, '')
         .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da\s+play|play)\s+(?:a\s+musica\s+|musica\s+)?/i, '')
         .replace(/\b(?:no|na|do)\s+spotify\b/gi, '')
+        .replace(/\b(?:pra|para)\s+mim\b/gi, '')
+        .replace(/\bpor\s+favor\b/gi, '')
         .replace(/[?!.]+$/, '')
         .trim();
       const genericOnly = /^(?:uma?\s+musica|musica|som|algo|qualquer\s+coisa)?$/i.test(clean);

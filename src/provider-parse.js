@@ -133,6 +133,15 @@ export function stripLeakedJson(reply) {
     .trim();
 }
 
+// Remove tool calls no formato XML (Hermes/Qwen): 
+// 
+export function stripXmlToolCalls(text) {
+  return String(text ?? '')
+    .replace(/^\s*<tool_call>\s*<function=[^>]+>[\s\S]*?<\/function>\s*$/gim, '')
+    .replace(/^\s*<tool_call>\s*<function=[^>]+>[\s\S]*?<\/function>\s*/gim, '')
+    .trim();
+}
+
 // Remove a cerca de código (```json ... ```) que alguns provedores devolvem em
 // volta do JSON. Um único lugar para os quatro parsers.
 export function stripCodeFence(text) {
@@ -243,11 +252,13 @@ export function parseProviderRaw(raw, { replyCharLimit = REPLY_CHAR_LIMIT } = {}
   if (typeof raw !== 'string' || raw.length > 10000) {
     return { ok: false, status: 502, error: 'Resposta inválida do provedor.' };
   }
+  // Remove XML tool calls (Hermes/Qwen format) antes de tentar parsear JSON
+  const sanitized = stripXmlToolCalls(raw);
   let result;
   try {
-    result = JSON.parse(stripCodeFence(raw));
+    result = JSON.parse(stripCodeFence(sanitized));
   } catch {
-    const trimmed = raw.trim();
+    const trimmed = sanitized.trim();
     // Preâmbulo de raciocínio antes do JSON: procura um candidato JSON válido com reply.
     const candidates = extractAllJsonCandidates(trimmed);
     for (let i = candidates.length - 1; i >= 0; i -= 1) {

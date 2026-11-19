@@ -260,3 +260,37 @@ test('agent-core: roteia pedidos de Spotify no chat/Discord para os matchers e f
   });
   assert.equal(reply, 'Tocando agora no Spotify: Idol — YOASOBI.');
 });
+
+test('agent-core: spotify matchers removem envelope do Discord e sufixos de cortesia', () => {
+  const playMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.control');
+  const searchMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.search');
+
+  // Mensagem real do Discord (workflow n8n adiciona "[Discord | Ruka]: ")
+  // Inclui "musica" para que o SPOTIFY_CONTROL_RE faça match
+  const discordMsg = '[Discord | Ruka]: coloca a musica black flag dp omar varela pra mim';
+  const discordNormalized = 'discord | ruka: coloca a musica black flag dp omar varela pra mim';
+
+  // spotify.control: deve extrair query limpa "black flag dp omar varela"
+  assert.ok(playMatcher.matches(discordNormalized));
+  const playArgs = playMatcher.buildArgs(discordMsg, discordNormalized);
+  assert.equal(playArgs.action, 'play');
+  assert.equal(playArgs.query, 'black flag dp omar varela');
+
+  // spotify.search: mesmo envelope, verbos de busca
+  const searchMsg = '[Discord | Ruka]: busca black flag dp omar varela no spotify por favor';
+  const searchNormalized = 'discord | ruka: busca black flag dp omar varela no spotify por favor';
+  assert.ok(searchMatcher.matches(searchNormalized));
+  const searchArgs = searchMatcher.buildArgs(searchMsg);
+  assert.equal(searchArgs.query, 'black flag dp omar varela');
+
+  // Regressão: sem envelope continua funcionando
+  assert.deepEqual(playMatcher.buildArgs('toca Idol no spotify', 'toca idol no spotify'), {
+    action: 'play',
+    query: 'Idol',
+  });
+  assert.deepEqual(searchMatcher.buildArgs('busca Idol no spotify'), {
+    query: 'Idol',
+    type: 'track',
+    limit: 5,
+  });
+});
