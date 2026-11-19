@@ -16,6 +16,7 @@ export const PR_CHECKLIST_SCHEMA = 'usami.pr-checklist.v1';
 export const PR_CHECKLIST_FORMATS = Object.freeze(['checklist', 'adr', 'summary', 'note']);
 
 const DEFAULT_OUTPUT_DIR = join(dataDir(), 'documents');
+const REPO_SLUG_RE = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
 
 function slugify(title) {
   return String(title ?? 'checklist')
@@ -36,6 +37,12 @@ function extractPrInfo(commits, targetPrNumber) {
     c.subject.includes(`#${targetPrNumber}`) || c.subject.includes(`pull request #${targetPrNumber}`)
   );
   return mergeCommit || commits[0];
+}
+
+function validateRepoSlug(repo) {
+  if (!REPO_SLUG_RE.test(repo)) {
+    throw new Error(`repo inválido: "${repo}". Esperado formato owner/nome (ex.: UsamiVtuber/Usami-Core)`);
+  }
 }
 
 export function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits = [] }) {
@@ -209,12 +216,31 @@ export async function generateChecklist({
   githubRepo = null,
   githubBranch = null,
   persist = true,
+  baseRef = null,
 } = {}) {
+  // Validação early-return
+  validateRepoSlug(repo);
+  if (saveToGithub && !githubRepo) {
+    throw new Error('githubRepo é obrigatório quando saveToGithub=true');
+  }
+  if (saveToGithub && githubRepo) {
+    validateRepoSlug(githubRepo);
+  }
+
   const gitClient = createGitAssistantClient();
 
-  // 1. Busca repo info (commits, PRs)
-  const repoData = await gitClient.listRepos({ repo, limit: 20 });
-  const commits = repoData.commits || [];
+  // 1. Busca repo info (commits, PRs) - com try/catch e latency logging
+  const listReposStart = Date.now();
+  let repoData;
+  try {
+    repoData = await gitClient.listRepos({ repo, limit: 20 });
+  } catch (error) {
+    console.warn('[pr-checklist] listRepos falhou:', error?.message || error);
+    throw error;
+  } finally {
+    console.info('[pr-checklist] listRepos latencyMs=' + (Date.now() - listReposStart));
+  }
+  const commits = (repoData.commits || []).sort((a, b) => new Date(a.date) - new Date(b.date));
   const openPRs = repoData.openPullRequests || [];
 
   // 2. Encontra PR alvo
@@ -226,23 +252,39 @@ export async function generateChecklist({
     head: targetPR.head,
     base: targetPR.base,
     mergeCommit: extractPrInfo(commits, prNumber),
-    skills: ['time-tracker', 'habit-garden', 'note-linker', 'focus-guardian', 'document-creator'] // default
+    skills: ['time-tracker', 'habit-garden', 'note-linker', 'focus-guardian', 'document-creator']
   } : null;
 
-  // 3. Busca diff dos commits incluídos
+  // 3. Busca diff dos commits incluídos - com try/catch e latency logging
   let diffStat = '';
   let diffPatch = '';
   if (includeCommits.length > 0) {
-    const baseRef = includeCommits[includeCommits.length - 1]; // último = mais antigo
-    const diffData = await gitClient.diff({ target: 'usami', ref: baseRef });
+    const ref = baseRef || includeCommits[includeCommits.length - 1];
+    const diffStart = Date.now();
+    let diffData;
+    try {
+      diffData = await gitClient.diff({ target: 'usami', ref });
+    } catch (error) {
+      console.warn('[pr-checklist] diff falhou:', error?.message || error);
+      throw error;
+    } finally {
+      console.info('[pr-checklist] diff latencyMs=' + (Date.now() - diffStart));
+    }
     diffStat = diffData.stat;
     diffPatch = diffData.diff;
   } else if (prInfo?.mergeCommit) {
-    // Tenta achar o commit base antes do merge
     const mergeIdx = commits.findIndex(c => c.hash === prInfo.mergeCommit.hash);
     if (mergeIdx >= 0 && mergeIdx + 1 < commits.length) {
-      const baseRef = commits[mergeIdx + 1].hash;
-      const diffData = await gitClient.diff({ target: 'usami', ref: baseRef });
+      const diffStart = Date.now();
+      let diffData;
+      try {
+        diffData = await gitClient.diff({ target: 'usami', ref: commits[mergeIdx + 1].hash });
+      } catch (error) {
+        console.warn('[pr-checklist] diff falhou:', error?.message || error);
+        throw error;
+      } finally {
+        console.info('[pr-checklist] diff latencyMs=' + (Date.now() - diffStart));
+      }
       diffStat = diffData.stat;
       diffPatch = diffData.diff;
     }
@@ -272,21 +314,38 @@ export async function generateChecklist({
     saveResult = { location: 'none' };
   } else if (saveToGithub && githubRepo) {
     const { createOrUpdateFile } = gitClient;
-    const res = await createOrUpdateFile({
-      repo: githubRepo,
-      path: resolvedFilename,
-      content: draft.content,
-      message: `chore: checklist automatizado PR #${prNumber}`,
-      branch: githubBranch,
-    });
+    const writeStart = Date.now();
+    let res;
+    try {
+      res = await createOrUpdateFile({
+        repo: githubRepo,
+        path: resolvedFilename,
+        content: draft.content,
+        message: `chore: checklist automatizado PR #${prNumber}`,
+        branch: githubBranch,
+      });
+    } catch (error) {
+      console.warn('[pr-checklist] createOrUpdateFile falhou:', error?.message || error);
+      throw error;
+    } finally {
+      console.info('[pr-checklist] createOrUpdateFile latencyMs=' + (Date.now() - writeStart));
+    }
     saveResult = { ...res, location: 'github' };
   } else {
-    saveResult = writeSafeDocument({
-      allowedDir: outputDir,
-      filename: checkedName.filename,
-      content: draft.content,
-      overwrite: true,
-    });
+    const writeStart = Date.now();
+    try {
+      saveResult = writeSafeDocument({
+        allowedDir: outputDir,
+        filename: checkedName.filename,
+        content: draft.content,
+        overwrite: true,
+      });
+    } catch (error) {
+      console.warn('[pr-checklist] writeSafeDocument falhou:', error?.message || error);
+      throw error;
+    } finally {
+      console.info('[pr-checklist] writeSafeDocument latencyMs=' + (Date.now() - writeStart));
+    }
     saveResult = { ...saveResult, location: 'local' };
   }
 
