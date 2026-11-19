@@ -54,7 +54,7 @@ import { createSpotifyTools, publishSpotifySkill } from './src/spotify-skill.js'
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
-import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
+import { createAgentCore, detectConfirmationFollowUp, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -1349,6 +1349,19 @@ export function createChatHandler(options = {}) {
           publishActivity({ phase: 'thinking' });
         } catch {
           agentTurn = null;
+        }
+      }
+
+      // Um "sim" sozinho depende da pergunta da fala anterior para fazer
+      // sentido; o histórico no prompt não destaca isso o suficiente.
+      if (!executedAgentTurn) {
+        try {
+          const confirmation = detectConfirmationFollowUp(parsedBody.message, todayHistory);
+          if (confirmation) {
+            system += `\n\n=== CONTINUIDADE DA CONVERSA ===\nSua última fala terminou em pergunta: "${confirmation.previousReply}"\n${isThirdParty ? 'A pessoa' : 'Ele'} respondeu apenas confirmando, sem repetir o assunto. Interprete como "sim, pode seguir com o que você perguntou" e continue a partir daí — nunca diga que não entendeu nem peça contexto.`;
+          }
+        } catch (error) {
+          console.warn('[chat] dica de continuidade falhou: ' + (error?.message || error));
         }
       }
 

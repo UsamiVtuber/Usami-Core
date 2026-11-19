@@ -30,6 +30,12 @@ const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|ch
 const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei|fatura)\b|\b(?:meu\s+extrato|meus\s+gastos|minhas\s+transacoes)\b/;
 const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*|ach\w*|veja|ver|v[eê]|traz\w*|traga|trouxe|quais(?:\s+as)?|tem|saiu)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:noticias?|manchetes?|novidades?(?:\s+(?:de|sobre|do|da|em|no|na)))\b|\b(?:noticias?|manchetes?)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:ver|v[eê]|veja|pesquis\w*|bus(?:c|qu)\w*|procur\w*|ach\w*|mostr\w*)\b|\b(?:pesquis\w*|googl\w*)\s+(?:sobre|por|a\s+respeito\s+de)\s+(?!.*\b(?:memoria|fatos|historico|resumos?|mim|eu|meu|minha|e-?mails?|gmail|agenda|calendario|arquivo|codigo|git|repo(?:sitorio)?)\b).+/;
 const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/;
+// Link compartilhado: sem verbo explícito de extração, o comportamento
+// esperado é abrir a página — não tratá-la como se fosse só texto.
+const URL_RE = /https?:\/\/[^\s<>"'`]+/i;
+const DISCORD_ENVELOPE_RE = /^\[Discord\s*\|[^\]]+\]:\s*/i;
+const LINK_READ_VERB_RE = /\b(?:extrai\w*|ler|leia|scrape|fetch|abr\w*|acess\w*|olh\w*|veja|ver|v[eê]|confer\w*|chec\w*|resum\w*|explic\w*|analis\w*|coment\w*|avali\w*)\b/;
+const LINK_CONTEXT_FILLER_RE = /\b(?:olha|olhe|veja|ver|v[eê]|confere|confira|checa|cheque|d[aá]|uma|olhada|nisso|nessa|nesse|isso|isto|aqui|link|url|segue|manda|mande|mandando|compartilhando|achei|encontrei|encontrado|s[oó]|ai|a[ií]|mano|usami|ei|oi|por favor|pfv|que|esse|essa|este|esta|um|uma|o|a|os|as|de|do|da|dos|das|em|no|na|nos|nas|pra|para|pro|mim|te|vc|voc[eê]|tu)\b/gi;
 const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b|\bcommit\s+[a-f0-9]{4,40}\b|\b(?:como\s+ficou|o\s+que\s+(?:mudou|foi\s+feito|foi\s+alterado))\s+(?:no\s+c[oó]digo|no\s+repo|no\s+git|no\s+projeto)\b|\b(?:olha|veja?|da\s+uma\s+olhada)\s+(?:no\s+c[oó]digo|nos\s+commits?|no\s+refactor|no\s+commit)\b/i;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
@@ -704,6 +710,32 @@ export function isDeferredToolPromise(text) {
   return DEFERRED_TOOL_PROMISE_RE.test(normalizeText(text));
 }
 
+/**
+ * Detecta resposta curta de confirmação ("sim", "pode sim") quando a última
+ * fala da Usami terminou em pergunta. Sem isso o LLM recebe um "sim" solto,
+ * sem saber a que ele responde, e perde o fio da conversa.
+ */
+export function detectConfirmationFollowUp(message, history) {
+  const clean = stripDiscordEnvelope(message);
+  if (!clean) return null;
+  const normalizedReply = normalizeText(clean.replace(/[?!.]+$/, ''));
+  if (!CONFIRMATION_REPLY_RE.test(normalizedReply)) return null;
+  if (!Array.isArray(history) || history.length === 0) return null;
+  let lastAssistant = '';
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const item = history[i];
+    if (item?.role === 'assistant' && typeof item.content === 'string') {
+      const content = collapseText(item.content);
+      if (content) {
+        lastAssistant = content;
+        break;
+      }
+    }
+  }
+  if (!lastAssistant || !lastAssistant.includes('?')) return null;
+  return { previousReply: lastAssistant.slice(-400) };
+}
+
 function buildResearchQuery(message) {
   const clean = collapseText(message)
     .replace(/[?!.]\s*(?:vou\s+dar\s+uma\s+olhada|espera\s+a[ií]|aguarde).*$/i, '')
@@ -725,6 +757,37 @@ function buildResearchQuery(message) {
 
 const isScheduleGoal = normalized => /\b(semana|agenda|cronograma|tarefas?|compromissos?|prioriz\w*|conflit\w*|rotina)\b/.test(normalized);
 
+// O bridge do Discord entrega "[Discord | Nome]: texto". O envelope não faz
+// parte da fala do usuário e quebra regexes ancoradas (confirmação, "sim").
+function stripDiscordEnvelope(message) {
+  return collapseText(message).replace(DISCORD_ENVELOPE_RE, '');
+}
+
+function hasWriteActionIntent(normalized) {
+  return GITHUB_ISSUE_RE.test(normalized)
+    || GITHUB_CREATE_REPO_RE.test(normalized)
+    || CODE_PROPOSE_RE.test(normalized)
+    || CALENDAR_CREATE_RE.test(normalized);
+}
+
+// Link compartilhado num pedido de leitura ("olha essa issue <url>") deve
+// abrir a página. Ações de escrita que citam um link (criar issue com ele)
+// continuam indo para a ferramenta de escrita.
+function isSharedLinkReadIntent(message) {
+  const clean = stripDiscordEnvelope(message);
+  if (!URL_RE.test(clean)) return false;
+  const normalized = normalizeText(clean);
+  if (hasWriteActionIntent(normalized)) return false;
+  if (RESEARCH_FETCH_RE.test(clean)) return true;
+  const withoutUrls = clean.replace(new RegExp(URL_RE.source, 'gi'), ' ');
+  const leftover = normalizeText(withoutUrls)
+    .replace(LINK_CONTEXT_FILLER_RE, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (leftover.length < 4) return true;
+  return LINK_READ_VERB_RE.test(normalizeText(withoutUrls));
+}
+
 function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true, metrics = null) {
   const calls = resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive);
   
@@ -738,22 +801,33 @@ function resolveToolCall(message, registry, toolMatchers, hintedToolName, isTool
 }
 
 function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
-  const normalized = normalizeText(message);
+  const clean = stripDiscordEnvelope(message);
+  const normalized = normalizeText(clean);
   const matched = [];
   const seen = new Set();
+
+  // Link compartilhado para leitura é exclusivo: "olha essa issue <url>" não
+  // pode virar github.repos só porque a URL contém "github". A exceção é
+  // quando o próprio usuário nomeia a ferramenta.
+  const linkRead = isSharedLinkReadIntent(clean);
+  const explicitlyNamesHint = Boolean(hintedToolName) && normalized.includes(hintedToolName.toLowerCase());
+  if (linkRead && !explicitlyNamesHint && registry.has('research.fetch') && isToolActive('research.fetch')) {
+    const fetchMatcher = toolMatchers.find(item => item.toolName === 'research.fetch');
+    if (fetchMatcher) return [{ toolName: 'research.fetch', args: fetchMatcher.buildArgs(clean) }];
+  }
 
   if (hintedToolName && registry.has(hintedToolName) && isToolActive(hintedToolName)) {
     const matcher = toolMatchers.find(item => item.toolName === hintedToolName);
     if (matcher) {
-      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(message) });
+      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(clean) });
       seen.add(hintedToolName);
     } else {
-      const clean = collapseText(message).replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || collapseText(message);
+      const stripped = clean.replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || clean;
       const spec = registry.get(hintedToolName);
       const firstStringParam = spec?.parameters?.find(param => param.type === 'string' && param.required);
       matched.push({
         toolName: hintedToolName,
-        args: firstStringParam ? { [firstStringParam.name]: clean } : {},
+        args: firstStringParam ? { [firstStringParam.name]: stripped } : {},
       });
       seen.add(hintedToolName);
     }
@@ -763,7 +837,7 @@ function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToo
     if (seen.has(matcher.toolName)) continue;
     if (!registry.has(matcher.toolName) || !isToolActive(matcher.toolName)) continue;
     if (matcher.matches(normalized)) {
-      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(message) });
+      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(clean) });
       seen.add(matcher.toolName);
     }
   }
@@ -1043,7 +1117,7 @@ export function createAgentCore({
   function findRecentSpecificToolMatch(recent, preferredTool = null, excludeIdx = -1) {
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       if (i === excludeIdx) continue;
-      const content = collapseText(recent[i]?.content);
+      const content = stripDiscordEnvelope(recent[i]?.content);
       if (!content) continue;
       const det = classifyDeterministic(content, { toolNames: registry.names() });
       const res = resolveToolCall(content, registry, toolMatchers, det.matchedToolName || null, isToolActive);
@@ -1070,7 +1144,7 @@ export function createAgentCore({
     if (lastAssistantIdx < 0) return null;
 
     const lastAssistantContent = collapseText(recent[lastAssistantIdx].content);
-    const normalizedReply = normalizeText(clean.replace(/[?!.]+$/, ''));
+    const normalizedReply = normalizeText(stripDiscordEnvelope(clean).replace(/[?!.]+$/, ''));
     if (!CONFIRMATION_REPLY_RE.test(normalizedReply)) return null;
     if (!ASSISTANT_OFFER_ACTION_RE.test(normalizeText(lastAssistantContent))) return null;
 
@@ -1091,10 +1165,13 @@ export function createAgentCore({
   }
 
   async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null } = {}) {
-    const clean = collapseText(message);
+    const clean = stripDiscordEnvelope(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
-    let resolvedList = deterministic.kind === 'operational'
+    // Link para leitura não depende de o classificador verbo-dependente
+    // reconhecer a frase: "olha só a issue que achei <url>" é operacional.
+    const linkRead = isSharedLinkReadIntent(clean);
+    let resolvedList = (deterministic.kind === 'operational' || linkRead)
       ? resolveToolCalls(clean, registry, toolMatchers, deterministic.matchedToolName || null, isToolActive)
       : [];
     let intentGoal = clean;
@@ -1281,6 +1358,20 @@ function formatResearchSearchForPrompt(result) {
   };
 }
 
+function formatResearchFetchForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  const pages = Array.isArray(result.pages) ? result.pages.slice(0, 2).map(page => ({
+    url: String(page?.url || '').slice(0, 200),
+    title: String(page?.title || '').slice(0, 160),
+    excerpt: String(page?.markdown || '').slice(0, 1200),
+  })) : [];
+  return {
+    providerUsed: result.providerUsed || null,
+    count: Number(result.count ?? pages.length),
+    pages,
+  };
+}
+
 function formatGithubReposForPrompt(result) {
   if (!isPlainObject(result)) return null;
   const repos = Array.isArray(result.repositories)
@@ -1385,7 +1476,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
           ? (formatSelfDescribeForPrompt(sub.result) ?? sub.result ?? {})
           : toolName === 'research.search'
             ? (formatResearchSearchForPrompt(sub.result) ?? sub.result ?? {})
-            : toolName === 'github.repos'
+            : toolName === 'research.fetch'
+              ? (formatResearchFetchForPrompt(sub.result) ?? sub.result ?? {})
+              : toolName === 'github.repos'
               ? (formatGithubReposForPrompt(sub.result) ?? sub.result ?? {})
               : toolName === 'git.status'
                 ? (formatGitStatusForPrompt(sub.result) ?? sub.result ?? {})
@@ -1418,7 +1511,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       ? (formatSelfDescribeForPrompt(turn.result) ?? turn.result ?? {})
       : turn.tool === 'research.search'
         ? (formatResearchSearchForPrompt(turn.result) ?? turn.result ?? {})
-        : turn.tool === 'github.repos'
+        : turn.tool === 'research.fetch'
+          ? (formatResearchFetchForPrompt(turn.result) ?? turn.result ?? {})
+          : turn.tool === 'github.repos'
           ? (formatGithubReposForPrompt(turn.result) ?? turn.result ?? {})
           : turn.tool === 'git.status'
             ? (formatGitStatusForPrompt(turn.result) ?? turn.result ?? {})
@@ -1440,7 +1535,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       serialized = String(turn.result ?? '');
     }
     const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect';
-    const effectiveMaxChars = isDetailedIntrospection ? Math.max(maxChars, 4000) : maxChars;
+    const effectiveMaxChars = isDetailedIntrospection
+      ? Math.max(maxChars, 4000)
+      : (turn.tool === 'research.fetch' ? Math.max(maxChars, 2600) : maxChars);
     const clean = redactSecrets(serialized).slice(0, effectiveMaxChars);
     let toolInstruction = '';
     if (turn.tool === 'self.describe') {
@@ -1457,6 +1554,8 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       toolInstruction = ' Informe a branch e alterações pendentes com base nos dados obtidos acima.';
     } else if (turn.tool === 'code.inspect') {
       toolInstruction = ' Avalie e comente diretamente o conteúdo do código inspecionado acima.';
+    } else if (turn.tool === 'research.fetch') {
+      toolInstruction = ' A página do link foi lida agora: diga o que ela é e o ponto principal para o usuário, usando apenas o conteúdo extraído acima.';
     }
     const lengthRule = isDetailedIntrospection
       ? 'Responda IMEDIATAMENTE entregando os fatos reais obtidos acima de forma clara e detalhada (citando módulos, skills/ferramentas, integrações e limitações reais, sem inventar dados).'

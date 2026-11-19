@@ -1166,3 +1166,147 @@ test('follow-up "Pode buscar mais detalhes" reutiliza research.search e memory.s
 
 
 
+
+test('link compartilhado abre research.fetch e "sim" no Discord retoma o link da conversa', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-link-followup-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const registry = createToolRegistry();
+  const fetchedUrls = [];
+  let issueCalls = 0;
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'research.fetch',
+    version: '1.0.0',
+    description: 'Extrai o conteúdo em Markdown de URLs públicas.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 5000,
+    parameters: [
+      { name: 'url', type: 'string', required: false },
+      { name: 'urls', type: 'array', required: false },
+      { name: 'provider', type: 'string', required: false },
+    ],
+    verify: r => Array.isArray(r?.pages),
+    execute: args => {
+      fetchedUrls.push(args.url);
+      return {
+        ok: true,
+        mode: 'fetch',
+        providerUsed: 'tinyfish',
+        count: 1,
+        pages: [{ url: args.url, title: 'Sessões travam ao retomar', markdown: '# Issue 64750\nO bug acontece ao retomar uma sessão.' }],
+      };
+    },
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'research.search',
+    version: '1.0.0',
+    description: 'Pesquisa web.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 5000,
+    parameters: [
+      { name: 'query', type: 'string', required: true },
+      { name: 'provider', type: 'string', required: false },
+      { name: 'limit', type: 'number', required: false },
+    ],
+    verify: r => Array.isArray(r?.results),
+    execute: args => ({ query: args.query, results: [] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'github.repos',
+    version: '1.0.0',
+    description: 'Lista repositórios.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 5000,
+    parameters: [{ name: 'slug', type: 'string', required: false }],
+    verify: () => true,
+    execute: () => ({ repositories: [] }),
+  });
+  registry.register({
+    schema: AGENT_SCHEMAS.tool,
+    name: 'github.issue',
+    version: '1.0.0',
+    description: 'Abre issue no GitHub.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 5000,
+    parameters: [
+      { name: 'title', type: 'string', required: true },
+      { name: 'body', type: 'string', required: false },
+      { name: 'repo', type: 'string', required: false },
+      { name: 'labels', type: 'array', required: false },
+    ],
+    verify: r => r?.ok === true,
+    execute: () => {
+      issueCalls += 1;
+      return { ok: true, created: true, number: 1 };
+    },
+  });
+
+  const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+  gate.load();
+  const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+  executor.load();
+  const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+  planner.load();
+  const agentCore = createAgentCore({ registry, executor, planner, onError: () => {} });
+
+  const sharedLink = 'https://github.com/anomalyco/opencode/issues/64750';
+  const linkTurn = await agentCore.runOperationalForChat(`[Discord | Ruka]: olha só a issue que achei ${sharedLink}`);
+  assert.equal(linkTurn?.tool, 'research.fetch', 'link compartilhado deve abrir a página, não github.repos');
+  assert.equal(linkTurn?.status, 'executed');
+  assert.equal(fetchedUrls.at(-1), sharedLink);
+
+  const bareLink = await agentCore.runOperationalForChat(`[Discord | Ruka]: ${sharedLink}`);
+  assert.equal(bareLink?.tool, 'research.fetch', 'link sozinho também deve ser lido');
+
+  const fetchCallsBeforeWrite = fetchedUrls.length;
+  const writeTurn = await agentCore.runOperationalForChat(`[Discord | Ruka]: cria uma issue no github sobre o bug do link nos comentários ${sharedLink}`);
+  assert.equal(writeTurn?.tool, 'github.issue', 'pedido de escrita que cita o link não deve virar leitura');
+  assert.equal(issueCalls, 1);
+  assert.equal(fetchedUrls.length, fetchCallsBeforeWrite, 'leitura não pode rodar junto do pedido de issue');
+
+  const confirmationTurn = await agentCore.runOperationalForChat('[Discord | Ruka]: sim', {
+    history: [
+      { role: 'user', content: `[Discord | Ruka]: olha só a issue que achei ${sharedLink}` },
+      { role: 'assistant', content: 'Hmph... essa issue é sobre sessões que travam? Quer que eu tente buscar mais detalhes sobre ela via web?' },
+    ],
+  });
+  assert.equal(confirmationTurn?.tool, 'research.fetch', '"sim" no Discord deve retomar o link pendente');
+  assert.equal(fetchedUrls.at(-1), sharedLink);
+
+  const fetchPrompt = formatAgentTurnPromptContext({
+    status: 'executed',
+    route: 'tool',
+    tool: 'research.fetch',
+    result: {
+      mode: 'fetch',
+      providerUsed: 'tinyfish',
+      count: 1,
+      pages: [{ url: sharedLink, title: 'Sessões travam ao retomar', markdown: '# Issue 64750\nO bug acontece ao retomar uma sessão.' }],
+    },
+  });
+  assert.match(fetchPrompt, /Sessões travam ao retomar/);
+  assert.match(fetchPrompt, /O bug acontece ao retomar uma sessão/);
+  assert.match(fetchPrompt, /A página do link foi lida agora/);
+
+  const { detectConfirmationFollowUp } = await import('../src/agent-core.js');
+  const followUp = detectConfirmationFollowUp('[Discord | Ruka]: sim', [
+    { role: 'assistant', content: 'Quer que eu tente buscar mais detalhes via web?' },
+  ]);
+  assert.match(followUp?.previousReply || '', /Quer que eu tente buscar mais detalhes/);
+  assert.equal(
+    detectConfirmationFollowUp('[Discord | Ruka]: sim', [{ role: 'assistant', content: 'Hmph, tá bom.' }]),
+    null,
+    'sem pergunta anterior, confirmação não precisa de dica',
+  );
+  assert.equal(
+    detectConfirmationFollowUp('[Discord | Ruka]: bom dia', [{ role: 'assistant', content: 'Quer que eu busque?' }]),
+    null,
+    'mensagem que não é confirmação não recebe dica',
+  );
+});
