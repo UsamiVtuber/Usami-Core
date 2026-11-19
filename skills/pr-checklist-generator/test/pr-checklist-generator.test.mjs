@@ -7,76 +7,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildDocumentDraft } from '../../document-creator/document-core.mjs';
+import { buildSectionsFromData } from '../pr-checklist-core.mjs';
 import { dataDir } from '../../../src/data-paths.js';
-
-// Testa apenas a lógica de construção de sections (não integração completa)
-function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits = [] }) {
-  const sections = [];
-
-  sections.push({
-    heading: 'Origem dos Dados',
-    body: 'Gerado automaticamente via git-assistant (github.repos + git.diff) + document-creator (pr-checklist-generator)'
-  });
-
-  if (prInfo) {
-    sections.push({
-      heading: `PR #${prInfo.number || '?'} - ${prInfo.title || 'Merge Commit'}`,
-      body: `${prInfo.mergeCommit?.hash || ''} ${prInfo.mergeCommit?.subject || ''}\nInclui: ${prInfo.skills?.join(', ') || 'skills não detectadas'}`
-    });
-  }
-
-  if (includeCommits.length > 0) {
-    const commitDetails = includeCommits.map(hash => {
-      const commit = commits.find(c => c.hash.startsWith(hash.slice(0, 7))) || commits.find(c => c.hash === hash);
-      if (!commit) return `- ${hash}: não encontrado`;
-      const files = diffStat.split('\n').filter(l => l.includes('.mjs') || l.includes('.js') || l.includes('.json'));
-      return `- ${commit.hash} ${commit.subject}\n  ${files.slice(0, 5).join('\n  ') || 'arquivos não listados no stat'}`;
-    }).join('\n');
-    sections.push({
-      heading: 'Commits Analisados',
-      body: commitDetails
-    });
-  }
-
-  const skillNames = ['time-tracker', 'habit-garden', 'note-linker', 'focus-guardian', 'document-creator', 'git-assistant'];
-  const detectedSkills = skillNames.filter(s => diffStat.includes(s) || diffPatch.includes(s));
-  if (detectedSkills.length > 0) {
-    sections.push({
-      heading: 'Skills Afetadas',
-      body: detectedSkills.map(s => `- ${s}`).join('\n')
-    });
-  }
-
-  const skillSections = {
-    'time-tracker': { heading: 'Time Tracker', items: ['timer.start', 'timer.stop', 'timer.export', 'timer.tags'] },
-    'habit-garden': { heading: 'Habit Garden', items: ['habit.upsert', 'habit.log', 'habit.streak'] },
-    'note-linker': { heading: 'Note Linker', items: ['note.upsert', 'note.get', 'note.link'] },
-    'focus-guardian': { heading: 'Focus Guardian', items: ['focus.start', 'focus.stop', 'focus.checkBlocked'] },
-    'document-creator': { heading: 'Document Creator', items: ['document.draft', 'document.write'] },
-    'git-assistant': { heading: 'Git Assistant', items: ['git.status', 'git.diff', 'github.repos'] },
-  };
-
-  for (const skill of detectedSkills) {
-    if (skillSections[skill]) {
-      sections.push({
-        heading: skillSections[skill].heading,
-        body: skillSections[skill].items.map(i => `- ${i}`).join('\n')
-      });
-    }
-  }
-
-  sections.push({
-    heading: 'Integração & Arquitetura',
-    body: ['- server.mjs registra skills/tools', '- Manifestos auto-publicados', '- Stores JSON dedicados', '- Permissions levels 1-4'].join('\n')
-  });
-
-  sections.push({
-    heading: 'Testes de Regressão',
-    body: '- Total de testes passando: verificar via `npm test`'
-  });
-
-  return { sections, detectedSkills };
-}
 
 describe('pr-checklist-generator core logic', () => {
   const mockCommits = [

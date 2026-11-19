@@ -38,7 +38,7 @@ function extractPrInfo(commits, targetPrNumber) {
   return mergeCommit || commits[0];
 }
 
-function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits = [] }) {
+export function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits = [] }) {
   const sections = [];
 
   // Origem
@@ -90,6 +90,8 @@ function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCo
         'timer.report (day/week/all, projectId filter)',
         'timer.pomodoro (work/break minutes)',
         'timer.block (startAt/endAt agendado)',
+        'timer.export (csv/json)',
+        'timer.tags / timer.session_add_tags / timer.session_remove_tags',
         'Persistência timer-session-store + operational-memory',
         'ToolSpecs verify functions',
         'Testes passando'
@@ -129,10 +131,10 @@ function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCo
         'focus.status (progresso, tempo restante, pausas, distrações)',
         'focus.sessions (filtros status, profileId)',
         'focus.stats (agregado, opcional profileId)',
-        'Perfis: upsert/get/list/delete (Deep Work, Pomodoro, Light Focus defaults)',
-        'Blocklists: upsert/list/delete (domínios, enabled)',
+        'Perfis: upsert/list/delete (Deep Work, Pomodoro, Light Focus defaults)',
+        'Blocklists: upsert/get/list/delete (domínios, enabled)',
         'Settings get/update',
-        'focus.checkBlocked (URL + profileId → blocked boolean)',
+        'focus.check-blocked (URL + profileId → blocked boolean)',
         'Blocklists padrão: Redes Sociais + Entretenimento',
         'Testes passando'
       ]
@@ -143,8 +145,9 @@ function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCo
         'document.draft (note, checklist, adr, summary)',
         'document.write (nível 4, pasta permitida, overwrite)',
         'document.list/get/update/search/delete',
+        'document.history/version',
         'document.tags/stats',
-        'Templates: create/get/list/delete + initializeDefaults',
+        'Templates: upsert/get/list/delete',
         'Validação filename (sem traversal, .md/.txt apenas)',
         'Testes passando'
       ]
@@ -192,7 +195,7 @@ function buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCo
     body: '- Total de testes passando: verificar via `npm test`\n- Cada skill tem sua suíte isolada\n- Testes de persistência entre instâncias\n- Casos de borda validados'
   });
 
-  return sections;
+  return { sections, detectedSkills };
 }
 
 export async function generateChecklist({
@@ -245,11 +248,7 @@ export async function generateChecklist({
   }
 
   // 4. Monta seções
-  const sections = buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits });
-
-  // Skills detectadas (para retorno)
-  const skillNames = ['time-tracker', 'habit-garden', 'note-linker', 'focus-guardian', 'document-creator', 'git-assistant'];
-  const detectedSkills = skillNames.filter(s => diffStat.includes(s) || diffPatch.includes(s));
+  const { sections, detectedSkills } = buildSectionsFromData({ prInfo, commits, diffStat, diffPatch, includeCommits });
 
   // 5. Gera draft
   const title = `Checklist de Testes - PR #${prNumber}${includeCommits.length ? ` + ${includeCommits.length} commits` : ''}`;
