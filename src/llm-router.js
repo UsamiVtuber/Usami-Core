@@ -15,7 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractAllJsonCandidates } from './json-salvage.js';
-import { parseJsonLoosely, parseProviderRaw } from './provider-parse.js';
+import { parseJsonLoosely, parseProviderRaw, parseXmlToolCalls, stripXmlToolCalls } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -189,6 +189,23 @@ export async function generateReplyWithActions(
   return jsonText(answer, 'reply');
 }
 
+// Converte chamadas escritas em texto para o formato OpenAI `tool_calls`.
+// Só aceita ferramentas oferecidas no turno (nome com ponto ou sublinhado).
+export function textToolCallsToOpenAi(content, tools = [], iteration = 0) {
+  const offered = new Set((tools || []).map(t => t?.function?.name).filter(Boolean));
+  return parseXmlToolCalls(content)
+    .map((call, index) => {
+      const fnName = [call.name, call.name.replace(/\./g, '_')].find(n => offered.has(n));
+      if (!fnName) return null;
+      return {
+        id: `text_call_${iteration}_${index}`,
+        type: 'function',
+        function: { name: fnName, arguments: JSON.stringify(call.args || {}) },
+      };
+    })
+    .filter(Boolean);
+}
+
 function formatToolResultContent(result, maxChars = 3500) {
   let str = '';
   try {
@@ -260,9 +277,17 @@ export async function generateReplyWithTools(
     const msg = answer?.choices?.[0]?.message;
     if (!msg) throw new Error('resposta inválida do provedor (sem message)');
 
-    const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    let toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    let assistantContent = msg.content || null;
+    // Modelo escreveu a chamada como texto (<tool_call>...) em vez do canal
+    // nativo: converte para tool_calls e executa, em vez de mandar o XML
+    // para o chat como se fosse a fala.
+    if (toolCalls.length === 0 && !isLastIteration && tools?.length && typeof msg.content === 'string') {
+      toolCalls = textToolCallsToOpenAi(msg.content, tools, iteration);
+      if (toolCalls.length) assistantContent = stripXmlToolCalls(msg.content) || null;
+    }
     if (toolCalls.length > 0 && !isLastIteration) {
-      messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
+      messages.push({ role: 'assistant', content: assistantContent, tool_calls: toolCalls });
       for (const tc of toolCalls) {
         const name = tc?.function?.name;
         let args = {};
@@ -293,8 +318,12 @@ export async function generateReplyWithTools(
     if (loose.ok && loose.value && typeof loose.value === 'object' && loose.value.reply) {
       return { ...loose.value, source: 'nvidia', executedTools };
     }
-    // Sem JSON recuperável: devolve o texto como reply (nunca o bruto truncado).
-    return { ok: true, reply: text.slice(0, 300) || '...', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
+    // Sem JSON recuperável: devolve o texto como reply, sem tool call em texto.
+    const plain = stripXmlToolCalls(text);
+    if (!plain) {
+      return { ok: false, error: 'O modelo retornou só uma chamada de ferramenta, sem fala.', reply: '', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
+    }
+    return { ok: true, reply: plain.slice(0, 300), gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
   }
 
   // Esgotou iterações sem resposta final.

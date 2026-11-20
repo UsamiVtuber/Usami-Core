@@ -521,6 +521,20 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     buildArgs: () => ({ limit: 15 }),
   },
   {
+    toolName: 'spotify.similar',
+    matches: normalized => /\b(?:semelhante|semelhantes|parecida|parecidas|parecido|parecidos|similar|similares)\b/.test(normalized)
+      && (/\b(?:musica|musicas|som|tocar|ouvir|artista|banda|spotify|playlist)\b/.test(normalized) || /\b(?:dele|dela|deles)\b/.test(normalized)),
+    buildArgs: (message, normalized) => {
+      const match = /\b(?:semelhante[s]?\s+a[os]?|parecida[s]?\s+com|parecido[s]?\s+com|estilo)\s+([^,?.!]+)/i.exec(message);
+      let artist = match ? match[1].trim() : '';
+      if (!artist || /\b(?:ele|ela|dele|dela)\b/i.test(artist)) {
+        const artistMatch = /\b(?:do|da|artista|cantor[a]?)\s+([A-Z][a-zA-Z0-9_\s]+)/.exec(message);
+        if (artistMatch) artist = artistMatch[1].trim();
+      }
+      return { artist: artist || 'Omar Varela', play: true, limit: 10 };
+    },
+  },
+  {
     toolName: 'spotify.search',
     matches: normalized => SPOTIFY_SEARCH_RE.test(normalized),
     buildArgs: message => {
@@ -1664,6 +1678,18 @@ export function formatExecutedTurnFallbackReply(turn) {
   if (turn.tool === 'spotify.control') {
     if (r.track?.name) return `Coloquei para tocar no Spotify: ${r.track.name}!`;
     return `Comando Spotify (${r.action || 'control'}) executado!`;
+  }
+  if (turn.tool === 'spotify.similar') {
+    const artist = r.artist || 'artista solicitado';
+    if (r.playing && Array.isArray(r.tracks) && r.tracks.length) {
+      const first = r.tracks[0];
+      const others = r.tracks.length - 1;
+      return `Coloquei músicas semelhantes a ${artist} para tocar no Spotify! Começando por "${first.name}"${first.artists?.length ? ` (${first.artists.join(', ')})` : ''}${others > 0 ? ` e mais ${others} na fila` : ''}.`;
+    }
+    if (Array.isArray(r.tracks) && r.tracks.length) {
+      return `Encontrei ${r.tracks.length} músicas semelhantes a ${artist}: ${r.tracks.slice(0, 3).map(t => t.name).join(', ')}.`;
+    }
+    return `Não consegui encontrar músicas semelhantes a ${artist} no momento.`;
   }
   if (turn.tool === 'spotify.stats') {
     const topTracks = Array.isArray(r.topTracks)

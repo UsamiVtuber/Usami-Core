@@ -133,13 +133,57 @@ export function stripLeakedJson(reply) {
     .trim();
 }
 
-// Remove tool calls no formato XML (Hermes/Qwen): 
-// 
+// Tool calls em texto (formato Qwen/Hermes): alguns modelos ignoram o canal
+// nativo `tool_calls` e escrevem a chamada no `content`:
+//   <tool_call><function=spotify.search><parameter=query>x</parameter></function></tool_call>
+//   <tool_call>{"name":"spotify_search","arguments":{"query":"x"}}</tool_call>
+// A versão anterior só removia o bloco quando começava na linha e deixava o
+// `</tool_call>` órfão; o XML vazava inteiro quando vinha dentro do "reply".
 export function stripXmlToolCalls(text) {
   return String(text ?? '')
-    .replace(/^\s*<tool_call>\s*<function=[^>]+>[\s\S]*?<\/function>\s*$/gim, '')
-    .replace(/^\s*<tool_call>\s*<function=[^>]+>[\s\S]*?<\/function>\s*/gim, '')
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ')
+    .replace(/<function=[^>]*>[\s\S]*?(?:<\/function>|$)/gi, ' ')
+    .replace(/<\/?(?:tool_call|function|parameter)\b[^>]*>/gi, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function coerceXmlParam(raw) {
+  const value = String(raw ?? '').trim();
+  if (/^(?:-?\d+(?:\.\d+)?|true|false|null)$/.test(value) || /^[[{]/.test(value)) {
+    try { return JSON.parse(value); } catch { /* mantém string */ }
+  }
+  return value;
+}
+
+// Extrai as chamadas escritas em texto. Devolve [{ name, args }] (vazio se
+// não houver nenhuma) para o loop de ferramentas executá-las de verdade.
+export function parseXmlToolCalls(text) {
+  const src = String(text ?? '');
+  if (!/<tool_call>|<function=/i.test(src)) return [];
+  const calls = [];
+  for (const match of src.matchAll(/<function=([^>\s]+)\s*>([\s\S]*?)(?:<\/function>|(?=<function=)|(?=<\/tool_call>)|$)/gi)) {
+    const args = {};
+    for (const param of match[2].matchAll(/<parameter=([^>\s]+)\s*>([\s\S]*?)(?:<\/parameter>|(?=<parameter=)|$)/gi)) {
+      args[param[1].trim()] = coerceXmlParam(param[2]);
+    }
+    calls.push({ name: match[1].trim(), args });
+  }
+  if (calls.length) return calls;
+  for (const match of src.matchAll(/<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/gi)) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      const name = typeof parsed?.name === 'string' ? parsed.name.trim() : '';
+      if (!name) continue;
+      let args = parsed.arguments ?? parsed.parameters ?? {};
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args); } catch { args = {}; }
+      }
+      calls.push({ name, args: args && typeof args === 'object' && !Array.isArray(args) ? args : {} });
+    } catch { /* bloco inválido: só será removido do texto */ }
+  }
+  return calls;
 }
 
 // Remove a cerca de código (```json ... ```) que alguns provedores devolvem em
@@ -177,7 +221,7 @@ function salvageLeakedGesture(rawText) {
 }
 
 function cleanReply(reply, replyCharLimit = REPLY_CHAR_LIMIT) {
-  const { text, tags } = extractSpeechTags(stripStageDirections(stripLeakedJson(reply)));
+  const { text, tags } = extractSpeechTags(stripStageDirections(stripLeakedJson(stripXmlToolCalls(reply))));
   return { display: capReplyLength(text, replyCharLimit), tags };
 }
 

@@ -12,7 +12,8 @@
     "spotify.search",
     "spotify.playlists",
     "spotify.control",
-    "spotify.stats"
+    "spotify.stats",
+    "spotify.similar"
   ],
   "permissions": [3],
   "dependencies": [],

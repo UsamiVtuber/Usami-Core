@@ -1575,9 +1575,13 @@ export function createChatHandler(options = {}) {
           const nvidiaAbort = new AbortController();
           const alternateAbort = new AbortController();
           const routerKey = alternate?.key || null;
-          // Seleção semântica Top-K de ferramentas candidatas para Function Calling
+          // Seleção semântica Top-K de ferramentas candidatas para Function Calling.
+          // "tenta de novo" não diz qual ferramenta: o último pedido do usuário
+          // entra na consulta para o retry continuar com as mesmas ferramentas.
+          const lastUserTurn = [...(todayHistory || [])].reverse().find(m => m?.role === 'user' && typeof m.content === 'string');
+          const selectorQuery = lastUserTurn ? `${parsedBody.message}\n${lastUserTurn.content}` : parsedBody.message;
           const candidateTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
-            ? selectTopKTools(parsedBody.message, toolRegistry.list(), { k: 6, minScore: 0.08 })
+            ? selectTopKTools(selectorQuery, toolRegistry.list(), { k: 6, minScore: 0.08 })
             : [];
           const openAiTools = (!options.generateReply && candidateTools.length > 0)
             ? candidateTools.map(toolToOpenAi)
