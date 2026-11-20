@@ -47,6 +47,8 @@ function appendDevice(url, deviceId) {
   return `${url}${sep}device_id=${encodeURIComponent(deviceId)}`;
 }
 
+let lastFmTimestamps = [];
+
 export function createSpotifyTools({
   spotifyAuth = createSpotifyAuthClient(),
   onTelemetry = null,
@@ -74,6 +76,9 @@ export function createSpotifyTools({
             ok: true,
             durationMs: Date.now() - started,
             action: args?.action || null,
+            source: res?.source || null,
+            count: res?.count ?? (Array.isArray(res?.items) ? res.items.length : null),
+            artist: res?.artist || null,
           });
           return res;
         } catch (err) {
@@ -344,6 +349,7 @@ export function createSpotifyTools({
       return isPlainObject(result) && result.ok === true && result.schema === SPOTIFY_SCHEMA && Array.isArray(result.tracks);
     },
     async execute(args = {}) {
+      const started = Date.now();
       const artist = String(args.artist || args.query || '').trim();
       if (!artist) {
         throw new Error('artist é obrigatório para buscar semelhantes.');
@@ -352,12 +358,24 @@ export function createSpotifyTools({
       const limit = Number.isInteger(args.limit) ? Math.min(Math.max(args.limit, 1), 20) : 8;
       const shouldPlay = args.play !== false && args.autoPlay !== false;
 
+      // Rate-limiter simples para chamadas Last.fm (máx 5 req/s)
+      const throttleLastFm = async () => {
+        const now = Date.now();
+        lastFmTimestamps = lastFmTimestamps.filter(t => now - t < 1000);
+        if (lastFmTimestamps.length >= 5) {
+          const delay = Math.max(0, 1000 - (now - lastFmTimestamps[0]));
+          if (delay > 0) await new Promise(r => setTimeout(r, delay));
+        }
+        lastFmTimestamps.push(Date.now());
+      };
+
       const lastFmKey = readEnvValue('LASTFM_API_KEY');
       let candidateTracks = [];
 
       if (lastFmKey) {
         try {
           if (trackName) {
+            await throttleLastFm();
             const trackUrl = `https://ws.audioscrobbler.com/2.0/?method=track.getsimilar&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(trackName)}&api_key=${lastFmKey}&format=json&limit=${limit}`;
             const res = await fetchImpl(trackUrl, { signal: AbortSignal.timeout(6000) });
             if (res.ok) {
@@ -369,6 +387,7 @@ export function createSpotifyTools({
             }
           }
           if (candidateTracks.length === 0) {
+            await throttleLastFm();
             const artistUrl = `https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=${encodeURIComponent(artist)}&api_key=${lastFmKey}&format=json&limit=${Math.min(limit, 8)}`;
             const res = await fetchImpl(artistUrl, { signal: AbortSignal.timeout(6000) });
             if (res.ok) {
@@ -376,6 +395,7 @@ export function createSpotifyTools({
               const similarArtists = (data?.similarartists?.artist || []).map(a => a?.name).filter(Boolean);
               const topTrackPromises = similarArtists.slice(0, 6).map(async simArtist => {
                 try {
+                  await throttleLastFm();
                   const topUrl = `https://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist=${encodeURIComponent(simArtist)}&api_key=${lastFmKey}&format=json&limit=2`;
                   const topRes = await fetchImpl(topUrl, { signal: AbortSignal.timeout(4000) });
                   if (topRes.ok) {
@@ -444,12 +464,16 @@ export function createSpotifyTools({
         }
       }
 
+      const source = candidateTracks.length > 0 ? 'lastfm' : 'spotify_fallback';
+      const durationMs = Date.now() - started;
+      console.info(`[spotify.similar] source=${source} artist="${artist}" tracks=${matchedTracks.length} playing=${isPlaying} durationMs=${durationMs}`);
+
       return {
         ok: true,
         schema: SPOTIFY_SCHEMA,
         artist,
         track: trackName,
-        source: candidateTracks.length > 0 ? 'lastfm' : 'spotify_fallback',
+        source,
         count: matchedTracks.length,
         playing: isPlaying,
         tracks: matchedTracks,
