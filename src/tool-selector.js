@@ -14,7 +14,7 @@ const SYNONYM_GROUPS = Object.freeze([
   ['financas', 'finance', 'banco', 'saldo', 'extrato', 'pluggy', 'belvo', 'gasto', 'conta'],
   ['pesquisa', 'web', 'internet', 'buscar', 'procurar', 'noticias', 'site', 'tinyfish', 'firecrawl'],
   ['memoria', 'lembrar', 'lembra', 'lembrei', 'lembrava', 'comentei', 'falamos', 'conversamos', 'historico', 'rag', 'vault', 'obsidian'],
-  ['musica', 'spotify', 'tocar', 'playlist', 'faixa', 'som'],
+  ['musica', 'spotify', 'tocar', 'playlist', 'faixa', 'som', 'semelhante', 'semelhantes', 'parecida', 'parecidas', 'parecido', 'parecidos', 'similar', 'similares', 'recomenda', 'recomendacao', 'estilo'],
   ['workspace', 'fluxo', 'flow', 'meta', 'automacao', 'rota'],
   ['timer', 'temporizador', 'pomodoro', 'lembrete', 'lembretes', 'lembrar', 'aviso', 'avisar', 'alarme', 'foco', 'pausa', 'descanso', 'cronometro'],
 ]);

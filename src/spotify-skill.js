@@ -29,6 +29,7 @@ export const SPOTIFY_TOOLS = Object.freeze([
   'spotify.playlists',
   'spotify.control',
   'spotify.stats',
+  'spotify.similar',
 ]);
 
 const DEFAULT_SPOTIFY_STATS_URL = 'http://10.42.0.1:5678/webhook/usami-spotify-stats';
@@ -202,6 +203,7 @@ export function createSpotifyTools({
     parameters: [
       { name: 'action', type: 'string', required: true, description: 'play | pause | next | previous | volume | shuffle' },
       { name: 'uri', type: 'string', required: false, description: 'URI Spotify opcional para play (ex.: spotify:track:...).' },
+      { name: 'uris', type: 'array', required: false, description: 'Lista ordenada de URIs de faixas Spotify para tocar sequencialmente.' },
       { name: 'query', type: 'string', required: false, description: 'Busca rápida opcional para tocar a primeira faixa encontrada.' },
       { name: 'volumePercent', type: 'number', required: false, description: 'Volume de 0 a 100 quando action=volume.' },
       { name: 'shuffleState', type: 'boolean', required: false, description: 'true/false quando action=shuffle.' },
@@ -216,7 +218,8 @@ export function createSpotifyTools({
 
       if (cmd.action === 'play') {
         let targetUri = cmd.uri || null;
-        if (!targetUri && cmd.query) {
+        let targetUris = cmd.uris || null;
+        if (!targetUri && !targetUris && cmd.query) {
           const params = buildSearchParams({ query: cmd.query, type: 'track', limit: 1 });
           const found = await spotifyAuth.requestJson(`${SPOTIFY_API_BASE}/search?${params.toString()}`);
           const first = found?.tracks?.items?.[0];
@@ -227,9 +230,11 @@ export function createSpotifyTools({
           resolvedTrack = normalizeTrack(first);
         }
 
-        const body = targetUri
-          ? (targetUri.startsWith('spotify:track:') ? { uris: [targetUri] } : { context_uri: targetUri })
-          : undefined;
+        const body = targetUris && targetUris.length
+          ? { uris: targetUris }
+          : targetUri
+            ? (targetUri.startsWith('spotify:track:') ? { uris: [targetUri] } : { context_uri: targetUri })
+            : undefined;
         await spotifyAuth.requestJson(appendDevice(`${SPOTIFY_API_BASE}/me/player/play`, cmd.deviceId), {
           method: 'PUT',
           body,
@@ -239,6 +244,7 @@ export function createSpotifyTools({
           schema: SPOTIFY_SCHEMA,
           action: 'play',
           uri: targetUri,
+          uris: targetUris,
           track: resolvedTrack,
         };
       }
@@ -319,5 +325,137 @@ export function createSpotifyTools({
     },
   };
 
-  return [nowPlayingTool, searchTool, playlistsTool, controlTool, statsTool].map(wrapTool);
+  const similarTool = {
+    schema: AGENT_SCHEMAS.tool,
+    name: 'spotify.similar',
+    version: '1.0.0',
+    description: 'Encontra músicas semelhantes ou parecidas com um artista ou faixa usando Last.fm e toca no Spotify.',
+    origin: 'skill',
+    permissionLevel: 3,
+    timeoutMs: 15000,
+    parameters: [
+      { name: 'artist', type: 'string', required: true, description: 'Nome do artista base (ex.: Omar Varela).' },
+      { name: 'track', type: 'string', required: false, description: 'Nome opcional de uma música de referência para refinar semelhantes.' },
+      { name: 'limit', type: 'number', required: false, description: 'Quantidade de músicas semelhantes (1 a 20, padrão 8).' },
+      { name: 'play', type: 'boolean', required: false, description: 'Se true (padrão), inicia reprodução no Spotify imediatamente.' },
+      { name: 'deviceId', type: 'string', required: false, description: 'ID opcional do dispositivo Spotify.' },
+    ],
+    verify(result) {
+      return isPlainObject(result) && result.ok === true && result.schema === SPOTIFY_SCHEMA && Array.isArray(result.tracks);
+    },
+    async execute(args = {}) {
+      const artist = String(args.artist || args.query || '').trim();
+      if (!artist) {
+        throw new Error('artist é obrigatório para buscar semelhantes.');
+      }
+      const trackName = args.track ? String(args.track).trim() : null;
+      const limit = Number.isInteger(args.limit) ? Math.min(Math.max(args.limit, 1), 20) : 8;
+      const shouldPlay = args.play !== false && args.autoPlay !== false;
+
+      const lastFmKey = readEnvValue('LASTFM_API_KEY');
+      let candidateTracks = [];
+
+      if (lastFmKey) {
+        try {
+          if (trackName) {
+            const trackUrl = `https://ws.audioscrobbler.com/2.0/?method=track.getsimilar&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(trackName)}&api_key=${lastFmKey}&format=json&limit=${limit}`;
+            const res = await fetchImpl(trackUrl, { signal: AbortSignal.timeout(6000) });
+            if (res.ok) {
+              const data = await res.json();
+              const items = data?.similartracks?.track;
+              if (Array.isArray(items)) {
+                candidateTracks = items.map(t => ({ name: t?.name, artist: t?.artist?.name || artist })).filter(t => t.name);
+              }
+            }
+          }
+          if (candidateTracks.length === 0) {
+            const artistUrl = `https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=${encodeURIComponent(artist)}&api_key=${lastFmKey}&format=json&limit=${Math.min(limit, 8)}`;
+            const res = await fetchImpl(artistUrl, { signal: AbortSignal.timeout(6000) });
+            if (res.ok) {
+              const data = await res.json();
+              const similarArtists = (data?.similarartists?.artist || []).map(a => a?.name).filter(Boolean);
+              const topTrackPromises = similarArtists.slice(0, 6).map(async simArtist => {
+                try {
+                  const topUrl = `https://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist=${encodeURIComponent(simArtist)}&api_key=${lastFmKey}&format=json&limit=2`;
+                  const topRes = await fetchImpl(topUrl, { signal: AbortSignal.timeout(4000) });
+                  if (topRes.ok) {
+                    const topData = await topRes.json();
+                    const trs = topData?.toptracks?.track || [];
+                    const list = Array.isArray(trs) ? trs : [trs];
+                    return list.filter(Boolean).map(tr => ({ name: tr?.name, artist: simArtist }));
+                  }
+                } catch {
+                  // Fallback para nome do artista
+                }
+                return [{ name: '', artist: simArtist }];
+              });
+              const results = await Promise.all(topTrackPromises);
+              candidateTracks = results.flat().filter(Boolean);
+            }
+          }
+        } catch {
+          // Fallback para Spotify Search
+        }
+      }
+
+      const matchedTracks = [];
+      if (candidateTracks.length > 0) {
+        for (const cand of candidateTracks) {
+          if (matchedTracks.length >= limit) break;
+          const q = cand.name ? `track:"${cand.name}" artist:"${cand.artist}"` : `artist:"${cand.artist}"`;
+          try {
+            const params = new URLSearchParams({ q, type: 'track', limit: '1' });
+            const sRes = await spotifyAuth.requestJson(`${SPOTIFY_API_BASE}/search?${params.toString()}`);
+            const item = sRes?.tracks?.items?.[0];
+            if (item?.uri && !matchedTracks.some(m => m.uri === item.uri)) {
+              matchedTracks.push(normalizeTrack(item));
+            }
+          } catch {
+            // Continua
+          }
+        }
+      }
+
+      if (matchedTracks.length === 0) {
+        try {
+          const fallbackParams = new URLSearchParams({ q: `${artist} mix`, type: 'track', limit: String(limit) });
+          const sRes = await spotifyAuth.requestJson(`${SPOTIFY_API_BASE}/search?${fallbackParams.toString()}`);
+          for (const item of sRes?.tracks?.items || []) {
+            if (item?.uri && !matchedTracks.some(m => m.uri === item.uri)) {
+              matchedTracks.push(normalizeTrack(item));
+            }
+          }
+        } catch {
+          // ignora
+        }
+      }
+
+      let isPlaying = false;
+      if (shouldPlay && matchedTracks.length > 0) {
+        try {
+          const uris = matchedTracks.map(t => t.uri).filter(Boolean);
+          await spotifyAuth.requestJson(appendDevice(`${SPOTIFY_API_BASE}/me/player/play`, args.deviceId), {
+            method: 'PUT',
+            body: { uris },
+          });
+          isPlaying = true;
+        } catch (err) {
+          // ignora erro de playback se usuário não tiver player ativo
+        }
+      }
+
+      return {
+        ok: true,
+        schema: SPOTIFY_SCHEMA,
+        artist,
+        track: trackName,
+        source: candidateTracks.length > 0 ? 'lastfm' : 'spotify_fallback',
+        count: matchedTracks.length,
+        playing: isPlaying,
+        tracks: matchedTracks,
+      };
+    },
+  };
+
+  return [nowPlayingTool, searchTool, playlistsTool, controlTool, statsTool, similarTool].map(wrapTool);
 }
