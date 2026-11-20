@@ -5,9 +5,14 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { dataDir as resolveDataDir } from '../../src/data-paths.js';
 
 const FILE_VERSION = 1;
+
+// Local dataDir resolution (self-contained for skill isolation testing)
+function resolveDataDir() {
+  const value = process.env.USAMI_DATA_DIR;
+  return typeof value === 'string' && value.trim() ? value.trim() : 'data';
+}
 
 function generateId(prefix = 'doc') {
   return `${prefix}-${Math.random().toString(36).slice(2, 14)}`;

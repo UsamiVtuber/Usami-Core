@@ -136,9 +136,10 @@ function verifyTestFilesExist(skillDir, testFiles) {
 function buildSandboxEnv(tempRoot, tempDataDir, tempHomeDir) {
   const env = {
     NODE_ENV: 'test',
-    TEMP: tempRoot,
-    TMP: tempRoot,
-    TMPDIR: tempRoot,
+    // Point temp dirs to tempDataDir so tmpdir() returns an allowed write path
+    TEMP: tempDataDir,
+    TMP: tempDataDir,
+    TMPDIR: tempDataDir,
     HOME: tempHomeDir,
     USERPROFILE: tempHomeDir,
     USAMI_DATA_DIR: tempDataDir,
@@ -184,6 +185,8 @@ export async function defaultRunSkillTests({ skillId, skillDir, manifest }) {
     writeFileSync(hookPath, NO_NETWORK_PRELOAD, 'utf8');
 
     const args = [];
+    // Use --permission on all platforms where supported; raw paths work on Windows
+    // Network isolation is also provided by the no-network preload script
     if (process.allowedNodeEnvironmentFlags.has('--permission')) {
       args.push(
         '--permission',
