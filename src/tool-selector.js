@@ -10,7 +10,7 @@ export const CONNECTOR_SCHEMA = 'usami.connector.v1';
 const SYNONYM_GROUPS = Object.freeze([
   ['email', 'emails', 'e-mail', 'gmail', 'inbox', 'correio', 'mensagem', 'rascunho'],
   ['agenda', 'calendario', 'calendar', 'evento', 'eventos', 'reuniao', 'horario'],
-  ['codigo', 'code', 'arquivo', 'src', 'git', 'github', 'commit', 'diff', 'branch', 'pr', 'issue', 'agent', 'agente', 'proposta', 'propose', 'antigravity'],
+  ['codigo', 'code', 'arquivo', 'src', 'git', 'github', 'commit', 'diff', 'branch', 'pr', 'issue', 'agent', 'agente', 'proposta', 'propose', 'antigravity', 'funcao', 'function', 'revisar', 'revisa', 'bug', 'simbolo'],
   ['financas', 'finance', 'banco', 'saldo', 'extrato', 'pluggy', 'belvo', 'gasto', 'conta'],
   ['pesquisa', 'web', 'internet', 'buscar', 'procurar', 'noticias', 'site', 'tinyfish', 'firecrawl'],
   ['memoria', 'lembrar', 'lembra', 'lembrei', 'lembrava', 'comentei', 'falamos', 'conversamos', 'historico', 'rag', 'vault', 'obsidian'],
@@ -35,8 +35,21 @@ function tokenize(text) {
     .trim();
   if (!normalized) return [];
   const raw = normalized.split(/\s+/).filter(w => w.length >= 2 && !STOP_WORDS.has(w));
-  const expanded = new Set(raw);
+  const base = new Set(raw);
   for (const token of raw) {
+    // Nome com namespace (`spotify.search`) também vale por partes, senão a
+    // ferramenta nunca casa com "spotify" nem com "search".
+    for (const part of token.split(/[._-]+/)) {
+      if (part.length >= 2 && !STOP_WORDS.has(part)) base.add(part);
+    }
+  }
+  for (const token of [...base]) {
+    // Plural simples: "playlists" ↔ "playlist", "funcoes" ↔ "funcao".
+    if (token.length > 4 && token.endsWith('oes')) base.add(`${token.slice(0, -3)}ao`);
+    else if (token.length > 4 && token.endsWith('s')) base.add(token.slice(0, -1));
+  }
+  const expanded = new Set(base);
+  for (const token of base) {
     for (const group of SYNONYM_GROUPS) {
       if (group.includes(token)) {
         for (const syn of group) expanded.add(syn);
@@ -107,6 +120,7 @@ export function selectTopKTools(query, tools = [], {
   minScore = 0.05,
   weights = { name: 2.0, description: 1.0, tags: 1.5 },
   usageStats = null, // { toolName: { count, lastUsed } } para feedback loop
+  maxFamilyExtra = 4, // irmãs do mesmo namespace somadas além do Top-K
 } = {}) {
   if (!Array.isArray(tools) || tools.length === 0) return [];
   const queryTokens = new Set(tokenize(query));
@@ -154,10 +168,30 @@ export function selectTopKTools(query, tools = [], {
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored
+  const picked = scored
     .filter(item => item.tool?.alwaysInclude || item.score >= minScore)
-    .slice(0, limit)
-    .map(item => ({ ...item.tool, _relevanceScore: Number(item.score.toFixed(4)) }));
+    .slice(0, limit);
+  // Família da ferramenta: se `spotify.now_playing` entrou, `spotify.search`
+  // e `spotify.control` também precisam estar disponíveis — sem isso o modelo
+  // vê o Spotify mas não consegue buscar nem tocar o que foi pedido.
+  if (maxFamilyExtra > 0) {
+    const namespaces = new Set(picked
+      .filter(item => !item.tool?.alwaysInclude && String(item.tool?.name || '').includes('.'))
+      .map(item => String(item.tool.name).split('.')[0]));
+    const chosen = new Set(picked.map(item => item.tool));
+    let extra = 0;
+    for (const item of scored) {
+      if (extra >= maxFamilyExtra) break;
+      if (chosen.has(item.tool)) continue;
+      const ns = String(item.tool?.name || '').split('.')[0];
+      if (String(item.tool?.name || '').includes('.') && namespaces.has(ns)) {
+        picked.push(item);
+        chosen.add(item.tool);
+        extra += 1;
+      }
+    }
+  }
+  return picked.map(item => ({ ...item.tool, _relevanceScore: Number(item.score.toFixed(4)) }));
 }
 
 /**
