@@ -1337,12 +1337,14 @@ export function createChatHandler(options = {}) {
 
       let agentTurn = null;
       let executedAgentTurn = null;
+      let intentHintTool = null;
       const isFastTier = Boolean(parsedBody.input?.skipAgent || parsedBody.input?.fastTier);
+      const deferLlmIntentToNative = Boolean(useNvidia() && !options.generateReply && !isFastTier);
       // O path regex (runOperationalForChat) executa ferramentas de forma síncrona
       // antes da chamada ao LLM. O path nativo (generateReplyWithTools) executa via
-      // function calling do LLM de forma assíncrona. Para evitar execução duplicada,
-      // rodamos o path regex mas, se o path nativo executar ferramentas, preferimos
-      // o resultado do path nativo (mais capaz: multi-step, encadeamento).
+      // function calling do LLM de forma assíncrona. Quando a intenção vem do
+      // classificador LLM (sem regex), deixamos o tool calling nativo extrair os
+      // argumentos semanticamente em vez de depender de regexes de buildArgs.
       if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
         try {
           let executedTurn = null;
@@ -1350,6 +1352,7 @@ export function createChatHandler(options = {}) {
             executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
               history: todayHistory,
               timeoutMs: options.agentChatTimeoutMs ?? 10000,
+              deferLlmIntentToNative,
               // Publica o NOME real da ferramenta enquanto ela executa: é o
               // trecho de 10-20 s em que o usuário precisa saber o que ela
               // está fazendo (e não só que está ocupada).
@@ -1359,7 +1362,9 @@ export function createChatHandler(options = {}) {
           } catch {
             agentTurn = null;
           }
-          if (executedTurn) {
+          if (executedTurn?.deferred && executedTurn.tool) {
+            intentHintTool = executedTurn.tool;
+          } else if (executedTurn) {
             executedAgentTurn = executedTurn;
             agentTurn = {
               id: executedTurn.id,
@@ -1580,9 +1585,37 @@ export function createChatHandler(options = {}) {
           // entra na consulta para o retry continuar com as mesmas ferramentas.
           const lastUserTurn = [...(todayHistory || [])].reverse().find(m => m?.role === 'user' && typeof m.content === 'string');
           const selectorQuery = lastUserTurn ? `${parsedBody.message}\n${lastUserTurn.content}` : parsedBody.message;
-          const candidateTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
-            ? selectTopKTools(selectorQuery, toolRegistry.list(), { k: 6, minScore: 0.08 })
+          const allRegisteredTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
+            ? toolRegistry.list()
             : [];
+          const candidateTools = allRegisteredTools.length > 0
+            ? selectTopKTools(selectorQuery, allRegisteredTools, { k: 6, minScore: 0.08 })
+            : [];
+          // Conecta a intenção classificada pelo LLM (e qualquer ferramenta já
+          // executada no turno) ao catálogo de Function Calling nativo, trazendo
+          // a ferramenta alvo e toda a família do mesmo namespace (ex: spotify.*)
+          // mesmo quando o filtro lexical não casou com palavras-chave literais.
+          const hintedToolNames = [
+            intentHintTool,
+            executedAgentTurn?.tool,
+            ...(Array.isArray(executedAgentTurn?.tools) ? executedAgentTurn.tools : []),
+          ].filter(Boolean);
+          if (hintedToolNames.length > 0 && allRegisteredTools.length > 0) {
+            const chosenNames = new Set(candidateTools.map(t => t.name));
+            const hintedNamespaces = new Set(
+              hintedToolNames
+                .filter(name => String(name).includes('.'))
+                .map(name => String(name).split('.')[0]),
+            );
+            for (const tool of allRegisteredTools) {
+              if (chosenNames.has(tool.name)) continue;
+              const ns = String(tool.name || '').includes('.') ? String(tool.name).split('.')[0] : null;
+              if (hintedToolNames.includes(tool.name) || (ns && hintedNamespaces.has(ns))) {
+                candidateTools.push(tool);
+                chosenNames.add(tool.name);
+              }
+            }
+          }
           const openAiTools = (!options.generateReply && candidateTools.length > 0)
             ? candidateTools.map(toolToOpenAi)
             : [];

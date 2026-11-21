@@ -249,6 +249,8 @@ export async function classifyIntentUnified(message, options = {}) {
   const {
     classifyWithLlm = null,
     toolNames = [],
+    tools = null,
+    forceLlm = false,
     signal = null,
     turnDeadlineMs = 8000,
     now = Date.now,
@@ -256,10 +258,13 @@ export async function classifyIntentUnified(message, options = {}) {
   } = options;
 
   const clean = collapseText(message);
-  const deterministic = classifyDeterministic(clean, { toolNames });
+  const resolvedToolNames = Array.isArray(tools) && tools.length > 0
+    ? tools.map(t => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
+    : toolNames;
+  const deterministic = classifyDeterministic(clean, { toolNames: resolvedToolNames });
 
-  // Fast path: se não é ambíguo OU não tem LLM, usa só determinístico
-  if (!deterministic.ambiguous || typeof classifyWithLlm !== 'function') {
+  // Fast path: se não é ambíguo (e não foi forçado) OU não tem LLM, usa só determinístico
+  if ((!deterministic.ambiguous && !forceLlm) || typeof classifyWithLlm !== 'function') {
     return {
       intent: buildIntent({
         kind: deterministic.kind,
@@ -279,9 +284,12 @@ export async function classifyIntentUnified(message, options = {}) {
   const llmTimer = setTimeout(() => llmAbort.abort(), turnDeadlineMs);
   try {
     const llmSignal = signal ? AbortSignal.any([signal, llmAbort.signal]) : llmAbort.signal;
+    const llmTools = Array.isArray(tools) && tools.length > 0
+      ? tools.map(t => (typeof t === 'string' ? { name: t } : { name: t?.name, description: t?.description }))
+      : toolNames.map(name => ({ name }));
     const llmDecision = await classifyWithLlm({
       message: clean,
-      tools: toolNames.map(name => ({ name })), // formato compatível
+      tools: llmTools,
       signal: llmSignal,
     });
     if (isPlainObject(llmDecision) && INTENT_KINDS.includes(llmDecision.kind)) {
@@ -839,7 +847,7 @@ function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToo
   if (hintedToolName && registry.has(hintedToolName) && isToolActive(hintedToolName)) {
     const matcher = toolMatchers.find(item => item.toolName === hintedToolName);
     if (matcher) {
-      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(clean) });
+      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(clean, normalized) });
       seen.add(hintedToolName);
     } else {
       const stripped = clean.replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || clean;
@@ -857,7 +865,7 @@ function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToo
     if (seen.has(matcher.toolName)) continue;
     if (!registry.has(matcher.toolName) || !isToolActive(matcher.toolName)) continue;
     if (matcher.matches(normalized)) {
-      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(clean) });
+      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(clean, normalized) });
       seen.add(matcher.toolName);
     }
   }
@@ -921,10 +929,12 @@ export function createAgentCore({
     return JSON.parse(JSON.stringify(entry));
   }
 
-  async function classifyIntent(message, { signal } = {}) {
+  async function classifyIntent(message, { signal, forceLlm = false } = {}) {
     const result = await classifyIntentUnified(message, {
       classifyWithLlm,
       toolNames: registry.names(),
+      tools: typeof registry.list === 'function' ? registry.list() : null,
+      forceLlm,
       signal,
       turnDeadlineMs,
       now,
@@ -1184,7 +1194,7 @@ export function createAgentCore({
     return null;
   }
 
-  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null } = {}) {
+  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null, deferLlmIntentToNative = false } = {}) {
     const clean = stripDiscordEnvelope(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
@@ -1197,10 +1207,18 @@ export function createAgentCore({
     let intentGoal = clean;
     let intentConfidence = deterministic.confidence;
 
-    if (resolvedList.length === 0 && typeof classifyWithLlm === 'function') {
+    const isPureGreeting = /^(?:oi+|ola+|hey+|ei+|bom dia|boa tarde|boa noite|tudo bem|como vai|e ai|obrigad[oa]|valeu|vlw|tmj|beleza|blz|ok+|sim|nao|haha+|kkk+|rs+)[!?. ]*$/i.test(normalizeText(clean));
+    if (resolvedList.length === 0 && !isPureGreeting && typeof classifyWithLlm === 'function') {
       try {
-        const classified = await classifyIntent(clean);
+        const classified = await classifyIntent(clean, { forceLlm: true });
         if (classified?.intent?.kind === 'operational' && classified.matchedToolName) {
+          if (deferLlmIntentToNative && registry.has(classified.matchedToolName) && isToolActive(classified.matchedToolName)) {
+            return {
+              deferred: true,
+              intent: classified.intent,
+              tool: classified.matchedToolName,
+            };
+          }
           resolvedList = resolveToolCalls(clean, registry, toolMatchers, classified.matchedToolName, isToolActive);
           if (resolvedList.length > 0) {
             intentGoal = classified.intent.goal || clean;
