@@ -341,20 +341,30 @@ export async function classifyIntentWithLlm({
   client = sharedClient,
 } = {}) {
   if (!process.env.NVIDIA_API_KEY) return null;
-  const toolNames = Array.isArray(tools)
-    ? tools.map(t => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
+  const toolEntries = Array.isArray(tools)
+    ? tools
+      .map(t => {
+        if (typeof t === 'string') return t.trim();
+        const name = String(t?.name || '').trim();
+        if (!name) return '';
+        const desc = typeof t?.description === 'string'
+          ? t.description.trim().replace(/\s+/g, ' ')
+          : '';
+        return desc ? `${name}: ${desc.slice(0, 90)}` : name;
+      })
+      .filter(Boolean)
     : [];
 
-  const toolsSummary = toolNames.length > 0
-    ? ` Ferramentas disponíveis: ${toolNames.slice(0, 30).join(', ')}.`
+  const toolsSummary = toolEntries.length > 0
+    ? `\nFerramentas disponíveis:\n- ${toolEntries.join('\n- ')}`
     : '';
 
   const prompt = `Classifique a intenção do usuário estritamente em JSON.
 kind:
 - "conversation": conversa normal, saudações, piadas, desabafos, opiniões ou perguntas gerais sem necessidade de ferramentas.
-- "operational": pedido para executar uma ação direta ou consultar dados de uma ferramenta (agenda, spotify, git, tarefas, email, finanças, pesquisa, etc.).
+- "operational": pedido para executar uma ação direta ou consultar dados de uma ferramenta (agenda, spotify, git, tarefas, email, finanças, pesquisa, timer, etc.).
 - "complex": solicitação de planejamento detalhado, múltiplos passos, cronograma ou roadmap.
-tool: nome exato da ferramenta em caso operacional (ex: spotify.now_playing, calendar.list), ou null caso não seja aplicável.${toolsSummary}
+tool: nome exato da ferramenta mais adequada em caso operacional (ex: spotify.control para tocar/pausar/controlar reprodução, spotify.search apenas para buscar sem tocar, calendar.list), ou null caso não seja aplicável.${toolsSummary}
 
 Responda ESTRITAMENTE o JSON no formato:
 {"kind":"conversation"|"operational"|"complex","goal":"descrição concisa","tool":null,"confidence":0.9}`;
