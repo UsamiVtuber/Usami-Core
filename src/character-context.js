@@ -337,6 +337,7 @@ export function createCharacterRegistry({
 
   return {
     getActiveCharacterId: () => activeCharacterId,
+    getDataDir: () => dataDir,
     getOrCreate,
     getActive,
     setActive,

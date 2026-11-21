@@ -82,6 +82,14 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createTimerService } from './src/timer-service.js';
 import { createTimerTools } from './src/timer-tools.js';
+import {
+  MAX_CARD_PNG_BYTES,
+  embedCardInPng,
+  extractCardFromPng,
+  normalizeCardToManifest,
+  saveCharacterManifest,
+} from './src/character-card.js';
+import { loadCharacterManifestSync } from './src/character-loader.js';
 import { parseDiscordSender, isOwnerUser, enforcePrivacy } from './src/privacy-guard.js';
 import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
 import { createSleepCompanionService, isSleepCompanionTrigger, isWakeUpTrigger, DEFAULT_SLEEP_PLAYBACK_RATE, DEFAULT_SLEEP_VOLUME, DEFAULT_SLEEP_EMOTION } from './src/sleep-companion.js';
@@ -2467,9 +2475,24 @@ export function createOperationalMemoryHandler(options = {}) {
   });
 }
 
+const CHARACTER_EXPORT_CARD_RE = /^\/api\/characters\/([a-z0-9][a-z0-9_-]{1,62})\/export-card$/;
+
+async function readRequestBinary(req, { limit = MAX_CARD_PNG_BYTES } = {}) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > limit) return { ok: false, buffer: null };
+    chunks.push(buf);
+  }
+  return { ok: true, buffer: Buffer.concat(chunks) };
+}
+
 /**
- * Handler multi-tenant de seleção e listagem de personagens (`GET /api/characters`,
- * `GET/POST /api/characters/active`).
+ * Handler multi-tenant de seleção, listagem, importação e exportação de personagens
+ * (`GET /api/characters`, `GET/POST /api/characters/active`,
+ * `POST /api/characters/import-card`, `GET /api/characters/:id/export-card`).
  */
 export function createCharactersHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
@@ -2483,7 +2506,10 @@ export function createCharactersHandler(options = {}) {
     if (denyWithoutToken(req, options, send)) return;
 
     const registry = options.characterRegistry || resolveActiveRegistry(options);
-    const route = new URL(req.url || '/api/characters', 'http://127.0.0.1:8787').pathname;
+    const parsedUrl = new URL(req.url || '/api/characters', 'http://127.0.0.1:8787');
+    const route = parsedUrl.pathname;
+    const activeDataDir = options.dataDir
+      || (typeof registry.getDataDir === 'function' ? registry.getDataDir() : resolveDataDir());
 
     if (req.method === 'GET' && route === '/api/characters') {
       return send(200, {
@@ -2532,6 +2558,104 @@ export function createCharactersHandler(options = {}) {
         ok: true,
         characterId: activated.context.characterId,
         manifest: activated.context.manifest,
+      });
+    }
+
+    if (req.method === 'POST' && route === '/api/characters/import-card') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      let rawCard = null;
+      let detectedFormat = null;
+      let shouldActivate = parsedUrl.searchParams.get('activate') !== 'false';
+
+      if (contentType === 'image/png') {
+        const readBin = await readRequestBinary(req, { limit: MAX_CARD_PNG_BYTES });
+        if (!readBin.ok) return send(413, { error: 'Imagem PNG excede o limite de 5 MB.' });
+        const extracted = extractCardFromPng(readBin.buffer);
+        if (!extracted.ok) return send(400, { error: extracted.error });
+        rawCard = extracted.card;
+        detectedFormat = extracted.format;
+      } else if (contentType === 'application/json') {
+        const read = await readRequestBody(req, { limit: MAX_CARD_PNG_BYTES });
+        if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+        let payload;
+        try {
+          payload = JSON.parse(read.body);
+        } catch {
+          return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+        }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return send(400, { error: 'Corpo inválido.' });
+        }
+        if (payload.activate === false) shouldActivate = false;
+        if (payload.format === 'png_base64' && typeof payload.data === 'string') {
+          const cleanB64 = payload.data.replace(/^data:image\/png;base64,/i, '').trim();
+          const pngBuf = Buffer.from(cleanB64, 'base64');
+          const extracted = extractCardFromPng(pngBuf);
+          if (!extracted.ok) return send(400, { error: extracted.error });
+          rawCard = extracted.card;
+          detectedFormat = extracted.format;
+        } else {
+          rawCard = payload.card && typeof payload.card === 'object' ? payload.card : payload;
+        }
+      } else {
+        return send(403, { error: 'Content-Type inválido (use application/json ou image/png).' });
+      }
+
+      const normalized = normalizeCardToManifest(rawCard);
+      if (!normalized.ok) {
+        return send(400, { error: normalized.errors.join('; ') });
+      }
+
+      const saved = saveCharacterManifest(normalized.manifest, { dataDir: activeDataDir });
+      if (!saved.ok) {
+        return send(400, { error: saved.errors.join('; ') });
+      }
+
+      await registry.reload?.(saved.characterId);
+      let activated = false;
+      if (shouldActivate) {
+        const act = registry.setActive(saved.characterId);
+        activated = Boolean(act.ok);
+      }
+
+      return send(200, {
+        ok: true,
+        characterId: saved.characterId,
+        format: detectedFormat || normalized.format,
+        activated,
+        manifest: saved.manifest,
+      });
+    }
+
+    const exportMatch = CHARACTER_EXPORT_CARD_RE.exec(route);
+    if (req.method === 'GET' && exportMatch) {
+      const targetId = exportMatch[1];
+      const loaded = loadCharacterManifestSync(targetId, {
+        dataDir: activeDataDir,
+        fallbackToDefaultUsami: targetId === 'usami-classic',
+      });
+      if (!loaded.ok) {
+        return send(loaded.status || 404, { error: loaded.errors.join('; ') });
+      }
+
+      const format = (parsedUrl.searchParams.get('format') || 'json').toLowerCase();
+      if (format === 'png') {
+        const pngBuffer = embedCardInPng(loaded.manifest);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': String(pngBuffer.length),
+          'Content-Disposition': `attachment; filename="${targetId}.card.png"`,
+          'Cache-Control': 'no-store',
+        });
+        res.end(pngBuffer);
+        return;
+      }
+
+      return send(200, {
+        ok: true,
+        characterId: targetId,
+        format: 'usami_card_v1',
+        manifest: loaded.manifest,
       });
     }
 
@@ -4499,7 +4623,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       const served = await handleAvatarStatic(req, res);
       if (served) return;
     }
-    if (req.url === '/api/characters' || req.url === '/api/characters/active') return handleCharacters(req, res);
+    if (req.url === '/api/characters' || req.url.startsWith('/api/characters/')) return handleCharacters(req, res);
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
@@ -4513,7 +4637,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.url === '/api/memory' || req.url === '/api/memory/forget' || req.url === '/api/memory/maintenance') return handleMemory(req, res);
     if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
     if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
-    if (req.url === '/api/personality') return handlePersonality(req, res);
+    if (req.url === '/api/personality' || req.url === '/api/personality/presets' || req.url === '/api/personality/preset') return handlePersonality(req, res);
     if (req.url === '/api/mood' || req.url === '/api/mood/event' || req.url === '/api/mood/reset') return handleMood(req, res);
     if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
