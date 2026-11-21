@@ -82,6 +82,7 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createTimerService } from './src/timer-service.js';
 import { createTimerTools } from './src/timer-tools.js';
+import { createProviderConfigStore } from './src/provider-config-store.js';
 import {
   MAX_CARD_PNG_BYTES,
   embedCardInPng,
@@ -642,6 +643,12 @@ for (const metaTool of createMetaAgentTools({ manager: installMetaWorkspace })) 
 export const installTimerService = createTimerService({
   dataDir: resolveDataDir(),
   n8nQueue: sharedN8nQueue,
+});
+
+// Store seguro de provedores de IA, Voz e Integrações (chaves mascaradas na leitura)
+export const installProviderConfigStore = createProviderConfigStore({
+  dataDir: resolveDataDir(),
+  syncProcessEnv: true,
 });
 
 for (const timerTool of createTimerTools({ timerService: installTimerService })) {
@@ -2487,6 +2494,70 @@ async function readRequestBinary(req, { limit = MAX_CARD_PNG_BYTES } = {}) {
     chunks.push(buf);
   }
   return { ok: true, buffer: Buffer.concat(chunks) };
+}
+
+/**
+ * Handler No-Code para configuração mascarada e teste de provedores de IA/Voz/Integrações:
+ * `GET /api/settings/providers`, `POST /api/settings/providers`, `POST /api/settings/providers/test`.
+ */
+export function createProviderSettingsHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.providerConfigStore || installProviderConfigStore;
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+
+  return async function handleProviderSettings(req, res) {
+    const send = (status, data) => sendJsonResponse(res, status, data);
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const route = new URL(req.url || '/api/settings/providers', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/settings/providers') {
+      return send(200, { ok: true, providers: store.listStatus() });
+    }
+
+    if (req.method === 'POST' && (route === '/api/settings/providers' || route === '/api/settings/providers/test')) {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+      const read = await readRequestBody(req, { limit: 8192 });
+      if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+      let payload;
+      try {
+        payload = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return send(400, { error: 'Corpo inválido.' });
+      }
+
+      if (route === '/api/settings/providers/test') {
+        const providerId = typeof payload.providerId === 'string' ? payload.providerId.trim() : '';
+        if (!providerId) return send(400, { error: 'providerId é obrigatório.' });
+        const result = await store.testProvider(providerId, { fetchImpl });
+        return send(200, result);
+      }
+
+      const updated = store.updateProvider({
+        providerId: payload.providerId,
+        apiKey: payload.apiKey,
+        clearKey: payload.clearKey === true,
+        model: payload.model,
+      });
+      if (!updated.ok) {
+        return send(updated.status || 400, { error: updated.error });
+      }
+      return send(200, { ok: true, provider: updated.provider, providers: updated.providers });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
+  };
 }
 
 /**
@@ -4511,6 +4582,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleMemory = createMemoryHandler({ episodicMemory: installEpisodicMemory });
   const handleBond = createBondHandler();
   const handleCharacters = createCharactersHandler();
+  const handleProviderSettings = createProviderSettingsHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
   const handleTools = createToolHandler({ gate: installToolGate, skillCatalog: installSkillCatalog });
   const handlePlans = createPlansHandler();
@@ -4624,6 +4696,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (served) return;
     }
     if (req.url === '/api/characters' || req.url.startsWith('/api/characters/')) return handleCharacters(req, res);
+    if (req.url === '/api/settings/providers' || req.url === '/api/settings/providers/test') return handleProviderSettings(req, res);
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
