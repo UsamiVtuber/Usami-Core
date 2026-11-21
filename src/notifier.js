@@ -166,12 +166,13 @@ export async function broadcastNotification({
 
   if (channels.includes('companion') && n8nQueue && typeof n8nQueue.enqueue === 'function') {
     n8nQueue.enqueue({
+      id: Math.random().toString(36).slice(2, 10),
       type: 'proactive_say',
       message,
       emotion: 'casual_happy',
       gesture: 'nod',
-      timestamp: Date.now(),
-    }, clientId);
+      timestamp: new Date().toISOString(),
+    }, { clientId });
     results.companion = true;
   }
 
