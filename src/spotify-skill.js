@@ -58,7 +58,7 @@ export function createSpotifyTools({
   function emitTelemetry(tool, extra = {}) {
     if (typeof onTelemetry !== 'function') return;
     try {
-      Promise.resolve(onTelemetry({ tool, ...extra })).catch(() => {});
+      Promise.resolve(onTelemetry({ tool, ...extra })).catch(() => { });
     } catch {
       // telemetria nunca bloqueia a tool
     }

@@ -115,8 +115,8 @@ function calculateTfIdfScore(queryTokens, toolTokens, toolDocFreq) {
  * - Suporte a pesos configuráveis por campo (name, description, tags)
  * - Filtro de stop words
  */
-export function selectTopKTools(query, tools = [], { 
-  k = 6, 
+export function selectTopKTools(query, tools = [], {
+  k = 6,
   minScore = 0.05,
   weights = { name: 2.0, description: 1.0, tags: 1.5 },
   usageStats = null, // { toolName: { count, lastUsed } } para feedback loop
@@ -137,21 +137,21 @@ export function selectTopKTools(query, tools = [], {
 
   const scored = tools.map(tool => {
     const toolTokens = new Set(getToolTokens(tool));
-    
+
     // Score TF-IDF-like
     let score = calculateTfIdfScore(queryTokens, toolTokens, toolDocFreq);
-    
+
     // Boost por campo (name > tags > description)
     const nameTokens = new Set(tokenize(tool?.name || ''));
     const tagTokens = new Set((tool?.tags || []).flatMap(t => tokenize(t)));
     const descTokens = new Set(tokenize(tool?.description || ''));
-    
+
     for (const tok of queryTokens) {
       if (nameTokens.has(tok)) score += weights.name || 0;
       if (tagTokens.has(tok)) score += weights.tags || 0;
       if (descTokens.has(tok)) score += weights.description || 0;
     }
-    
+
     // Boost por uso recente (feedback loop)
     if (usageStats && tool?.name && usageStats[tool.name]) {
       const stats = usageStats[tool.name];
@@ -159,11 +159,11 @@ export function selectTopKTools(query, tools = [], {
       const frequencyBoost = Math.min(stats.count / 10, 1);
       score += (recencyBoost * 0.5) + (frequencyBoost * 0.3);
     }
-    
+
     // Normalização suave
     const denom = Math.max(1, Math.sqrt(Math.max(1, toolTokens.size) * Math.max(1, queryTokens.size)));
     score = tool?.alwaysInclude ? 1.0 : score / denom;
-    
+
     return { tool, score };
   });
 
