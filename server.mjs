@@ -2505,6 +2505,22 @@ export function createProviderSettingsHandler(options = {}) {
   const store = options.providerConfigStore || installProviderConfigStore;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
 
+  function emitAudit({ providerId, action, result, latencyMs, error }) {
+    const entry = {
+      ts: new Date().toISOString(),
+      providerId,
+      action,
+      result,
+      latencyMs,
+      ...(error ? { error: String(error) } : {}),
+    };
+    try {
+      console.log(JSON.stringify({ level: 'audit', component: 'provider-settings', ...entry }));
+    } catch {
+      // logging nao deve quebrar o fluxo
+    }
+  }
+
   return async function handleProviderSettings(req, res) {
     const send = (status, data) => sendJsonResponse(res, status, data);
 
@@ -2540,19 +2556,26 @@ export function createProviderSettingsHandler(options = {}) {
       if (route === '/api/settings/providers/test') {
         const providerId = typeof payload.providerId === 'string' ? payload.providerId.trim() : '';
         if (!providerId) return send(400, { error: 'providerId é obrigatório.' });
+        const startedAt = Date.now();
         const result = await store.testProvider(providerId, { fetchImpl });
+        const latencyMs = Date.now() - startedAt;
+        emitAudit({ providerId, action: 'testProvider', result: result.ok ? 'ok' : 'falha', latencyMs });
         return send(200, result);
       }
 
+      const startedAt = Date.now();
       const updated = store.updateProvider({
         providerId: payload.providerId,
         apiKey: payload.apiKey,
         clearKey: payload.clearKey === true,
         model: payload.model,
       });
+      const latencyMs = Date.now() - startedAt;
       if (!updated.ok) {
+        emitAudit({ providerId: payload.providerId, action: 'updateProvider', result: 'erro', latencyMs, error: updated.error });
         return send(updated.status || 400, { error: updated.error });
       }
+      emitAudit({ providerId: payload.providerId, action: 'updateProvider', result: 'ok', latencyMs });
       return send(200, { ok: true, provider: updated.provider, providers: updated.providers });
     }
 
@@ -4696,7 +4719,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       if (served) return;
     }
     if (req.url === '/api/characters' || req.url.startsWith('/api/characters/')) return handleCharacters(req, res);
-    if (req.url === '/api/settings/providers' || req.url === '/api/settings/providers/test') return handleProviderSettings(req, res);
+    if (req.url === '/api/settings/providers' || req.url.startsWith('/api/settings/providers')) return handleProviderSettings(req, res);
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);

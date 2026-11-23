@@ -136,6 +136,9 @@ export function createProviderConfigStore({
   envReader = name => readEnvValue(name),
   syncProcessEnv = false,
 } = {}) {
+  // syncProcessEnv: true grava/remove chaves em process.env globalmente.
+  // Efeito colateral: altera variaveis de ambiente do processo inteiro.
+  // Usar apenas em inicializacao unica; isolar por wrapper se necessario.
   let overrides = {}; // { [providerId]: { apiKey?: string, model?: string, updatedAt?: string } }
 
   function load() {
@@ -145,7 +148,7 @@ export function createProviderConfigStore({
         return;
       }
       const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-      const rawMap = parsed && typeof parsed === 'object' && !Array.isArray(parsed.providers)
+      const rawMap = parsed && typeof parsed === 'object' && parsed.providers && typeof parsed.providers === 'object' && !Array.isArray(parsed.providers)
         ? parsed.providers
         : {};
       const next = {};
@@ -171,7 +174,7 @@ export function createProviderConfigStore({
   function persist() {
     mkdirSync(dirname(filePath), { recursive: true });
     const payload = JSON.stringify({ version: 1, providers: overrides }, null, 2);
-    const tmpPath = `${filePath}.${randomBytes(4).toString('hex')}.tmp`;
+    const tmpPath = `${filePath}.${randomBytes(8).toString('hex')}.tmp`;
     writeFileSync(tmpPath, `${payload}\n`, { encoding: 'utf8', mode: 0o600 });
     renameSync(tmpPath, filePath);
     try {

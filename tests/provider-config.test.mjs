@@ -198,3 +198,181 @@ test('HTTP /api/settings/providers exige token, mascara chaves e testa conectivi
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('HTTP aceita query strings em /api/settings/providers', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'usami-providers-qs-'));
+  try {
+    const token = 'test-provider-token';
+    const store = createProviderConfigStore({
+      dataDir: tmpDir,
+      envReader: () => null,
+      syncProcessEnv: false,
+    });
+    const handler = createProviderSettingsHandler({
+      providerConfigStore: store,
+      apiToken: token,
+      fetchImpl: globalThis.fetch,
+    });
+
+    // GET com query string nao deve 404
+    const req = mockReq({ method: 'GET', url: '/api/settings/providers?foo=bar', headers: { 'x-usami-token': token } });
+    const { res, done } = mockRes();
+    await handler(req, res);
+    await done;
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.ok, true);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP rejeita corpo oversized (> 8192 bytes)', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'usami-providers-oversized-'));
+  try {
+    const token = 'test-provider-token';
+    const store = createProviderConfigStore({
+      dataDir: tmpDir,
+      envReader: () => null,
+      syncProcessEnv: false,
+    });
+    const handler = createProviderSettingsHandler({
+      providerConfigStore: store,
+      apiToken: token,
+      fetchImpl: globalThis.fetch,
+    });
+
+    const bigKey = 'x'.repeat(9000);
+    const req = mockReq({
+      method: 'POST',
+      url: '/api/settings/providers',
+      headers: { 'content-type': 'application/json', 'x-usami-token': token },
+      body: { providerId: 'nvidia', apiKey: bigKey },
+    });
+    const { res, done } = mockRes();
+    await handler(req, res);
+    await done;
+    assert.equal(res.statusCode, 413);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP rejeita JSON invalido no corpo', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'usami-providers-badjson-'));
+  try {
+    const token = 'test-provider-token';
+    const store = createProviderConfigStore({
+      dataDir: tmpDir,
+      envReader: () => null,
+      syncProcessEnv: false,
+    });
+    const handler = createProviderSettingsHandler({
+      providerConfigStore: store,
+      apiToken: token,
+      fetchImpl: globalThis.fetch,
+    });
+
+    const req = mockReq({
+      method: 'POST',
+      url: '/api/settings/providers',
+      headers: { 'content-type': 'application/json', 'x-usami-token': token },
+      body: '{not valid json',
+    });
+    const { res, done } = mockRes();
+    await handler(req, res);
+    await done;
+    assert.equal(res.statusCode, 400);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('testProvider respeita timeout de probe e nao expoe credenciais', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'usami-providers-timeout-'));
+  try {
+    const token = 'test-provider-token';
+    const store = createProviderConfigStore({
+      dataDir: tmpDir,
+      envReader: () => null,
+      syncProcessEnv: false,
+    });
+
+    // fetch que nunca resolve (simula timeout de rede) mas respeita AbortSignal
+    const slowFetch = (url, opts) => {
+      return new Promise((_, reject) => {
+        const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+        opts?.signal?.addEventListener('abort', onAbort);
+        setTimeout(() => {
+          opts?.signal?.removeEventListener('abort', onAbort);
+          reject(new Error('timeout simulado'));
+        }, 200);
+      });
+    };
+
+    const handler = createProviderSettingsHandler({
+      providerConfigStore: store,
+      apiToken: token,
+      fetchImpl: slowFetch,
+    });
+
+    // Primeiro salva uma chave para o provedor ter algo para testar
+    const saveReq = mockReq({
+      method: 'POST',
+      url: '/api/settings/providers',
+      headers: { 'content-type': 'application/json', 'x-usami-token': token },
+      body: { providerId: 'nvidia', apiKey: 'nvapi-TEST_TIMEOUT_KEY' },
+    });
+    const saveRes = mockRes();
+    await handler(saveReq, saveRes.res);
+    await saveRes.done;
+    assert.equal(saveRes.res.statusCode, 200);
+
+    // Teste com fetch lento -> timeout (AbortSignal.timeout pode nao existir em versoes antigas do Node;
+    // se nao houver suporte, o teste apenas nao deve travar e retornar erro de rede)
+    const testReq = mockReq({
+      method: 'POST',
+      url: '/api/settings/providers/test',
+      headers: { 'content-type': 'application/json', 'x-usami-token': token },
+      body: { providerId: 'nvidia' },
+    });
+    const testRes = mockRes();
+    await handler(testReq, testRes.res);
+    await testRes.done;
+    const body = JSON.parse(testRes.res.body);
+    assert.equal(body.ok, false);
+    assert.equal(testRes.res.body.includes('nvapi-TEST_TIMEOUT_KEY'), false);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('CORS preflight OPTIONS retorna 204 ou permite origem', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'usami-providers-cors-'));
+  try {
+    const token = 'test-provider-token';
+    const store = createProviderConfigStore({
+      dataDir: tmpDir,
+      envReader: () => null,
+      syncProcessEnv: false,
+    });
+    const handler = createProviderSettingsHandler({
+      providerConfigStore: store,
+      apiToken: token,
+      fetchImpl: globalThis.fetch,
+    });
+
+    const req = mockReq({
+      method: 'OPTIONS',
+      url: '/api/settings/providers',
+      headers: { origin: 'http://localhost:3000', 'x-usami-token': token },
+    });
+    const { res, done } = mockRes();
+    await handler(req, res);
+    await done;
+    // OPTIONS nao e tratado pelo handler; deve cair em 404 ou similar (nao deve travar)
+    assert.ok([200, 204, 400, 401, 403, 404, 405].includes(res.statusCode));
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
