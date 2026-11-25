@@ -26,7 +26,7 @@
  */
 
 import { buildTraitGuidance } from './personality-store.js';
-import { getDailyScene } from './scenes.js';
+import { formatDateIso, getDailyScene } from './scenes.js';
 
 export const AFFINITY_STAGES = [
   { min: 0, max: 19, label: 'curiosidade_distante', tone: 'educada, observa, questiona por que você está aqui' },
@@ -60,8 +60,9 @@ const FACT_SECTIONS = [
  * @param {Array<{role, content}>} opts.history  últimas ~8 mensagens do dia (user/assistant)
  * @param {Array<{date, summary}>} opts.summaries  resumos dos dias anteriores (mais antigo primeiro)
  * @param {string} opts.username         como chamar o usuário (ex.: "você", apelido)
- * @param {string} opts.date             data atual ISO (ex.: "2026-10-24")
- * @param {string} opts.timeOfDay        "manhã" | "tarde" | "noite"
+ * @param {string} [opts.date]           rótulo de data exibido no prompt (padrão: data local de `now`)
+ * @param {string} [opts.timeOfDay]      "manhã" | "tarde" | "noite" (padrão: derivado de `now`)
+ * @param {Date|string|number} [opts.now] instante atual; fonte única de data, faixa do dia, relógio e cena
  * @param {Object|null} [opts.mood]      estado contínuo de humor (opcional)
  * @param {string|null} [opts.selfAwareness] resumo de código, skills e git atuais (opcional)
  */
@@ -73,7 +74,8 @@ export function buildPersona({
   summaries = [],
   username = 'você',
   date,
-  timeOfDay = 'tarde',
+  timeOfDay,
+  now,
   personality = null,
   dailyContext = null,
   currentScene = null,
@@ -93,11 +95,21 @@ export function buildPersona({
   const displayName = isCustomCharacter ? (manifest.metadata.displayName || charName) : 'Usami (兎美)';
   const stage = getAffinityStage(affinity);
 
+  // Um único instante local conduz data, faixa do dia, relógio e cena. Repassar
+  // "YYYY-MM-DD" para o Date o lê como meia-noite UTC e, em fuso negativo, joga
+  // a hora para a noite do dia anterior — a cena contradizia o "tarde" do prompt.
+  const nowCandidate = now instanceof Date ? new Date(now.getTime()) : new Date(now ?? Date.now());
+  const nowDate = Number.isNaN(nowCandidate.getTime()) ? new Date() : nowCandidate;
+  const currentDate = date || formatDateIso(nowDate);
+  const currentHour = nowDate.getHours();
+  const currentTimeOfDay = timeOfDay || (currentHour < 12 ? 'manhã' : currentHour < 18 ? 'tarde' : 'noite');
+  const clock = `${String(currentHour).padStart(2, '0')}:${String(nowDate.getMinutes()).padStart(2, '0')}`;
+
   let effectiveDailyContext = dailyContext;
   let effectiveCurrentScene = currentScene;
   if (!effectiveDailyContext && !effectiveCurrentScene) {
     try {
-      const sceneInfo = getDailyScene({ date: date ? new Date(date) : new Date(), username });
+      const sceneInfo = getDailyScene({ date: nowDate, username });
       effectiveDailyContext = sceneInfo.dailyContext;
       effectiveCurrentScene = sceneInfo.currentScene;
     } catch {
@@ -221,7 +233,8 @@ ${effectiveSummariesBlock}
 ${historyBlock}${selfAwarenessBlock}
 
 === CONTEXTO AGORA ===
-Data: ${date} (${timeOfDay}).${dailySceneBlock}${moodBlock}
+Data: ${currentDate} (${currentTimeOfDay}), agora são ${clock}.${dailySceneBlock}${moodBlock}
+Se o horário ou o dia aparecer na conversa, use exatamente estes — nunca invente horas nem finja consultar um relógio.
 
 ${username} acabou de falar com você.`;
   }
@@ -273,7 +286,8 @@ ${effectiveSummariesBlock}
 ${historyBlock}${selfAwarenessBlock}
 
 === CONTEXTO AGORA ===
-Data: ${date} (${timeOfDay}).${dailySceneBlock}${moodBlock}
+Data: ${currentDate} (${currentTimeOfDay}), agora são ${clock}.${dailySceneBlock}${moodBlock}
+Se o horário ou o dia aparecer na conversa, use exatamente estes — nunca invente horas nem finja consultar um relógio.
 
 ${username} acabou de falar com você.`;
 }

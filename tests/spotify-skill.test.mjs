@@ -260,3 +260,141 @@ test('agent-core: roteia pedidos de Spotify no chat/Discord para os matchers e f
   });
   assert.equal(reply, 'Tocando agora no Spotify: Idol — YOASOBI.');
 });
+
+test('agent-core: spotify matchers removem envelope do Discord e sufixos de cortesia', () => {
+  const playMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.control');
+  const searchMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.search');
+
+  // Mensagem real do Discord (workflow n8n adiciona "[Discord | Ruka]: ")
+  // Inclui "musica" para que o SPOTIFY_CONTROL_RE faça match
+  const discordMsg = '[Discord | Ruka]: coloca a musica black flag dp omar varela pra mim';
+  const discordNormalized = 'discord | ruka: coloca a musica black flag dp omar varela pra mim';
+
+  // spotify.control: deve extrair query limpa "black flag dp omar varela"
+  assert.ok(playMatcher.matches(discordNormalized));
+  const playArgs = playMatcher.buildArgs(discordMsg, discordNormalized);
+  assert.equal(playArgs.action, 'play');
+  assert.equal(playArgs.query, 'black flag dp omar varela');
+
+  // spotify.search: mesmo envelope, verbos de busca
+  const searchMsg = '[Discord | Ruka]: busca black flag dp omar varela no spotify por favor';
+  const searchNormalized = 'discord | ruka: busca black flag dp omar varela no spotify por favor';
+  assert.ok(searchMatcher.matches(searchNormalized));
+  const searchArgs = searchMatcher.buildArgs(searchMsg);
+  assert.equal(searchArgs.query, 'black flag dp omar varela');
+
+  // Regressão: sem envelope continua funcionando
+  assert.deepEqual(playMatcher.buildArgs('toca Idol no spotify', 'toca idol no spotify'), {
+    action: 'play',
+    query: 'Idol',
+  });
+  assert.deepEqual(searchMatcher.buildArgs('busca Idol no spotify'), {
+    query: 'Idol',
+    type: 'track',
+    limit: 5,
+  });
+});
+
+test('spotify.control: suporta uris em lote para reprodução de fila', async () => {
+  let playBody = null;
+  const mockAuth = {
+    requestJson: async (url, opts) => {
+      if (url.includes('/me/player/play') && opts?.method === 'PUT') {
+        playBody = opts.body;
+        return {};
+      }
+      return {};
+    },
+  };
+  const tools = createSpotifyTools({ spotifyAuth: mockAuth });
+  const control = tools.find(t => t.name === 'spotify.control');
+  const res = await control.execute({
+    action: 'play',
+    uris: ['spotify:track:abc111', 'spotify:track:xyz222'],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.action, 'play');
+  assert.deepEqual(playBody, { uris: ['spotify:track:abc111', 'spotify:track:xyz222'] });
+});
+
+test('spotify.similar: busca semelhantes via Last.fm e toca no Spotify', async () => {
+  let playedUris = null;
+  const mockAuth = {
+    requestJson: async (url, opts) => {
+      if (url.includes('/me/player/play') && opts?.method === 'PUT') {
+        playedUris = opts.body?.uris;
+        return {};
+      }
+      if (url.includes('/search?')) {
+        return {
+          tracks: {
+            items: [
+              {
+                id: 's1',
+                uri: 'spotify:track:sim1',
+                name: 'Faixa Similar 1',
+                artists: [{ name: 'Artista Similar' }],
+                external_urls: { spotify: 'https://open.spotify.com/track/sim1' },
+              },
+            ],
+          },
+        };
+      }
+      return {};
+    },
+  };
+
+  const mockFetch = async (url) => {
+    const strUrl = String(url);
+    if (strUrl.includes('method=artist.getsimilar')) {
+      return new Response(JSON.stringify({
+        similarartists: {
+          artist: [{ name: 'Artista Similar' }],
+        },
+      }), { status: 200 });
+    }
+    if (strUrl.includes('method=artist.gettoptracks')) {
+      return new Response(JSON.stringify({
+        toptracks: {
+          track: [{ name: 'Faixa Similar 1' }],
+        },
+      }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 200 });
+  };
+
+  const prevKey = process.env.LASTFM_API_KEY;
+  process.env.LASTFM_API_KEY = 'mock-lastfm-key';
+  try {
+    const tools = createSpotifyTools({ spotifyAuth: mockAuth, fetchImpl: mockFetch });
+    const similar = tools.find(t => t.name === 'spotify.similar');
+    assert.ok(similar, 'spotify.similar deve existir no catálogo de tools');
+
+    const res = await similar.execute({ artist: 'Omar Varela', play: true });
+    assert.equal(res.ok, true);
+    assert.equal(res.artist, 'Omar Varela');
+    assert.equal(res.source, 'lastfm');
+    assert.equal(res.playing, true);
+    assert.equal(res.tracks.length, 1);
+    assert.equal(res.tracks[0].name, 'Faixa Similar 1');
+    assert.deepEqual(playedUris, ['spotify:track:sim1']);
+
+    // Matcher no agent-core
+    const similarMatcher = DEFAULT_TOOL_MATCHERS.find(m => m.toolName === 'spotify.similar');
+    assert.ok(similarMatcher, 'similarMatcher deve existir');
+    const msg = '[Discord | Ruka]: sim coloca uma playlist com músicas semelhantes a dele';
+    const norm = 'discord | ruka: sim coloca uma playlist com musicas semelhantes a dele';
+    assert.ok(similarMatcher.matches(norm));
+
+    // Fallback reply format
+    const reply = formatExecutedTurnFallbackReply({
+      status: 'executed',
+      tool: 'spotify.similar',
+      result: res,
+    });
+    assert.match(reply, /Coloquei músicas semelhantes a Omar Varela para tocar no Spotify/);
+  } finally {
+    if (prevKey === undefined) delete process.env.LASTFM_API_KEY;
+    else process.env.LASTFM_API_KEY = prevKey;
+  }
+});

@@ -14,6 +14,7 @@ import {
   broadcastNotification,
 } from '../src/notifier.js';
 import { createTimerTools, TIMER_TOOL_NAMES } from '../src/timer-tools.js';
+import { createN8nCommandQueue } from '../src/n8n-queue.js';
 import { createTimerHandler } from '../server.mjs';
 
 function mockReq({ method = 'GET', url = '/', headers = {}, body = null } = {}) {
@@ -365,4 +366,40 @@ test('HTTP API: endpoints /api/timer/status e /api/timer/cancel', async () => {
   }
 
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('notifier: broadcastNotification enfileira proactive_say no n8nQueue real sem falhar com clientId null', async () => {
+  const queue = createN8nCommandQueue();
+
+  // Sem clientId (null) -> fanout/pendente
+  const resFanout = await broadcastNotification({
+    title: 'Lembrete',
+    message: 'Beber água',
+    channels: ['companion'],
+    n8nQueue: queue,
+    clientId: null,
+  });
+  assert.equal(resFanout.companion, true);
+
+  const polled = queue.poll('tab-1');
+  assert.equal(polled.count, 1);
+  assert.equal(polled.commands[0].type, 'proactive_say');
+  assert.equal(polled.commands[0].message, 'Beber água');
+  assert.equal(typeof polled.commands[0].id, 'string');
+  assert.ok(polled.commands[0].id.length > 0);
+  assert.equal(queue.acknowledge('tab-1', [polled.commands[0].id]), 1);
+
+  // Com clientId específico -> roteia só para aquele cliente
+  const resTargeted = await broadcastNotification({
+    title: 'Lembrete',
+    message: 'Só para tab-2',
+    channels: ['companion'],
+    n8nQueue: queue,
+    clientId: 'tab-2',
+  });
+  assert.equal(resTargeted.companion, true);
+  assert.equal(queue.poll('tab-1').count, 0);
+  const polled2 = queue.poll('tab-2');
+  assert.equal(polled2.count, 1);
+  assert.equal(polled2.commands[0].message, 'Só para tab-2');
 });

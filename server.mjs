@@ -32,6 +32,10 @@ import { PLAN_LIST_DEFAULT_LIMIT, PLAN_LIST_MAX_LIMIT, createTaskPlanner, parseB
 import { createSkillCatalog } from './src/skill-catalog.js';
 import { createSkillManager } from './src/skill-manager.js';
 import { createPersonalPlannerTools, publishPersonalPlannerSkill } from './src/personal-planner-skill.js';
+import { createTimeTrackerTools, publishTimeTrackerSkill } from './src/time-tracker-skill.js';
+import { createHabitGardenTools, publishHabitGardenSkill } from './src/habit-garden-skill.js';
+import { createNoteLinkerTools, publishNoteLinkerSkill } from './src/note-linker-skill.js';
+import { createFocusGuardianTools, publishFocusGuardianSkill } from './src/focus-guardian-skill.js';
 import {
   createDailyBriefingService,
   createDailyBriefingTool,
@@ -41,6 +45,7 @@ import {
 import { createStudyCompanionTools, publishStudyCompanionSkill } from './src/study-companion-skill.js';
 import { createDocumentCreatorTools, publishDocumentCreatorSkill } from './src/document-creator-skill.js';
 import { createCodeInspectorTools, publishCodeInspectorSkill } from './src/code-inspector-skill.js';
+import { createPrChecklistGeneratorTools, publishPrChecklistGeneratorSkill } from './src/pr-checklist-generator-skill.js';
 import { createSkillArchitectTools, publishSkillArchitectSkill } from './src/skill-architect-skill.js';
 import { createCalendarManagerTools, publishCalendarManagerSkill } from './src/calendar-manager-skill.js';
 import { createEmailAssistantTools, publishEmailAssistantSkill } from './src/email-assistant-skill.js';
@@ -53,7 +58,7 @@ import { createFlStudioClient, createFlStudioTools, publishFlStudioSkill } from 
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
-import { createAgentCore, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
+import { createAgentCore, detectConfirmationFollowUp, formatAgentTurnPromptContext, formatExecutedTurnFallbackReply, isDeferredToolPromise } from './src/agent-core.js';
 import { createAchievementsStore } from './src/achievements-store.js';
 import { buildServices } from './src/flow-services.js';
 import { createFlowExecutor } from './src/flow-executor.js';
@@ -78,8 +83,18 @@ import { createLearningMemory } from './src/learning-memory.js';
 import { generateLocalSurfaceReflex } from './src/surface-reflex.js';
 import { createTimerService } from './src/timer-service.js';
 import { createTimerTools } from './src/timer-tools.js';
+import { createProviderConfigStore } from './src/provider-config-store.js';
+import {
+  MAX_CARD_PNG_BYTES,
+  embedCardInPng,
+  extractCardFromPng,
+  normalizeCardToManifest,
+  saveCharacterManifest,
+} from './src/character-card.js';
+import { loadCharacterManifestSync } from './src/character-loader.js';
 import { parseDiscordSender, isOwnerUser, enforcePrivacy } from './src/privacy-guard.js';
 import { createLiveCompanionService, createLiveCompanionTools, publishLiveCompanionSkill } from './src/live-companion.js';
+import { createSleepCompanionService, isSleepCompanionTrigger, isWakeUpTrigger, DEFAULT_SLEEP_PLAYBACK_RATE, DEFAULT_SLEEP_VOLUME, DEFAULT_SLEEP_EMOTION } from './src/sleep-companion.js';
 import { createProactiveEngine } from './src/proactive-engine.js';
 import { createProactiveStore } from './src/proactive-events.js';
 import { createLiveChatHandler, createLiveChatStore } from './src/live-chat/live-chat-routes.js';
@@ -101,6 +116,7 @@ import { startChatTrace, recordLlmGeneration, recordRetrievalSpan, recordToolSpa
 import { sendObservabilityEvent, observeApiRequest, redactSecrets } from './src/n8n-observability.js';
 export { sendObservabilityEvent, observeApiRequest, redactSecrets };
 import { LanceMemoryStore } from './src/lancedb-store.js';
+import { createEpisodicMemory } from './src/episodic-memory.js';
 import {
   isAllowedOrigin as routeIsAllowedOrigin,
   denyWithoutToken as routeDenyWithoutToken,
@@ -127,7 +143,7 @@ import {
 
 // Compatibilidade (B12): estes nomes viveram aqui e são importados por testes
 // e chamadores antigos; a implementação agora é o módulo puro de src/.
-export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, SPEECH_TRIGGERS } from './src/provider-parse.js';
+export { filterActionsByCatalog, parseProviderRaw, sanitizeActions, sanitizeCapabilities, stripLeakedJson, stripStageDirections, stripXmlToolCalls, SPEECH_TRIGGERS } from './src/provider-parse.js';
 export { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 
 export const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
@@ -318,8 +334,26 @@ try {
 
 // Ferramentas do domínio agêntico: registry + gate de permissões + executor com
 // histórico auditável (data/executions.json e data/permissions.json).
+// Memória episódica vetorial dos turnos de conversa (tabela episodes_<personagem>).
+// Instância padrão do personagem principal; contextos multi-tenant criam a sua.
+const installEpisodicMemory = createEpisodicMemory({
+  dataDir: resolveDataDir(),
+  characterId: DEFAULT_CHARACTER_ID,
+});
+
+// Stores injetados (testes/servidor embarcado) não herdam a memória global:
+// evita gravar conversa de teste no índice real da companion.
+function resolveDefaultEpisodic(options = {}) {
+  if (options.episodicMemory) return options.episodicMemory;
+  if (options.memoryStore) return null;
+  return installEpisodicMemory;
+}
+
 const toolRegistry = createToolRegistry();
-const memorySearchRegistration = toolRegistry.register(createMemorySearchTool({ memoryStore: installMemoryStore }));
+const memorySearchRegistration = toolRegistry.register(createMemorySearchTool({
+  memoryStore: installMemoryStore,
+  episodicStore: installEpisodicMemory,
+}));
 if (!memorySearchRegistration.ok) {
   console.error('Aviso: ferramenta memory.search não registrada:', memorySearchRegistration.errors.join('; '));
 }
@@ -329,7 +363,14 @@ try {
 } catch {
   // load() já loga o aviso; o gate nega execuções até o arquivo ser corrigido.
 }
-const installToolExecutor = createToolExecutor({ registry: toolRegistry, gate: installToolGate, dataDir: resolveDataDir() });
+const { createToolMetrics } = await import('./src/tool-metrics.js');
+const toolMetrics = createToolMetrics();
+const installToolExecutor = createToolExecutor({ 
+  registry: toolRegistry, 
+  gate: installToolGate, 
+  dataDir: resolveDataDir(),
+  metrics: toolMetrics,
+});
 installToolExecutor.load();
 
 // Planner Engine de tarefas (data/plans/<pl-id>.json): objetivo vira plano com
@@ -360,6 +401,77 @@ for (const plannerTool of createPersonalPlannerTools({
   const registered = toolRegistry.register(plannerTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${plannerTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Time Tracker (Fase 1): publica manifesto (níveis 1–2) em dataDir/skills
+// quando ausente e registra ferramentas de timer, Pomodoro, time-blocking e relatórios.
+try {
+  publishTimeTrackerSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto time-tracker falhou:', error?.message || error);
+}
+for (const trackerTool of createTimeTrackerTools({
+  operationalStore: installOperationalStore,
+  dataDir: resolveDataDir(),
+  defaultPomodoroMinutes: Number(process.env.USAMI_TIMER_POMODORO_MINUTES) || 25,
+  defaultBreakMinutes: Number(process.env.USAMI_TIMER_BREAK_MINUTES) || 5,
+  weekStartDay: Number(process.env.USAMI_TIMER_WEEK_START_DAY) || 1,
+})) {
+  const registered = toolRegistry.register(trackerTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${trackerTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Habit Garden (Fase 1): publica manifesto (níveis 1–2) em dataDir/skills
+// quando ausente e registra ferramentas de hábitos, streaks, heatmap e sugestões.
+try {
+  publishHabitGardenSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto habit-garden falhou:', error?.message || error);
+}
+for (const habitTool of createHabitGardenTools({
+  operationalStore: installOperationalStore,
+  dataDir: resolveDataDir(),
+  defaultFrequency: process.env.USAMI_HABIT_DEFAULT_FREQUENCY || 'daily',
+  microHabitThreshold: Number(process.env.USAMI_HABIT_MICRO_THRESHOLD) || 5,
+})) {
+  const registered = toolRegistry.register(habitTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${habitTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Note Linker (Fase 1): publica manifesto (níveis 1–3) em dataDir/skills
+// quando ausente e registra ferramentas de notas, links wiki, backlinks, grafo e tags.
+try {
+  publishNoteLinkerSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto note-linker falhou:', error?.message || error);
+}
+for (const noteTool of createNoteLinkerTools({
+  dataDir: resolveDataDir(),
+})) {
+  const registered = toolRegistry.register(noteTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${noteTool.name} não registrada:`, registered.errors.join('; '));
+  }
+}
+
+// Skill Focus Guardian (Fase 1): publica manifesto (níveis 1–3) em dataDir/skills
+// quando ausente e registra ferramentas de sessões, perfis, blocklists e verificação de bloqueio.
+try {
+  publishFocusGuardianSkill({ dataDir: resolveDataDir() });
+} catch (error) {
+  console.error('Aviso: publicação do manifesto focus-guardian falhou:', error?.message || error);
+}
+for (const focusTool of createFocusGuardianTools({
+  dataDir: resolveDataDir(),
+})) {
+  const registered = toolRegistry.register(focusTool);
+  if (!registered.ok) {
+    console.error(`Aviso: ferramenta ${focusTool.name} não registrada:`, registered.errors.join('; '));
   }
 }
 
@@ -425,6 +537,7 @@ for (const [label, publishFn] of [
   ['git-assistant', publishGitAssistantSkill],
   ['spotify-player', publishSpotifySkill],
   ['fl-studio', publishFlStudioSkill],
+  ['pr-checklist-generator', publishPrChecklistGeneratorSkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -481,6 +594,7 @@ for (const skillTool of [
       metadata: { tool: evt.tool, action: evt.action || null },
     }),
   }),
+  ...createPrChecklistGeneratorTools(),
 ]) {
   const registered = toolRegistry.register(skillTool);
   if (!registered.ok) {
@@ -548,7 +662,14 @@ export const installTimerService = createTimerService({
   n8nQueue: sharedN8nQueue,
 });
 
+// Store seguro de provedores de IA, Voz e Integrações (chaves mascaradas na leitura)
+export const installProviderConfigStore = createProviderConfigStore({
+  dataDir: resolveDataDir(),
+  syncProcessEnv: true,
+});
+
 for (const timerTool of createTimerTools({ timerService: installTimerService })) {
+  if (toolRegistry.has(timerTool.name)) continue; // skill time-tracker já cobre o nome
   const registered = toolRegistry.register(timerTool);
   if (!registered.ok) {
     console.error(`Aviso: ferramenta ${timerTool.name} não registrada:`, registered.errors.join('; '));
@@ -564,6 +685,7 @@ const installAgentCore = createAgentCore({
   classifyWithLlm: async ({ message, tools, signal }) => {
     return classifyIntentWithLlm({ message, tools, signal });
   },
+  metrics: toolMetrics,
 });
 
 // Store persistente de eventos proativos da Usami (<proactive-events.json>).
@@ -664,6 +786,7 @@ export const characterRegistry = createCharacterRegistry({
     moodStore: installMoodStore,
     achievementsStore: installAchievementsStore,
     operationalStore: installOperationalStore,
+    episodicMemory: installEpisodicMemory,
     n8nQueue: sharedN8nQueue,
     chatActivity: sharedChatActivity,
   },
@@ -926,6 +1049,9 @@ export function createChatHandler(options = {}) {
   // se já terminou a ferramenta e está só compitando a resposta.
   const chatActivity = options.chatActivity || sharedChatActivity;
   const discordPresence = options.discordPresence !== undefined ? options.discordPresence : sharedDiscordPresence;
+  // Serviço de companhia para dormir (modo sono): gerencia ciclo de vida de 30 min,
+  // prosódia lenta/sussurrada e detecção de intenção.
+  const sleepCompanion = options.sleepCompanion || createSleepCompanionService({ now });
   // Contador atômico de turnos em andamento: com um booleano, dois turnos
   // sobrepostos (duas abas) liberavam o motor proativo quando o primeiro
   // terminava, mesmo com o segundo ainda rodando.
@@ -945,6 +1071,9 @@ export function createChatHandler(options = {}) {
       return null;
     }
   });
+  
+  // Métricas de tool calling (observabilidade)
+  const toolMetrics = options.toolMetrics || null;
 
   // Retrato leve (cache 15s + atualização Git em background) sem bloquear o turno do chat.
   let cachedAwareness = { expiresAt: 0, text: null };
@@ -1074,6 +1203,11 @@ export function createChatHandler(options = {}) {
     const activeMoodStore = (tenantCtx && !('moodStore' in options)) ? tenantCtx.moodStore : moodStore;
     const activeManifest = options.manifest || tenantCtx?.manifest || null;
     const activeMemoryProvider = options.memoryProvider || tenantCtx?.memoryProvider || null;
+    const episodicAllowed = activeManifest?.memory?.ragEnabled !== false
+      && activeManifest?.memory?.storageBackend !== 'none';
+    const activeEpisodic = episodicAllowed
+      ? (options.episodicMemory || tenantCtx?.episodicMemory || resolveDefaultEpisodic(options))
+      : null;
     const activeChatActivity = (tenantCtx && !options.chatActivity) ? tenantCtx.chatActivity : chatActivity;
     const activeN8nQueue = (tenantCtx && !options.n8nQueue) ? tenantCtx.n8nQueue : n8nQueue;
 
@@ -1093,10 +1227,7 @@ export function createChatHandler(options = {}) {
         activeChatActivity.set(activityClientId, activity);
         if (discordPresence) {
           if (activity?.phase === 'tool' && activity?.tool) {
-            discordPresence.setActivity({
-              details: `Executando: ${activity.tool}`,
-              state: `Afinidade: ${discordPresence.getStatus().affinityStage} • Em ação ⚡`,
-            });
+            discordPresence.setToolActivity(activity.tool);
           } else if (activity?.phase === 'thinking') {
             discordPresence.onChatTurnStart();
           }
@@ -1109,9 +1240,10 @@ export function createChatHandler(options = {}) {
     try {
       const capabilities = sanitizeCapabilities(parsedBody.input?.capabilities);
       const mem = activeMemoryStore.getAll();
-      const today = new Date().toISOString().slice(0, 10);
-      const hour = new Date().getHours();
-      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      // `today` é a chave do histórico no memory-store (dias em UTC); o prompt e a
+      // cena usam o instante local via `requestNow`, para não deslocar a hora do dia.
+      const requestNow = new Date();
+      const today = requestNow.toISOString().slice(0, 10);
       let currentMood = null;
       try {
         currentMood = activeMoodStore ? activeMoodStore.getAll(mem.affinity.score) : null;
@@ -1135,8 +1267,7 @@ export function createChatHandler(options = {}) {
         history: todayHistory,
         summaries: activeMemoryStore.getSummaries().slice(-3),
         username: mem.user.nickname || 'você',
-        date: today,
-        timeOfDay,
+        now: requestNow,
         personality: activePersonalityStore.get(),
         mood: currentMood,
         selfAwareness,
@@ -1176,6 +1307,56 @@ export function createChatHandler(options = {}) {
         system += '\n\n--- Contexto do vault Obsidian (memória de longo prazo) ---\n' + ragContext + '\n--- Fim do contexto ---\n';
       }
 
+      // Memória episódica: lembranças de turnos antigos, só para o dono. Usa o
+      // decaimento do manifesto; o texto não entra no trace (privacidade).
+      if (!isThirdParty && activeEpisodic) {
+        try {
+          const episodes = await activeEpisodic.search({
+            query: parsedBody.message,
+            limit: 3,
+            decayFactorPerDay: activeManifest?.memory?.decayFactorPerDay,
+          });
+          if (episodes.length) {
+            const briefing = episodes
+              .map(item => `[${(item.isoDate || '').slice(0, 10)}]\n${item.text}`)
+              .join('\n---\n');
+            system += '\n\n--- Lembranças de conversas anteriores (podem estar incompletas; use só se ajudar) ---\n'
+              + briefing
+              + '\n--- Fim das lembranças ---\n';
+          }
+          recordRetrievalSpan(chatTrace, {
+            query: parsedBody.message,
+            source: 'episodic_memory',
+            results: episodes.map(item => ({ file: 'episodic_memory', score: item.score })),
+          });
+        } catch {
+          // memória episódica é melhor-esforço: nunca derruba o turno
+        }
+      }
+
+      // Detecta gatilhos de ativação/desativação do modo sono
+      const sleepTriggered = isSleepCompanionTrigger(parsedBody.message);
+      const wakeTriggered = isWakeUpTrigger(parsedBody.message);
+
+      let sleepCompanionStatus = sleepCompanion.getStatus();
+      if (sleepTriggered && !sleepCompanionStatus.active) {
+        sleepCompanionStatus = sleepCompanion.start();
+        if (discordPresence) {
+          try { discordPresence.setSleep({ details: 'Modo Sono ativado 🌙' }); } catch {}
+        }
+      } else if (wakeTriggered && sleepCompanionStatus.active) {
+        sleepCompanionStatus = sleepCompanion.stop();
+        if (discordPresence) {
+          try { discordPresence.onChatTurnStart(); } catch {}
+        }
+      } else {
+        // Atualiza status (pode expirar automaticamente)
+        sleepCompanionStatus = sleepCompanion.getStatus();
+        if (sleepCompanionStatus.active && discordPresence) {
+          try { discordPresence.setSleep(); } catch {}
+        }
+      }
+
       if (parsedBody.input?.wakeUpJolt) {
         system += '\n\n=== REAÇÃO: ACORDANDO NO SUSTO ===\nVocê estava dormindo profundamente e o usuário te acordou de repente! Reaja com um sobressalto e susto tsundere bem vivo e engraçado no início da sua resposta (ex.: "Wah?! Ai, que susto! Você tava aí?! Eu já tava quase sonhando, baka!"). Use o gesto "surprised" ou "tilt" e emoção [casual_surprised].\n';
       } else if (parsedBody.input?.sleepCompanionActive) {
@@ -1188,7 +1369,14 @@ export function createChatHandler(options = {}) {
 
       let agentTurn = null;
       let executedAgentTurn = null;
+      let intentHintTool = null;
       const isFastTier = Boolean(parsedBody.input?.skipAgent || parsedBody.input?.fastTier);
+      const deferLlmIntentToNative = Boolean(useNvidia() && !options.generateReply && !isFastTier);
+      // O path regex (runOperationalForChat) executa ferramentas de forma síncrona
+      // antes da chamada ao LLM. O path nativo (generateReplyWithTools) executa via
+      // function calling do LLM de forma assíncrona. Quando a intenção vem do
+      // classificador LLM (sem regex), deixamos o tool calling nativo extrair os
+      // argumentos semanticamente em vez de depender de regexes de buildArgs.
       if (agentCore && options.syncAgentInChat !== false && !isFastTier && typeof agentCore.runOperationalForChat === 'function') {
         try {
           let executedTurn = null;
@@ -1196,6 +1384,7 @@ export function createChatHandler(options = {}) {
             executedTurn = await agentCore.runOperationalForChat(parsedBody.message, {
               history: todayHistory,
               timeoutMs: options.agentChatTimeoutMs ?? 10000,
+              deferLlmIntentToNative,
               // Publica o NOME real da ferramenta enquanto ela executa: é o
               // trecho de 10-20 s em que o usuário precisa saber o que ela
               // está fazendo (e não só que está ocupada).
@@ -1205,7 +1394,9 @@ export function createChatHandler(options = {}) {
           } catch {
             agentTurn = null;
           }
-          if (executedTurn) {
+          if (executedTurn?.deferred && executedTurn.tool) {
+            intentHintTool = executedTurn.tool;
+          } else if (executedTurn) {
             executedAgentTurn = executedTurn;
             agentTurn = {
               id: executedTurn.id,
@@ -1233,6 +1424,19 @@ export function createChatHandler(options = {}) {
           publishActivity({ phase: 'thinking' });
         } catch {
           agentTurn = null;
+        }
+      }
+
+      // Um "sim" sozinho depende da pergunta da fala anterior para fazer
+      // sentido; o histórico no prompt não destaca isso o suficiente.
+      if (!executedAgentTurn) {
+        try {
+          const confirmation = detectConfirmationFollowUp(parsedBody.message, todayHistory);
+          if (confirmation) {
+            system += `\n\n=== CONTINUIDADE DA CONVERSA ===\nSua última fala terminou em pergunta: "${confirmation.previousReply}"\n${isThirdParty ? 'A pessoa' : 'Ele'} respondeu apenas confirmando, sem repetir o assunto. Interprete como "sim, pode seguir com o que você perguntou" e continue a partir daí — nunca diga que não entendeu nem peça contexto.`;
+          }
+        } catch (error) {
+          console.warn('[chat] dica de continuidade falhou: ' + (error?.message || error));
         }
       }
 
@@ -1407,10 +1611,42 @@ export function createChatHandler(options = {}) {
           const nvidiaAbort = new AbortController();
           const alternateAbort = new AbortController();
           const routerKey = alternate?.key || null;
-          // Seleção semântica Top-K de ferramentas candidatas para Function Calling
-          const candidateTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
-            ? selectTopKTools(parsedBody.message, toolRegistry.list(), { k: 6, minScore: 0.08 })
+          // Seleção semântica Top-K de ferramentas candidatas para Function Calling.
+          // "tenta de novo" não diz qual ferramenta: o último pedido do usuário
+          // entra na consulta para o retry continuar com as mesmas ferramentas.
+          const lastUserTurn = [...(todayHistory || [])].reverse().find(m => m?.role === 'user' && typeof m.content === 'string');
+          const selectorQuery = lastUserTurn ? `${parsedBody.message}\n${lastUserTurn.content}` : parsedBody.message;
+          const allRegisteredTools = (!isFastTier && toolRegistry && typeof toolRegistry.list === 'function')
+            ? toolRegistry.list()
             : [];
+          const candidateTools = allRegisteredTools.length > 0
+            ? selectTopKTools(selectorQuery, allRegisteredTools, { k: 6, minScore: 0.08 })
+            : [];
+          // Conecta a intenção classificada pelo LLM (e qualquer ferramenta já
+          // executada no turno) ao catálogo de Function Calling nativo, trazendo
+          // a ferramenta alvo e toda a família do mesmo namespace (ex: spotify.*)
+          // mesmo quando o filtro lexical não casou com palavras-chave literais.
+          const hintedToolNames = [
+            intentHintTool,
+            executedAgentTurn?.tool,
+            ...(Array.isArray(executedAgentTurn?.tools) ? executedAgentTurn.tools : []),
+          ].filter(Boolean);
+          if (hintedToolNames.length > 0 && allRegisteredTools.length > 0) {
+            const chosenNames = new Set(candidateTools.map(t => t.name));
+            const hintedNamespaces = new Set(
+              hintedToolNames
+                .filter(name => String(name).includes('.'))
+                .map(name => String(name).split('.')[0]),
+            );
+            for (const tool of allRegisteredTools) {
+              if (chosenNames.has(tool.name)) continue;
+              const ns = String(tool.name || '').includes('.') ? String(tool.name).split('.')[0] : null;
+              if (hintedToolNames.includes(tool.name) || (ns && hintedNamespaces.has(ns))) {
+                candidateTools.push(tool);
+                chosenNames.add(tool.name);
+              }
+            }
+          }
           const openAiTools = (!options.generateReply && candidateTools.length > 0)
             ? candidateTools.map(toolToOpenAi)
             : [];
@@ -1527,6 +1763,18 @@ export function createChatHandler(options = {}) {
               tools: executedAgentTurn.tools,
             };
           }
+          
+          // Record LLM tool calling metrics
+          if (toolMetrics && parsed?.executedTools && parsed.executedTools.length > 0) {
+            const chainLength = parsed.executedTools.length;
+            const totalLatency = parsed.executedTools.reduce((sum, t) => sum + (t.result?.durationMs || 0), 0);
+            const success = parsed.executedTools.every(t => t.result?.ok !== false);
+            toolMetrics.recordLlmToolChain(chainLength, totalLatency || 0, success);
+            
+            for (const t of parsed.executedTools) {
+              toolMetrics.recordLlmToolCall(t.name, 1, t.result?.durationMs || 0, t.result?.ok !== false);
+            }
+          }
 
           if (parsed?.ok && isDeferredToolPromise(parsed.reply)) {
             if (executedAgentTurn && executedAgentTurn.status === 'executed') {
@@ -1541,7 +1789,7 @@ export function createChatHandler(options = {}) {
               } catch {
                 parsed.reply = formatExecutedTurnFallbackReply(executedAgentTurn);
               }
-            } else if (!isFastTier && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
+            } else if (!isFastTier && !executedAgentTurn && !agentTurn && agentCore && typeof agentCore.runOperationalForChat === 'function') {
               try {
                 // Caminho tardio: a ferramenta só é descoberta DEPOIS da
                 // primeira resposta (o modelo pediu algo acionável). Mesmos
@@ -1704,6 +1952,17 @@ export function createChatHandler(options = {}) {
             .trim() || parsed.reply;
           activeMemoryStore.appendHistory('user', parsedBody.message, turnTimestamp);
           activeMemoryStore.appendHistory('assistant', historyReply, turnTimestamp);
+          // Indexação vetorial do turno (buffer assíncrono; nunca bloqueia a resposta).
+          try {
+            activeEpisodic?.recordTurn({
+              userText: parsedBody.message,
+              assistantText: historyReply,
+              ts: Date.parse(turnTimestamp) || Date.now(),
+              sessionId: typeof parsedBody.input?.sessionId === 'string' ? parsedBody.input.sessionId : 'chat',
+            });
+          } catch {
+            // melhor-esforço
+          }
           const current = activeMemoryStore.getAll();
           const gain = calculateGain({
             userMessage: parsedBody.message,
@@ -1745,15 +2004,21 @@ export function createChatHandler(options = {}) {
       // Verificação de segurança e privacidade em conversas com terceiros
       if (isThirdParty) {
         try {
+          // guildId pode vir do payload do Discord bridge (parsedBody.input.guildId)
+          const guildId = parsedBody.input?.guildId || null;
           const guard = await enforcePrivacy({
             userMessage: discordInfo.text || parsedBody.message,
             replyText: parsed.reply,
             authorName: discordInfo.authorName,
             isThirdParty: true,
+            guildId,
             fetchImpl,
           });
           if (guard.blocked) {
             parsed.reply = guard.reply;
+          }
+          if (guard.skipped) {
+            console.log('[privacy-guard] verificação pulada: guild em allowlist', { guildId });
           }
         } catch (guardErr) {
           console.warn('[privacy-guard] falha ao checar privacidade:', guardErr?.message || guardErr);
@@ -1848,6 +2113,8 @@ export function createChatHandler(options = {}) {
         ...(parsed.speechTags ? { speechTags: parsed.speechTags } : {}),
         ...(agentTurn ? { agentTurn } : {}),
         ...(moodPayload ? { mood: moodPayload } : {}),
+        // Modo companhia para dormir: status e parâmetros de TTS (rate, volume, emotion)
+        ...(sleepCompanionStatus.active ? { sleepCompanion: sleepCompanionStatus } : {}),
         // llmMs/animationMs/totalMs são lidos pelo navegador — não remover nem
         // renomear. contextMs é adição. animationMs é o que a animação custou
         // DENTRO do turno (pós-processamento síncrono); o refino do diretor é
@@ -2232,9 +2499,111 @@ export function createOperationalMemoryHandler(options = {}) {
   });
 }
 
+const CHARACTER_EXPORT_CARD_RE = /^\/api\/characters\/([a-z0-9][a-z0-9_-]{1,62})\/export-card$/;
+
+async function readRequestBinary(req, { limit = MAX_CARD_PNG_BYTES } = {}) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > limit) return { ok: false, buffer: null };
+    chunks.push(buf);
+  }
+  return { ok: true, buffer: Buffer.concat(chunks) };
+}
+
 /**
- * Handler multi-tenant de seleção e listagem de personagens (`GET /api/characters`,
- * `GET/POST /api/characters/active`).
+ * Handler No-Code para configuração mascarada e teste de provedores de IA/Voz/Integrações:
+ * `GET /api/settings/providers`, `POST /api/settings/providers`, `POST /api/settings/providers/test`.
+ */
+export function createProviderSettingsHandler(options = {}) {
+  const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
+  const store = options.providerConfigStore || installProviderConfigStore;
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+
+  function emitAudit({ providerId, action, result, latencyMs, error }) {
+    const entry = {
+      ts: new Date().toISOString(),
+      providerId,
+      action,
+      result,
+      latencyMs,
+      ...(error ? { error: String(error) } : {}),
+    };
+    try {
+      console.log(JSON.stringify({ level: 'audit', component: 'provider-settings', ...entry }));
+    } catch {
+      // logging nao deve quebrar o fluxo
+    }
+  }
+
+  return async function handleProviderSettings(req, res) {
+    const send = (status, data) => sendJsonResponse(res, status, data);
+
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, allowedOrigins)) {
+      return send(403, { error: 'Origem não autorizada.' });
+    }
+    if (denyWithoutToken(req, options, send)) return;
+
+    const route = new URL(req.url || '/api/settings/providers', 'http://127.0.0.1:8787').pathname;
+
+    if (req.method === 'GET' && route === '/api/settings/providers') {
+      return send(200, { ok: true, providers: store.listStatus() });
+    }
+
+    if (req.method === 'POST' && (route === '/api/settings/providers' || route === '/api/settings/providers/test')) {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (contentType !== 'application/json') {
+        return send(403, { error: 'Content-Type inválido.' });
+      }
+      const read = await readRequestBody(req, { limit: 8192 });
+      if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+
+      let payload;
+      try {
+        payload = JSON.parse(read.body);
+      } catch {
+        return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return send(400, { error: 'Corpo inválido.' });
+      }
+
+      if (route === '/api/settings/providers/test') {
+        const providerId = typeof payload.providerId === 'string' ? payload.providerId.trim() : '';
+        if (!providerId) return send(400, { error: 'providerId é obrigatório.' });
+        const startedAt = Date.now();
+        const result = await store.testProvider(providerId, { fetchImpl });
+        const latencyMs = Date.now() - startedAt;
+        emitAudit({ providerId, action: 'testProvider', result: result.ok ? 'ok' : 'falha', latencyMs });
+        return send(200, result);
+      }
+
+      const startedAt = Date.now();
+      const updated = store.updateProvider({
+        providerId: payload.providerId,
+        apiKey: payload.apiKey,
+        clearKey: payload.clearKey === true,
+        model: payload.model,
+      });
+      const latencyMs = Date.now() - startedAt;
+      if (!updated.ok) {
+        emitAudit({ providerId: payload.providerId, action: 'updateProvider', result: 'erro', latencyMs, error: updated.error });
+        return send(updated.status || 400, { error: updated.error });
+      }
+      emitAudit({ providerId: payload.providerId, action: 'updateProvider', result: 'ok', latencyMs });
+      return send(200, { ok: true, provider: updated.provider, providers: updated.providers });
+    }
+
+    return send(404, { error: 'Não encontrado.' });
+  };
+}
+
+/**
+ * Handler multi-tenant de seleção, listagem, importação e exportação de personagens
+ * (`GET /api/characters`, `GET/POST /api/characters/active`,
+ * `POST /api/characters/import-card`, `GET /api/characters/:id/export-card`).
  */
 export function createCharactersHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
@@ -2248,7 +2617,10 @@ export function createCharactersHandler(options = {}) {
     if (denyWithoutToken(req, options, send)) return;
 
     const registry = options.characterRegistry || resolveActiveRegistry(options);
-    const route = new URL(req.url || '/api/characters', 'http://127.0.0.1:8787').pathname;
+    const parsedUrl = new URL(req.url || '/api/characters', 'http://127.0.0.1:8787');
+    const route = parsedUrl.pathname;
+    const activeDataDir = options.dataDir
+      || (typeof registry.getDataDir === 'function' ? registry.getDataDir() : resolveDataDir());
 
     if (req.method === 'GET' && route === '/api/characters') {
       return send(200, {
@@ -2297,6 +2669,104 @@ export function createCharactersHandler(options = {}) {
         ok: true,
         characterId: activated.context.characterId,
         manifest: activated.context.manifest,
+      });
+    }
+
+    if (req.method === 'POST' && route === '/api/characters/import-card') {
+      const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      let rawCard = null;
+      let detectedFormat = null;
+      let shouldActivate = parsedUrl.searchParams.get('activate') !== 'false';
+
+      if (contentType === 'image/png') {
+        const readBin = await readRequestBinary(req, { limit: MAX_CARD_PNG_BYTES });
+        if (!readBin.ok) return send(413, { error: 'Imagem PNG excede o limite de 5 MB.' });
+        const extracted = extractCardFromPng(readBin.buffer);
+        if (!extracted.ok) return send(400, { error: extracted.error });
+        rawCard = extracted.card;
+        detectedFormat = extracted.format;
+      } else if (contentType === 'application/json') {
+        const read = await readRequestBody(req, { limit: MAX_CARD_PNG_BYTES });
+        if (!read.ok) return send(413, { error: 'Pedido muito longo.' });
+        let payload;
+        try {
+          payload = JSON.parse(read.body);
+        } catch {
+          return send(400, { error: 'Corpo da requisição inválido (JSON esperado).' });
+        }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return send(400, { error: 'Corpo inválido.' });
+        }
+        if (payload.activate === false) shouldActivate = false;
+        if (payload.format === 'png_base64' && typeof payload.data === 'string') {
+          const cleanB64 = payload.data.replace(/^data:image\/png;base64,/i, '').trim();
+          const pngBuf = Buffer.from(cleanB64, 'base64');
+          const extracted = extractCardFromPng(pngBuf);
+          if (!extracted.ok) return send(400, { error: extracted.error });
+          rawCard = extracted.card;
+          detectedFormat = extracted.format;
+        } else {
+          rawCard = payload.card && typeof payload.card === 'object' ? payload.card : payload;
+        }
+      } else {
+        return send(403, { error: 'Content-Type inválido (use application/json ou image/png).' });
+      }
+
+      const normalized = normalizeCardToManifest(rawCard);
+      if (!normalized.ok) {
+        return send(400, { error: normalized.errors.join('; ') });
+      }
+
+      const saved = saveCharacterManifest(normalized.manifest, { dataDir: activeDataDir });
+      if (!saved.ok) {
+        return send(400, { error: saved.errors.join('; ') });
+      }
+
+      await registry.reload?.(saved.characterId);
+      let activated = false;
+      if (shouldActivate) {
+        const act = registry.setActive(saved.characterId);
+        activated = Boolean(act.ok);
+      }
+
+      return send(200, {
+        ok: true,
+        characterId: saved.characterId,
+        format: detectedFormat || normalized.format,
+        activated,
+        manifest: saved.manifest,
+      });
+    }
+
+    const exportMatch = CHARACTER_EXPORT_CARD_RE.exec(route);
+    if (req.method === 'GET' && exportMatch) {
+      const targetId = exportMatch[1];
+      const loaded = loadCharacterManifestSync(targetId, {
+        dataDir: activeDataDir,
+        fallbackToDefaultUsami: targetId === 'usami-classic',
+      });
+      if (!loaded.ok) {
+        return send(loaded.status || 404, { error: loaded.errors.join('; ') });
+      }
+
+      const format = (parsedUrl.searchParams.get('format') || 'json').toLowerCase();
+      if (format === 'png') {
+        const pngBuffer = embedCardInPng(loaded.manifest);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': String(pngBuffer.length),
+          'Content-Disposition': `attachment; filename="${targetId}.card.png"`,
+          'Cache-Control': 'no-store',
+        });
+        res.end(pngBuffer);
+        return;
+      }
+
+      return send(200, {
+        ok: true,
+        characterId: targetId,
+        format: 'usami_card_v1',
+        manifest: loaded.manifest,
       });
     }
 
@@ -3872,6 +4342,7 @@ export function createMediaAnalyzeHandler(options = {}) {
   const allowedOrigins = options.allowedOrigins || DEFAULT_ALLOWED_ORIGINS;
   const getKey = options.getKey || (async () => readEnvValue('NVIDIA_API_KEY'));
   const memoryStore = options.memoryStore || installMemoryStore;
+  const episodicMemory = resolveDefaultEpisodic(options);
   const personalityStore = options.personalityStore || installPersonalityStore;
   // Base64 + JSON.parse + frames multiplicam o payload em RAM: uma análise por
   // vez, fila curta. O limite é por BYTES lidos (48 MB de corpo JSON), não pelo
@@ -3926,9 +4397,8 @@ export function createMediaAnalyzeHandler(options = {}) {
     let personaPrompt = '';
     try {
       const mem = memoryStore.getAll?.() || {};
-      const today = new Date().toISOString().slice(0, 10);
-      const hour = new Date().getHours();
-      const timeOfDay = hour < 12 ? 'manhã' : hour < 18 ? 'tarde' : 'noite';
+      const requestNow = new Date();
+      const today = requestNow.toISOString().slice(0, 10);
       personaPrompt = buildPersona({
         affinity: mem.affinity?.score || 0,
         sections: memoryStore.getSections?.() || {},
@@ -3936,8 +4406,7 @@ export function createMediaAnalyzeHandler(options = {}) {
         history: memoryStore.getTodayHistory?.(today) || [],
         summaries: memoryStore.getSummaries?.().slice(-3) || [],
         username: mem.user?.nickname || 'você',
-        date: today,
-        timeOfDay,
+        now: requestNow,
         personality: personalityStore?.get?.(),
       });
     } catch {
@@ -3987,6 +4456,12 @@ export function createMediaAnalyzeHandler(options = {}) {
 
         memoryStore.appendHistory?.('user', userTurnContent, turnTimestamp);
         memoryStore.appendHistory?.('assistant', assistantTurnContent, turnTimestamp);
+        episodicMemory?.recordTurn({
+          userText: userTurnContent,
+          assistantText: assistantTurnContent,
+          ts: Date.parse(turnTimestamp) || Date.now(),
+          sessionId: 'media',
+        });
 
         const factText = `Compartilhou ${mediaTypeLabel.toLowerCase()} "${filename || 'mídia'}": ${visualSummary.slice(0, 180)}`;
         memoryStore.addRecentFact?.(factText, 7, 'other');
@@ -4133,7 +4608,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // O handler consolidado preserva a persona, memória e afinidade no prompt.
   // O FlowExecutor segue coberto por testes enquanto essa paridade completa é
   // finalizada, sem trocar comportamento real por um pipeline parcial.
-  const handleChat = createChatHandler({ agentCore: installAgentCore });
+  const handleChat = createChatHandler({ agentCore: installAgentCore, toolMetrics });
   const handleAgentTurn = createAgentTurnHandler();
   const handleSelf = createSelfHandler();
   const handleSuggestions = createSuggestionsHandler();
@@ -4144,9 +4619,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const handleN8nCommand = createN8nCommandHandler();
   const handleChatActivity = createChatActivityHandler();
   const handleRagContext = createRagContextHandler();
-  const handleMemory = createMemoryHandler();
+  const handleMemory = createMemoryHandler({ episodicMemory: installEpisodicMemory });
   const handleBond = createBondHandler();
   const handleCharacters = createCharactersHandler();
+  const handleProviderSettings = createProviderSettingsHandler();
   const handleOperationalMemory = createOperationalMemoryHandler();
   const handleTools = createToolHandler({ gate: installToolGate, skillCatalog: installSkillCatalog });
   const handlePlans = createPlansHandler();
@@ -4177,6 +4653,60 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       res.end(JSON.stringify({ ok: true, presence: sharedDiscordPresence.getStatus() }));
       return;
     }
+
+    // Discord integration health check
+    if (req.method === 'GET' && req.url === '/api/discord/health') {
+      const ds = sharedDiscordPresence.getStatus();
+
+      // Tenta buscar métricas do discord-bridge (se rodando na mesma rede)
+      let bridgeMetrics = null;
+      const bridgeUrl = process.env.DISCORD_BRIDGE_METRICS_URL || 'http://nyarch:3001/metrics';
+      try {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 2000);
+        const resp = await fetch(bridgeUrl, { signal: ctrl.signal });
+        clearTimeout(timeout);
+        if (resp.ok) {
+          bridgeMetrics = await resp.json();
+        }
+      } catch {
+        // Bridge não disponível ou timeout - ignora silenciosamente
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        ok: true,
+        discord: {
+          richPresence: {
+            active: ds.active,
+            connected: ds.connected,
+            user: ds.user ? { username: ds.user.username, id: ds.user.id } : null,
+            currentPipeIndex: ds.currentPipeIndex,
+            sessionStartTime: ds.sessionStartTime,
+            affinityStage: ds.affinityStage,
+            emotion: ds.emotion,
+          },
+          bridge: bridgeMetrics?.bridge ? {
+            status: bridgeMetrics.ok ? 'healthy' : 'degraded',
+            uptimeMs: bridgeMetrics.bridge.uptimeMs,
+            messagesReceived: bridgeMetrics.bridge.messagesReceived,
+            messagesProcessed: bridgeMetrics.bridge.messagesProcessed,
+            messagesFailed: bridgeMetrics.bridge.messagesFailed,
+            slashCommandsReceived: bridgeMetrics.bridge.slashCommandsReceived,
+            slashCommandsSucceeded: bridgeMetrics.bridge.slashCommandsSucceeded,
+            slashCommandsFailed: bridgeMetrics.bridge.slashCommandsFailed,
+            avgWebhookLatencyMs: bridgeMetrics.bridge.avgWebhookLatencyMs,
+            recentErrors: bridgeMetrics.bridge.recentErrors,
+          } : {
+            status: 'external',
+            metricsUrl: bridgeUrl,
+          },
+        },
+        timestamp: new Date().toISOString(),
+      }));
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/api/presence') {
       const read = await readRequestBody(req, { limit: 4096 });
       if (!read.ok) {
@@ -4205,7 +4735,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
       const served = await handleAvatarStatic(req, res);
       if (served) return;
     }
-    if (req.url === '/api/characters' || req.url === '/api/characters/active') return handleCharacters(req, res);
+    if (req.url === '/api/characters' || req.url.startsWith('/api/characters/')) return handleCharacters(req, res);
+    if (req.url === '/api/settings/providers' || req.url.startsWith('/api/settings/providers')) return handleProviderSettings(req, res);
     if (req.method === 'POST' && req.url === '/api/chat') return handleChat(req, res);
     if (req.method === 'GET' && req.url === '/api/chat/activity') return handleChatActivity(req, res);
     if (req.method === 'POST' && req.url === '/api/media/analyze') return handleMediaAnalyze(req, res);
@@ -4219,7 +4750,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     if (req.url === '/api/memory' || req.url === '/api/memory/forget' || req.url === '/api/memory/maintenance') return handleMemory(req, res);
     if (req.url === '/api/bond' || req.url === '/api/bond/event' || req.url === '/api/bond/import' || req.url === '/api/bond/reset') return handleBond(req, res);
     if (req.method === 'GET' && req.url === '/api/achievements') return handleAchievements(req, res);
-    if (req.url === '/api/personality') return handlePersonality(req, res);
+    if (req.url === '/api/personality' || req.url === '/api/personality/presets' || req.url === '/api/personality/preset') return handlePersonality(req, res);
     if (req.url === '/api/mood' || req.url === '/api/mood/event' || req.url === '/api/mood/reset') return handleMood(req, res);
     if (req.url === '/api/technique' || req.url === '/api/techniques' || req.url === '/api/technique/note'
       || req.url.startsWith('/api/technique?') || req.url.startsWith('/api/techniques?')) return handleTechnique(req, res);
@@ -4270,4 +4801,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   });
   const bindHost = process.env.USAMI_API_HOST || readEnvValue('USAMI_API_HOST') || '0.0.0.0';
   server.listen(8787, bindHost, () => console.log(`Usami API escutando em ${bindHost}:8787`));
+  // Fora do caminho de resposta: o primeiro chat não paga o ONNX/LanceDB.
+  installEpisodicMemory.warmUp().catch(() => {});
 }

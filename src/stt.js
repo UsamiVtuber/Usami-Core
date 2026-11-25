@@ -61,6 +61,23 @@ function stopActiveWorker() {
   activeWorker = null;
 }
 
+// O worker é persistente de propósito (modelo quente), mas não pode segurar o
+// event loop quando não há transcrição em curso: sem isso, qualquer processo
+// que use o STT e não tenha outro handle (teste/CLI) nunca encerra. Durante a
+// requisição os pipes voltam a segurar o processo.
+function setWorkerRef(worker, referenced) {
+  if (!worker || worker.closed) return;
+  const targets = [worker.child, worker.child.stdin, worker.child.stdout, worker.child.stderr];
+  for (const target of targets) {
+    try {
+      if (referenced) target?.ref?.();
+      else target?.unref?.();
+    } catch {
+      // stream já encerrado: nada a fazer
+    }
+  }
+}
+
 function getOrStartWorker(modelName) {
   if (activeWorker && activeWorker.modelName === modelName && !activeWorker.closed) {
     return activeWorker;
@@ -201,6 +218,7 @@ export async function transcribeAudio({ audioPath, modelName = resolveWhisperMod
 
   const run = async () => {
     const worker = getOrStartWorker(model);
+    setWorkerRef(worker, true);
     let timer = null;
     const timeoutPromise = new Promise((_, reject) => {
       timer = setTimeout(() => {
@@ -233,6 +251,7 @@ export async function transcribeAudio({ audioPath, modelName = resolveWhisperMod
       return String(res.text || '').trim();
     } finally {
       if (timer) clearTimeout(timer);
+      if (activeWorker === worker && worker.pending.size === 0) setWorkerRef(worker, false);
     }
   };
 

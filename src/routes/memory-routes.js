@@ -5,6 +5,7 @@
 
 import { readRagContext, resolveVaultDir } from '../rag.js';
 import { TRAITS, CUSTOM_PROMPT_MAX, normalizePersonality } from '../personality-store.js';
+import { PERSONALITY_PRESETS, applyPersonalityPresetToStore } from '../character-card.js';
 import { MEMORY_SECTIONS } from '../memory-store.js';
 import { summarizePendingDays } from '../memory-summaries.js';
 import { consolidateFacts } from '../memory-consolidation.js';
@@ -168,15 +169,28 @@ export function createPersonalityHandler(options = {}) {
     }
     if (denyWithoutToken(req, options, send)) return;
 
-    if (req.url !== '/api/personality') return send(404, { error: 'Não encontrado.' });
+    const route = new URL(req.url || '/api/personality', 'http://127.0.0.1:8787').pathname;
+    if (route !== '/api/personality' && route !== '/api/personality/presets' && route !== '/api/personality/preset') {
+      return send(404, { error: 'Não encontrado.' });
+    }
+
+    if (req.method === 'GET' && route === '/api/personality/presets') {
+      return send(200, { ok: true, presets: PERSONALITY_PRESETS });
+    }
 
     const resolved = resolveTenantContext(req, options, hasExplicitStore);
     if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
     const store = resolved.ctx?.personalityStore || fallbackStore;
     if (!store) return send(500, { error: 'PersonalityStore não inicializado.' });
 
-    if (req.method === 'GET') {
-      return send(200, { ok: true, personality: store.get(), traits, customPromptMax: CUSTOM_PROMPT_MAX });
+    if (req.method === 'GET' && route === '/api/personality') {
+      return send(200, {
+        ok: true,
+        personality: store.get(),
+        traits,
+        presets: PERSONALITY_PRESETS,
+        customPromptMax: CUSTOM_PROMPT_MAX,
+      });
     }
     if (req.method !== 'POST') return send(404, { error: 'Não encontrado.' });
 
@@ -193,6 +207,18 @@ export function createPersonalityHandler(options = {}) {
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       return send(400, { error: 'Corpo inválido.' });
+    }
+
+    if (route === '/api/personality/preset') {
+      const presetId = typeof payload.presetId === 'string' ? payload.presetId.trim() : '';
+      if (!presetId) return send(400, { error: 'presetId é obrigatório.' });
+      try {
+        const applied = applyPersonalityPresetToStore(store, presetId);
+        if (!applied.ok) return send(400, { error: applied.error });
+        return send(200, { ok: true, presetId: applied.preset.id, preset: applied.preset, personality: applied.personality });
+      } catch {
+        return send(500, { error: 'Não foi possível aplicar o preset de personalidade.' });
+      }
     }
 
     try {
@@ -230,10 +256,19 @@ export function createMemoryHandler(options = {}) {
     if (resolved.errorStatus) return send(resolved.errorStatus, { error: resolved.errorMessage });
     const store = resolved.ctx?.memoryStore || fallbackStore;
     const bond = resolved.ctx?.bondStore ?? fallbackBond;
+    const episodic = resolved.ctx?.episodicMemory || options.episodicMemory || null;
     if (!store) return send(500, { error: 'MemoryStore não inicializado.' });
 
     if (req.method === 'GET' && req.url === '/api/memory') {
-      return send(200, { ok: true, memory: memorySnapshot(store) });
+      let episodes = 0;
+      if (episodic) {
+        try {
+          episodes = await episodic.count();
+        } catch {
+          // índice ainda não inicializado: reporta 0
+        }
+      }
+      return send(200, { ok: true, memory: memorySnapshot(store), episodes });
     }
 
     if (req.method === 'POST' && req.url === '/api/memory/maintenance') {
@@ -260,6 +295,19 @@ export function createMemoryHandler(options = {}) {
         console.warn('[maintenance] getVaultIndex refresh falhou:', err?.message || err);
       }
 
+      let episodicCount = 0;
+      let episodicPruned = null;
+      if (episodic) {
+        try {
+          await episodic.flush();
+          await episodic.backfill(store.getAll()?.dailyHistory || {});
+          episodicPruned = await episodic.prune({});
+          episodicCount = await episodic.count();
+        } catch (err) {
+          console.warn('[maintenance] memória episódica falhou:', err?.message || err);
+        }
+      }
+
       let lanceDbCount = 0;
       const provider = resolved.ctx?.memoryProvider || null;
       if (!provider || provider.isEnabled()) {
@@ -282,6 +330,8 @@ export function createMemoryHandler(options = {}) {
         maintenanceAt: new Date().toISOString(),
         today,
         lanceDbChunks: lanceDbCount,
+        episodicEpisodes: episodicCount,
+        episodicPruned,
         memory: memorySnapshot(store),
       });
     }
