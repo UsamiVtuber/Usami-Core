@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { classifyIntentWithLlm, generateReplyWithTools } from '../src/llm-router.js';
 import { createToolRegistry } from '../src/tool-registry.js';
 import { selectTopKTools } from '../src/tool-selector.js';
+import { createPermissionGate } from '../src/permission-gate.js';
+import { createToolExecutor } from '../src/tool-executor.js';
+import { createTaskPlanner } from '../src/task-planner.js';
+import { createAgentCore } from '../src/agent-core.js';
+import { AGENT_SCHEMAS } from '../src/agent-contracts.js';
 
 test('classifyIntentWithLlm: classifica intenções operacional, conversa e complexa com mock client', async () => {
   const mockTools = [
@@ -259,6 +267,25 @@ test('generateReplyWithTools: preserva resposta longa (>220 chars) e títulos em
             content: JSON.stringify({ reply: longReply, gesture: 'tilt', actions: [] }),
           },
         }],
+test('classifyIntentWithLlm: inclui todas as ferramentas além da 30ª com suas descrições', async () => {
+  const prevKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'mock-key';
+  const manyTools = Array.from({ length: 35 }, (_, i) => ({
+    name: `dummy.tool_${i + 1}`,
+    description: `Ferramenta auxiliar ${i + 1}`,
+  }));
+  manyTools.push({
+    name: 'spotify.control',
+    description: 'Controla a reprodução no Spotify: play, pause, next, previous, volume ou shuffle.',
+  });
+
+  let capturedSystem = '';
+  const mockClient = {
+    chatJson: async ({ messages }) => {
+      capturedSystem = messages[0]?.content || '';
+      return {
+        content: '{"kind":"operational","goal":"Tocar Where the Wild Things Are","tool":"spotify.control","confidence":0.94}',
+        reasoning: '',
       };
     },
   };
@@ -287,8 +314,64 @@ test('generateReplyWithTools: preserva resposta longa (>220 chars) e títulos em
     assert.match(res.reply, /1\. sleep-mode —/);
     assert.match(res.reply, /2\. coop-games —/);
     assert.match(res.reply, /3\. study-buddy —/);
+    const res = await classifyIntentWithLlm({
+      message: 'coloca where the wilds thing are pra mim pfv',
+      tools: manyTools,
+      client: mockClient,
+    });
+    assert.equal(res.kind, 'operational');
+    assert.equal(res.tool, 'spotify.control');
+    assert.match(capturedSystem, /spotify\.control: Controla a reprodução no Spotify/);
   } finally {
     if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
     else delete process.env.NVIDIA_API_KEY;
+  }
+});
+
+test('agent-core: deferLlmIntentToNative delega intenção classificada pelo LLM ao tool calling nativo sem regex', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'usami-intent-defer-'));
+  try {
+    const registry = createToolRegistry();
+    registry.register({
+      schema: AGENT_SCHEMAS.tool,
+      name: 'spotify.control',
+      version: '1.0.0',
+      description: 'Controla a reprodução no Spotify: play, pause, next, previous.',
+      origin: 'skill',
+      permissionLevel: 3,
+      timeoutMs: 5000,
+      parameters: [{ name: 'action', type: 'string', required: true }],
+      verify: r => r?.ok === true,
+      execute: async () => {
+        throw new Error('Não deve executar via buildArgs regex quando deferLlmIntentToNative=true');
+      },
+    });
+    const gate = createPermissionGate({ registry, dataDir: dir, onLoadError: () => {} });
+    gate.load();
+    const executor = createToolExecutor({ registry, gate, dataDir: dir, onLoadError: () => {} });
+    executor.load();
+    const planner = createTaskPlanner({ dataDir: dir, onLoadError: () => {} });
+    planner.load();
+
+    let seenTools = [];
+    const agentCore = createAgentCore({
+      registry,
+      executor,
+      planner,
+      classifyWithLlm: async ({ tools }) => {
+        seenTools = tools;
+        return { kind: 'operational', goal: 'Tocar faixa', tool: 'spotify.control', confidence: 0.93 };
+      },
+      onError: () => {},
+    });
+
+    const turn = await agentCore.runOperationalForChat('coloca where the wilds thing are pra mim pfv', {
+      deferLlmIntentToNative: true,
+    });
+    assert.equal(turn.deferred, true);
+    assert.equal(turn.tool, 'spotify.control');
+    assert.ok(seenTools.some(t => t.name === 'spotify.control' && /Controla a reprodução/.test(t.description || '')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

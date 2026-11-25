@@ -30,6 +30,12 @@ const FINANCE_ACCOUNTS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|ch
 const FINANCE_TX_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|como\s+(?:esta|ta)|quais|quanto)\b.*\b(?:transacoes|extrato|gastos|despesas|compras|movimentacoes|gastei|fatura)\b|\b(?:meu\s+extrato|meus\s+gastos|minhas\s+transacoes)\b/;
 const RESEARCH_SEARCH_RE = /\b(?:pesquis\w*|busc\w*|procur\w*)\s+(?:na\s+web|na\s+internet|online|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*)\b.*\b(?:na\s+web|na\s+internet|via\s+(?:tinyfish|firecrawl))\b|\b(?:pesquis\w*|busc\w*|procur\w*|ach\w*|veja|ver|v[eê]|traz\w*|traga|trouxe|quais(?:\s+as)?|tem|saiu)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:noticias?|manchetes?|novidades?(?:\s+(?:de|sobre|do|da|em|no|na)))\b|\b(?:noticias?|manchetes?)\b(?!.*\b(?:e-?mails?|gmail|agenda|calendario|git|memoria)\b).*\b(?:ver|v[eê]|veja|pesquis\w*|bus(?:c|qu)\w*|procur\w*|ach\w*|mostr\w*)\b|\b(?:pesquis\w*|googl\w*)\s+(?:sobre|por|a\s+respeito\s+de)\s+(?!.*\b(?:memoria|fatos|historico|resumos?|mim|eu|meu|minha|e-?mails?|gmail|agenda|calendario|arquivo|codigo|git|repo(?:sitorio)?)\b).+/;
 const RESEARCH_FETCH_RE = /\b(?:extrai\w*|ler|scrape|fetch)\b.*\bhttps?:\/\/\S+/;
+// Link compartilhado: sem verbo explícito de extração, o comportamento
+// esperado é abrir a página — não tratá-la como se fosse só texto.
+const URL_RE = /https?:\/\/[^\s<>"'`]+/i;
+const DISCORD_ENVELOPE_RE = /^\[Discord\s*\|[^\]]+\]:\s*/i;
+const LINK_READ_VERB_RE = /\b(?:extrai\w*|ler|leia|scrape|fetch|abr\w*|acess\w*|olh\w*|veja|ver|v[eê]|confer\w*|chec\w*|resum\w*|explic\w*|analis\w*|coment\w*|avali\w*)\b/;
+const LINK_CONTEXT_FILLER_RE = /\b(?:olha|olhe|veja|ver|v[eê]|confere|confira|checa|cheque|d[aá]|uma|olhada|nisso|nessa|nesse|isso|isto|aqui|link|url|segue|manda|mande|mandando|compartilhando|achei|encontrei|encontrado|s[oó]|ai|a[ií]|mano|usami|ei|oi|por favor|pfv|que|esse|essa|este|esta|um|uma|o|a|os|as|de|do|da|dos|das|em|no|na|nos|nas|pra|para|pro|mim|te|vc|voc[eê]|tu)\b/gi;
 const GIT_LOG_RE = /\b(?:commits?|historico|log)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?)\b|\b(?:ultimos?|recentes?)\s+commits?\b|\bcommit\s+[a-f0-9]{4,40}\b|\b(?:como\s+ficou|o\s+que\s+(?:mudou|foi\s+feito|foi\s+alterado))\s+(?:no\s+c[oó]digo|no\s+repo|no\s+git|no\s+projeto)\b|\b(?:olha|veja?|da\s+uma\s+olhada)\s+(?:no\s+c[oó]digo|nos\s+commits?|no\s+refactor|no\s+commit)\b/i;
 const GIT_DIFF_RE = /\b(?:diff|mudancas?|alteracoes)\s+(?:do\s+|no\s+)?(?:git|repo(?:sitorio)?|locais?|pendentes?)\b|\bo que (?:esta|tem) (?:modificado|alterado)\b/;
 const GITHUB_REPOS_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|quais(?:\s+sao)?|como\s+(?:esta|ta|estao))\b.*\b(?:repositorios?(?:\s+(?:no\s+|do\s+)?github)?|github)\b|\b(?:meus\s+repositorios?|repositorios?\s+do\s+github)\b/;
@@ -220,6 +226,107 @@ export function classifyDeterministic(message, { toolNames = [] } = {}) {
     kind: 'conversation',
     confidence: looksVagueQuestion ? 0.55 : 0.78,
     ambiguous: looksVagueQuestion,
+  };
+}
+
+/**
+ * Classificação unificada de intenção: combina determinístico + LLM opcional.
+ * 
+ * Este é o ponto de entrada único para classificação de intenção, substituindo
+ * o uso separado de `classifyDeterministic` e `classifyIntentWithLlm`.
+ * 
+ * @param {string} message - Mensagem do usuário
+ * @param {Object} options
+ * @param {Function} options.classifyWithLlm - Função LLM opcional (ex: classifyIntentWithLlm)
+ * @param {string[]} options.toolNames - Nomes das ferramentas disponíveis para matching
+ * @param {AbortSignal} options.signal - Sinal de abortamento
+ * @param {number} options.turnDeadlineMs - Prazo máximo para classificação LLM
+ * @param {Function} options.now - Função de timestamp (para testes)
+ * @param {Function} options.onError - Callback de erro
+ * @returns {Promise<{intent, matchedToolName, deterministic, llmDecision?}>}
+ */
+export async function classifyIntentUnified(message, options = {}) {
+  const {
+    classifyWithLlm = null,
+    toolNames = [],
+    tools = null,
+    forceLlm = false,
+    signal = null,
+    turnDeadlineMs = 8000,
+    now = Date.now,
+    onError = console.warn,
+  } = options;
+
+  const clean = collapseText(message);
+  const resolvedToolNames = Array.isArray(tools) && tools.length > 0
+    ? tools.map(t => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
+    : toolNames;
+  const deterministic = classifyDeterministic(clean, { toolNames: resolvedToolNames });
+
+  // Fast path: se não é ambíguo (e não foi forçado) OU não tem LLM, usa só determinístico
+  if ((!deterministic.ambiguous && !forceLlm) || typeof classifyWithLlm !== 'function') {
+    return {
+      intent: buildIntent({
+        kind: deterministic.kind,
+        goal: clean,
+        confidence: deterministic.confidence,
+        origin: 'classifier',
+        now,
+      }),
+      matchedToolName: deterministic.matchedToolName || null,
+      deterministic,
+      llmDecision: null,
+    };
+  }
+
+  // Caso ambíguo com LLM disponível: roda LLM com timeout
+  const llmAbort = new AbortController();
+  const llmTimer = setTimeout(() => llmAbort.abort(), turnDeadlineMs);
+  try {
+    const llmSignal = signal ? AbortSignal.any([signal, llmAbort.signal]) : llmAbort.signal;
+    const llmTools = Array.isArray(tools) && tools.length > 0
+      ? tools.map(t => (typeof t === 'string' ? { name: t } : { name: t?.name, description: t?.description }))
+      : toolNames.map(name => ({ name }));
+    const llmDecision = await classifyWithLlm({
+      message: clean,
+      tools: llmTools,
+      signal: llmSignal,
+    });
+    if (isPlainObject(llmDecision) && INTENT_KINDS.includes(llmDecision.kind)) {
+      const confidence = typeof llmDecision.confidence === 'number' && Number.isFinite(llmDecision.confidence)
+        ? Math.min(Math.max(llmDecision.confidence, 0), 1)
+        : AMBIGUITY_CONFIDENCE_THRESHOLD;
+      return {
+        intent: buildIntent({
+          kind: llmDecision.kind,
+          goal: typeof llmDecision.goal === 'string' && llmDecision.goal.trim() ? llmDecision.goal : clean,
+          confidence,
+          origin: 'llm',
+          now,
+        }),
+        matchedToolName: typeof llmDecision.tool === 'string' ? llmDecision.tool : null,
+        deterministic,
+        llmDecision,
+      };
+    }
+  } catch (error) {
+    onError(`Aviso: classificador LLM falhou (${error?.message || error}); usando fallback determinístico.`);
+  } finally {
+    clearTimeout(llmTimer);
+  }
+
+  // Fallback para determinístico
+  return {
+    intent: buildIntent({
+      kind: deterministic.kind,
+      goal: clean,
+      confidence: deterministic.confidence,
+      origin: 'classifier',
+      now,
+    }),
+    matchedToolName: null,
+    deterministic,
+    llmDecision: null,
   };
 }
 
@@ -422,12 +529,29 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     buildArgs: () => ({ limit: 15 }),
   },
   {
+    toolName: 'spotify.similar',
+    matches: normalized => /\b(?:semelhante|semelhantes|parecida|parecidas|parecido|parecidos|similar|similares)\b/.test(normalized)
+      && (/\b(?:musica|musicas|som|tocar|ouvir|artista|banda|spotify|playlist)\b/.test(normalized) || /\b(?:dele|dela|deles)\b/.test(normalized)),
+    buildArgs: (message, normalized) => {
+      const match = /\b(?:semelhante[s]?\s+a[os]?|parecida[s]?\s+com|parecido[s]?\s+com|estilo)\s+([^,?.!]+)/i.exec(message);
+      let artist = match ? match[1].trim() : '';
+      if (!artist || /\b(?:ele|ela|dele|dela)\b/i.test(artist)) {
+        const artistMatch = /\b(?:do|da|artista|cantor[a]?)\s+([A-Z][a-zA-Z0-9_\s]+)/.exec(message);
+        if (artistMatch) artist = artistMatch[1].trim();
+      }
+      return { artist: artist || 'Omar Varela', play: true, limit: 10 };
+    },
+  },
+  {
     toolName: 'spotify.search',
     matches: normalized => SPOTIFY_SEARCH_RE.test(normalized),
     buildArgs: message => {
       const clean = collapseText(message)
+        .replace(/^\[[^\]]{1,60}\]:\s*/, '')
         .replace(/^(?:usami[,\s]+)?(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\s+(?:por\s+|a\s+musica\s+|musica\s+)?/i, '')
         .replace(/\b(?:no|do)\s+spotify\b/gi, '')
+        .replace(/\b(?:pra|para)\s+mim\b/gi, '')
+        .replace(/\bpor\s+favor\b/gi, '')
         .replace(/[?!.]+$/, '')
         .trim();
       return { query: clean.slice(0, 180) || collapseText(message).slice(0, 180), type: 'track', limit: 5 };
@@ -448,8 +572,11 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
         return { action: 'volume', volumePercent: Math.min(100, Math.max(0, Number(volMatch[1]))) };
       }
       const clean = collapseText(message)
+        .replace(/^\[[^\]]{1,60}\]:\s*/, '')
         .replace(/^(?:(?:por\s+favor|usami|ei|oi)[,\s]+)*(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da\s+play|play)\s+(?:a\s+musica\s+|musica\s+)?/i, '')
         .replace(/\b(?:no|na|do)\s+spotify\b/gi, '')
+        .replace(/\b(?:pra|para)\s+mim\b/gi, '')
+        .replace(/\bpor\s+favor\b/gi, '')
         .replace(/[?!.]+$/, '')
         .trim();
       const genericOnly = /^(?:uma?\s+musica|musica|som|algo|qualquer\s+coisa)?$/i.test(clean);
@@ -611,6 +738,32 @@ export function isDeferredToolPromise(text) {
   return DEFERRED_TOOL_PROMISE_RE.test(normalizeText(text));
 }
 
+/**
+ * Detecta resposta curta de confirmação ("sim", "pode sim") quando a última
+ * fala da Usami terminou em pergunta. Sem isso o LLM recebe um "sim" solto,
+ * sem saber a que ele responde, e perde o fio da conversa.
+ */
+export function detectConfirmationFollowUp(message, history) {
+  const clean = stripDiscordEnvelope(message);
+  if (!clean) return null;
+  const normalizedReply = normalizeText(clean.replace(/[?!.]+$/, ''));
+  if (!CONFIRMATION_REPLY_RE.test(normalizedReply)) return null;
+  if (!Array.isArray(history) || history.length === 0) return null;
+  let lastAssistant = '';
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const item = history[i];
+    if (item?.role === 'assistant' && typeof item.content === 'string') {
+      const content = collapseText(item.content);
+      if (content) {
+        lastAssistant = content;
+        break;
+      }
+    }
+  }
+  if (!lastAssistant || !lastAssistant.includes('?')) return null;
+  return { previousReply: lastAssistant.slice(-400) };
+}
+
 function buildResearchQuery(message) {
   const clean = collapseText(message)
     .replace(/[?!.]\s*(?:vou\s+dar\s+uma\s+olhada|espera\s+a[ií]|aguarde).*$/i, '')
@@ -632,28 +785,77 @@ function buildResearchQuery(message) {
 
 const isScheduleGoal = normalized => /\b(semana|agenda|cronograma|tarefas?|compromissos?|prioriz\w*|conflit\w*|rotina)\b/.test(normalized);
 
-function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
+// O bridge do Discord entrega "[Discord | Nome]: texto". O envelope não faz
+// parte da fala do usuário e quebra regexes ancoradas (confirmação, "sim").
+function stripDiscordEnvelope(message) {
+  return collapseText(message).replace(DISCORD_ENVELOPE_RE, '');
+}
+
+function hasWriteActionIntent(normalized) {
+  return GITHUB_ISSUE_RE.test(normalized)
+    || GITHUB_CREATE_REPO_RE.test(normalized)
+    || CODE_PROPOSE_RE.test(normalized)
+    || CALENDAR_CREATE_RE.test(normalized);
+}
+
+// Link compartilhado num pedido de leitura ("olha essa issue <url>") deve
+// abrir a página. Ações de escrita que citam um link (criar issue com ele)
+// continuam indo para a ferramenta de escrita.
+function isSharedLinkReadIntent(message) {
+  const clean = stripDiscordEnvelope(message);
+  if (!URL_RE.test(clean)) return false;
+  const normalized = normalizeText(clean);
+  if (hasWriteActionIntent(normalized)) return false;
+  if (RESEARCH_FETCH_RE.test(clean)) return true;
+  const withoutUrls = clean.replace(new RegExp(URL_RE.source, 'gi'), ' ');
+  const leftover = normalizeText(withoutUrls)
+    .replace(LINK_CONTEXT_FILLER_RE, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (leftover.length < 4) return true;
+  return LINK_READ_VERB_RE.test(normalizeText(withoutUrls));
+}
+
+function resolveToolCall(message, registry, toolMatchers, hintedToolName, isToolActive = () => true, metrics = null) {
   const calls = resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive);
+  
+  // Record tool selection metrics
+  if (metrics) {
+    const totalAvailable = registry.names().filter(isToolActive).length;
+    metrics.recordToolSelection(message, calls.length, totalAvailable, false); // cacheHit = false for now
+  }
+  
   return calls.length > 0 ? calls[0] : null;
 }
 
 function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToolActive = () => true) {
-  const normalized = normalizeText(message);
+  const clean = stripDiscordEnvelope(message);
+  const normalized = normalizeText(clean);
   const matched = [];
   const seen = new Set();
+
+  // Link compartilhado para leitura é exclusivo: "olha essa issue <url>" não
+  // pode virar github.repos só porque a URL contém "github". A exceção é
+  // quando o próprio usuário nomeia a ferramenta.
+  const linkRead = isSharedLinkReadIntent(clean);
+  const explicitlyNamesHint = Boolean(hintedToolName) && normalized.includes(hintedToolName.toLowerCase());
+  if (linkRead && !explicitlyNamesHint && registry.has('research.fetch') && isToolActive('research.fetch')) {
+    const fetchMatcher = toolMatchers.find(item => item.toolName === 'research.fetch');
+    if (fetchMatcher) return [{ toolName: 'research.fetch', args: fetchMatcher.buildArgs(clean) }];
+  }
 
   if (hintedToolName && registry.has(hintedToolName) && isToolActive(hintedToolName)) {
     const matcher = toolMatchers.find(item => item.toolName === hintedToolName);
     if (matcher) {
-      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(message) });
+      matched.push({ toolName: hintedToolName, args: matcher.buildArgs(clean, normalized) });
       seen.add(hintedToolName);
     } else {
-      const clean = collapseText(message).replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || collapseText(message);
+      const stripped = clean.replace(new RegExp(hintedToolName.replace('.', '\\.'), 'ig'), '').trim() || clean;
       const spec = registry.get(hintedToolName);
       const firstStringParam = spec?.parameters?.find(param => param.type === 'string' && param.required);
       matched.push({
         toolName: hintedToolName,
-        args: firstStringParam ? { [firstStringParam.name]: clean } : {},
+        args: firstStringParam ? { [firstStringParam.name]: stripped } : {},
       });
       seen.add(hintedToolName);
     }
@@ -663,7 +865,7 @@ function resolveToolCalls(message, registry, toolMatchers, hintedToolName, isToo
     if (seen.has(matcher.toolName)) continue;
     if (!registry.has(matcher.toolName) || !isToolActive(matcher.toolName)) continue;
     if (matcher.matches(normalized)) {
-      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(message) });
+      matched.push({ toolName: matcher.toolName, args: matcher.buildArgs(clean, normalized) });
       seen.add(matcher.toolName);
     }
   }
@@ -681,6 +883,7 @@ export function createAgentCore({
   turnLimit = DEFAULT_TURN_LIMIT,
   now = () => Date.now(),
   onError = message => console.error(message),
+  metrics = null, // instância de createToolMetrics() para observabilidade
 } = {}) {
   if (!registry || typeof registry.has !== 'function' || typeof registry.names !== 'function') {
     throw new Error('createAgentCore: registry é obrigatório.');
@@ -726,62 +929,26 @@ export function createAgentCore({
     return JSON.parse(JSON.stringify(entry));
   }
 
-  async function classifyIntent(message, { signal } = {}) {
-    const clean = collapseText(message);
-    const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
-
-    if (!deterministic.ambiguous || typeof classifyWithLlm !== 'function') {
-      return {
-        intent: buildIntent({
-          kind: deterministic.kind,
-          goal: clean,
-          confidence: deterministic.confidence,
-          origin: 'classifier',
-          now,
-        }),
-        matchedToolName: deterministic.matchedToolName || null,
-      };
+  async function classifyIntent(message, { signal, forceLlm = false } = {}) {
+    const result = await classifyIntentUnified(message, {
+      classifyWithLlm,
+      toolNames: registry.names(),
+      tools: typeof registry.list === 'function' ? registry.list() : null,
+      forceLlm,
+      signal,
+      turnDeadlineMs,
+      now,
+      onError,
+    });
+    
+    // Record intent classification metrics
+    if (metrics) {
+      metrics.recordIntentClassification(result.intent.kind, result.intent.origin);
     }
-
-    const llmAbort = new AbortController();
-    const llmTimer = setTimeout(() => llmAbort.abort(), turnDeadlineMs);
-    try {
-      const llmSignal = signal ? AbortSignal.any([signal, llmAbort.signal]) : llmAbort.signal;
-      const llmDecision = await classifyWithLlm({
-        message: clean,
-        tools: registry.list(),
-        signal: llmSignal,
-      });
-      if (isPlainObject(llmDecision) && INTENT_KINDS.includes(llmDecision.kind)) {
-        const confidence = typeof llmDecision.confidence === 'number' && Number.isFinite(llmDecision.confidence)
-          ? Math.min(Math.max(llmDecision.confidence, 0), 1)
-          : AMBIGUITY_CONFIDENCE_THRESHOLD;
-        return {
-          intent: buildIntent({
-            kind: llmDecision.kind,
-            goal: typeof llmDecision.goal === 'string' && llmDecision.goal.trim() ? llmDecision.goal : clean,
-            confidence,
-            origin: 'llm',
-            now,
-          }),
-          matchedToolName: typeof llmDecision.tool === 'string' ? llmDecision.tool : null,
-        };
-      }
-    } catch (error) {
-      onError(`Aviso: classificador LLM falhou no turno (${error?.message || error}); usando fallback determinístico.`);
-    } finally {
-      clearTimeout(llmTimer);
-    }
-
+    
     return {
-      intent: buildIntent({
-        kind: deterministic.kind,
-        goal: clean,
-        confidence: deterministic.confidence,
-        origin: 'classifier',
-        now,
-      }),
-      matchedToolName: null,
+      intent: result.intent,
+      matchedToolName: result.matchedToolName,
     };
   }
 
@@ -798,7 +965,7 @@ export function createAgentCore({
     }
 
     if (intent.kind === 'operational') {
-      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName, isToolActive);
+      const resolved = resolveToolCall(message, registry, toolMatchers, matchedToolName, isToolActive, metrics);
       if (!resolved) {
         return {
           id: turnId,
@@ -980,7 +1147,7 @@ export function createAgentCore({
   function findRecentSpecificToolMatch(recent, preferredTool = null, excludeIdx = -1) {
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       if (i === excludeIdx) continue;
-      const content = collapseText(recent[i]?.content);
+      const content = stripDiscordEnvelope(recent[i]?.content);
       if (!content) continue;
       const det = classifyDeterministic(content, { toolNames: registry.names() });
       const res = resolveToolCall(content, registry, toolMatchers, det.matchedToolName || null, isToolActive);
@@ -1007,7 +1174,7 @@ export function createAgentCore({
     if (lastAssistantIdx < 0) return null;
 
     const lastAssistantContent = collapseText(recent[lastAssistantIdx].content);
-    const normalizedReply = normalizeText(clean.replace(/[?!.]+$/, ''));
+    const normalizedReply = normalizeText(stripDiscordEnvelope(clean).replace(/[?!.]+$/, ''));
     if (!CONFIRMATION_REPLY_RE.test(normalizedReply)) return null;
     if (!ASSISTANT_OFFER_ACTION_RE.test(normalizeText(lastAssistantContent))) return null;
 
@@ -1027,20 +1194,31 @@ export function createAgentCore({
     return null;
   }
 
-  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null } = {}) {
-    const clean = collapseText(message);
+  async function runOperationalForChat(message, { origin = 'agent', timeoutMs = 8000, history = [], onToolStart = null, onToolEnd = null, deferLlmIntentToNative = false } = {}) {
+    const clean = stripDiscordEnvelope(message);
     if (!clean) return null;
     const deterministic = classifyDeterministic(clean, { toolNames: registry.names() });
-    let resolvedList = deterministic.kind === 'operational'
+    // Link para leitura não depende de o classificador verbo-dependente
+    // reconhecer a frase: "olha só a issue que achei <url>" é operacional.
+    const linkRead = isSharedLinkReadIntent(clean);
+    let resolvedList = (deterministic.kind === 'operational' || linkRead)
       ? resolveToolCalls(clean, registry, toolMatchers, deterministic.matchedToolName || null, isToolActive)
       : [];
     let intentGoal = clean;
     let intentConfidence = deterministic.confidence;
 
-    if (resolvedList.length === 0 && typeof classifyWithLlm === 'function') {
+    const isPureGreeting = /^(?:oi+|ola+|hey+|ei+|bom dia|boa tarde|boa noite|tudo bem|como vai|e ai|obrigad[oa]|valeu|vlw|tmj|beleza|blz|ok+|sim|nao|haha+|kkk+|rs+)[!?. ]*$/i.test(normalizeText(clean));
+    if (resolvedList.length === 0 && !isPureGreeting && typeof classifyWithLlm === 'function') {
       try {
-        const classified = await classifyIntent(clean);
+        const classified = await classifyIntent(clean, { forceLlm: true });
         if (classified?.intent?.kind === 'operational' && classified.matchedToolName) {
+          if (deferLlmIntentToNative && registry.has(classified.matchedToolName) && isToolActive(classified.matchedToolName)) {
+            return {
+              deferred: true,
+              intent: classified.intent,
+              tool: classified.matchedToolName,
+            };
+          }
           resolvedList = resolveToolCalls(clean, registry, toolMatchers, classified.matchedToolName, isToolActive);
           if (resolvedList.length > 0) {
             intentGoal = classified.intent.goal || clean;
@@ -1171,6 +1349,7 @@ export function createAgentCore({
 
   return {
     classifyIntent,
+    classifyIntentUnified,
     processTurn,
     runOperationalForChat,
     dispatchAsync,
@@ -1214,6 +1393,20 @@ function formatResearchSearchForPrompt(result) {
     count: Number(result.count ?? items.length),
     results: items,
     ...(result.partialErrors ? { partialErrors: result.partialErrors } : {}),
+  };
+}
+
+function formatResearchFetchForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  const pages = Array.isArray(result.pages) ? result.pages.slice(0, 2).map(page => ({
+    url: String(page?.url || '').slice(0, 200),
+    title: String(page?.title || '').slice(0, 160),
+    excerpt: String(page?.markdown || '').slice(0, 1200),
+  })) : [];
+  return {
+    providerUsed: result.providerUsed || null,
+    count: Number(result.count ?? pages.length),
+    pages,
   };
 }
 
@@ -1321,7 +1514,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
           ? (formatSelfDescribeForPrompt(sub.result) ?? sub.result ?? {})
           : toolName === 'research.search'
             ? (formatResearchSearchForPrompt(sub.result) ?? sub.result ?? {})
-            : toolName === 'github.repos'
+            : toolName === 'research.fetch'
+              ? (formatResearchFetchForPrompt(sub.result) ?? sub.result ?? {})
+              : toolName === 'github.repos'
               ? (formatGithubReposForPrompt(sub.result) ?? sub.result ?? {})
               : toolName === 'git.status'
                 ? (formatGitStatusForPrompt(sub.result) ?? sub.result ?? {})
@@ -1354,7 +1549,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       ? (formatSelfDescribeForPrompt(turn.result) ?? turn.result ?? {})
       : turn.tool === 'research.search'
         ? (formatResearchSearchForPrompt(turn.result) ?? turn.result ?? {})
-        : turn.tool === 'github.repos'
+        : turn.tool === 'research.fetch'
+          ? (formatResearchFetchForPrompt(turn.result) ?? turn.result ?? {})
+          : turn.tool === 'github.repos'
           ? (formatGithubReposForPrompt(turn.result) ?? turn.result ?? {})
           : turn.tool === 'git.status'
             ? (formatGitStatusForPrompt(turn.result) ?? turn.result ?? {})
@@ -1376,7 +1573,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       serialized = String(turn.result ?? '');
     }
     const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect';
-    const effectiveMaxChars = isDetailedIntrospection ? Math.max(maxChars, 4000) : maxChars;
+    const effectiveMaxChars = isDetailedIntrospection
+      ? Math.max(maxChars, 4000)
+      : (turn.tool === 'research.fetch' ? Math.max(maxChars, 2600) : maxChars);
     const clean = redactSecrets(serialized).slice(0, effectiveMaxChars);
     let toolInstruction = '';
     if (turn.tool === 'self.describe') {
@@ -1393,6 +1592,8 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       toolInstruction = ' Informe a branch e alterações pendentes com base nos dados obtidos acima.';
     } else if (turn.tool === 'code.inspect') {
       toolInstruction = ' Avalie e comente diretamente o conteúdo do código inspecionado acima.';
+    } else if (turn.tool === 'research.fetch') {
+      toolInstruction = ' A página do link foi lida agora: diga o que ela é e o ponto principal para o usuário, usando apenas o conteúdo extraído acima.';
     }
     const lengthRule = isDetailedIntrospection
       ? 'Responda IMEDIATAMENTE entregando os fatos reais obtidos acima de forma clara e detalhada (citando módulos, skills/ferramentas, integrações e limitações reais, sem inventar dados).'
@@ -1495,6 +1696,18 @@ export function formatExecutedTurnFallbackReply(turn) {
   if (turn.tool === 'spotify.control') {
     if (r.track?.name) return `Coloquei para tocar no Spotify: ${r.track.name}!`;
     return `Comando Spotify (${r.action || 'control'}) executado!`;
+  }
+  if (turn.tool === 'spotify.similar') {
+    const artist = r.artist || 'artista solicitado';
+    if (r.playing && Array.isArray(r.tracks) && r.tracks.length) {
+      const first = r.tracks[0];
+      const others = r.tracks.length - 1;
+      return `Coloquei músicas semelhantes a ${artist} para tocar no Spotify! Começando por "${first.name}"${first.artists?.length ? ` (${first.artists.join(', ')})` : ''}${others > 0 ? ` e mais ${others} na fila` : ''}.`;
+    }
+    if (Array.isArray(r.tracks) && r.tracks.length) {
+      return `Encontrei ${r.tracks.length} músicas semelhantes a ${artist}: ${r.tracks.slice(0, 3).map(t => t.name).join(', ')}.`;
+    }
+    return `Não consegui encontrar músicas semelhantes a ${artist} no momento.`;
   }
   if (turn.tool === 'spotify.stats') {
     const topTracks = Array.isArray(r.topTracks)

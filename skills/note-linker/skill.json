@@ -1,0 +1,29 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "note-linker",
+  "name": "Note Linker",
+  "version": "1.0.0",
+  "description": "Sistema de notas com links bidirecionais estilo wiki ([[link]]), backlinks, grafo de conhecimento, busca full-text e tags.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-18T00:00:00.000Z",
+  "tools": [
+    "note.upsert",
+    "note.get",
+    "note.search",
+    "note.link",
+    "note.backlinks",
+    "note.graph",
+    "note.tags",
+    "note.list",
+    "note.delete"
+  ],
+  "permissions": [1, 2, 3],
+  "dependencies": [],
+  "parameters": [],
+  "instructions": "Gerencie notas exclusivamente via store dedicado (notes.json). Suporte a links wiki [[Título]], backlinks automáticos, grafo de conexões, busca por texto/tags e exclusão com limpeza de backlinks. Não acesse sistemas de arquivos externos.",
+  "tests": {
+    "files": ["test/note-linker.test.mjs"],
+    "timeoutMs": 10000
+  }
+}

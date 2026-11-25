@@ -1,0 +1,40 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "habit-garden",
+  "name": "Habit Garden",
+  "version": "1.0.0",
+  "description": "Gerenciamento de hábitos com streaks, heatmap e sugestão de micro-hábitos atômicos usando memória operacional local.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-18T00:00:00.000Z",
+  "tools": [
+    "habit.upsert",
+    "habit.log",
+    "habit.streak",
+    "habit.heatmap",
+    "habit.suggest",
+    "habit.list"
+  ],
+  "permissions": [1, 2],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "defaultFrequency",
+      "type": "string",
+      "required": false,
+      "description": "Frequência padrão (daily, weekly, custom)",
+      "enum": ["daily", "weekly", "custom"]
+    },
+    {
+      "name": "microHabitThreshold",
+      "type": "number",
+      "required": false,
+      "description": "Tempo máximo em minutos para considerar micro-hábito (padrão: 5)"
+    }
+  ],
+  "instructions": "Gerencie hábitos exclusivamente via memória operacional. Suporte a frequências daily/weekly/custom, cálculo de streaks, heatmap semanal e sugestão de micro-hábitos baseados em padrões existentes. Não acesse calendários externos.",
+  "tests": {
+    "files": ["test/habit-garden.test.mjs"],
+    "timeoutMs": 10000
+  }
+}

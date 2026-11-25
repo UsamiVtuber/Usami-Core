@@ -16,6 +16,7 @@
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractAllJsonCandidates } from './json-salvage.js';
 import { parseJsonLoosely, parseProviderRaw, stripToolCallMarkup } from './provider-parse.js';
+import { parseJsonLoosely, parseProviderRaw, parseXmlToolCalls, stripXmlToolCalls } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -189,6 +190,23 @@ export async function generateReplyWithActions(
   return jsonText(answer, 'reply');
 }
 
+// Converte chamadas escritas em texto para o formato OpenAI `tool_calls`.
+// Só aceita ferramentas oferecidas no turno (nome com ponto ou sublinhado).
+export function textToolCallsToOpenAi(content, tools = [], iteration = 0) {
+  const offered = new Set((tools || []).map(t => t?.function?.name).filter(Boolean));
+  return parseXmlToolCalls(content)
+    .map((call, index) => {
+      const fnName = [call.name, call.name.replace(/\./g, '_')].find(n => offered.has(n));
+      if (!fnName) return null;
+      return {
+        id: `text_call_${iteration}_${index}`,
+        type: 'function',
+        function: { name: fnName, arguments: JSON.stringify(call.args || {}) },
+      };
+    })
+    .filter(Boolean);
+}
+
 function formatToolResultContent(result, maxChars = 3500) {
   let str = '';
   try {
@@ -261,9 +279,17 @@ export async function generateReplyWithTools(
     const msg = answer?.choices?.[0]?.message;
     if (!msg) throw new Error('resposta inválida do provedor (sem message)');
 
-    const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    let toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    let assistantContent = msg.content || null;
+    // Modelo escreveu a chamada como texto (<tool_call>...) em vez do canal
+    // nativo: converte para tool_calls e executa, em vez de mandar o XML
+    // para o chat como se fosse a fala.
+    if (toolCalls.length === 0 && !isLastIteration && tools?.length && typeof msg.content === 'string') {
+      toolCalls = textToolCallsToOpenAi(msg.content, tools, iteration);
+      if (toolCalls.length) assistantContent = stripXmlToolCalls(msg.content) || null;
+    }
     if (toolCalls.length > 0 && !isLastIteration) {
-      messages.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
+      messages.push({ role: 'assistant', content: assistantContent, tool_calls: toolCalls });
       for (const tc of toolCalls) {
         const name = tc?.function?.name;
         let args = {};
@@ -321,6 +347,12 @@ export async function generateReplyWithTools(
       executedTools,
       source: 'nvidia',
     };
+    // Sem JSON recuperável: devolve o texto como reply, sem tool call em texto.
+    const plain = stripXmlToolCalls(text);
+    if (!plain) {
+      return { ok: false, error: 'O modelo retornou só uma chamada de ferramenta, sem fala.', reply: '', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
+    }
+    return { ok: true, reply: plain.slice(0, 300), gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
   }
 
   // Esgotou iterações sem resposta final.
@@ -338,20 +370,30 @@ export async function classifyIntentWithLlm({
   client = sharedClient,
 } = {}) {
   if (!process.env.NVIDIA_API_KEY) return null;
-  const toolNames = Array.isArray(tools)
-    ? tools.map(t => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
+  const toolEntries = Array.isArray(tools)
+    ? tools
+      .map(t => {
+        if (typeof t === 'string') return t.trim();
+        const name = String(t?.name || '').trim();
+        if (!name) return '';
+        const desc = typeof t?.description === 'string'
+          ? t.description.trim().replace(/\s+/g, ' ')
+          : '';
+        return desc ? `${name}: ${desc.slice(0, 90)}` : name;
+      })
+      .filter(Boolean)
     : [];
 
-  const toolsSummary = toolNames.length > 0
-    ? ` Ferramentas disponíveis: ${toolNames.slice(0, 30).join(', ')}.`
+  const toolsSummary = toolEntries.length > 0
+    ? `\nFerramentas disponíveis:\n- ${toolEntries.join('\n- ')}`
     : '';
 
   const prompt = `Classifique a intenção do usuário estritamente em JSON.
 kind:
 - "conversation": conversa normal, saudações, piadas, desabafos, opiniões ou perguntas gerais sem necessidade de ferramentas.
-- "operational": pedido para executar uma ação direta ou consultar dados de uma ferramenta (agenda, spotify, git, tarefas, email, finanças, pesquisa, etc.).
+- "operational": pedido para executar uma ação direta ou consultar dados de uma ferramenta (agenda, spotify, git, tarefas, email, finanças, pesquisa, timer, etc.).
 - "complex": solicitação de planejamento detalhado, múltiplos passos, cronograma ou roadmap.
-tool: nome exato da ferramenta em caso operacional (ex: spotify.now_playing, calendar.list), ou null caso não seja aplicável.${toolsSummary}
+tool: nome exato da ferramenta mais adequada em caso operacional (ex: spotify.control para tocar/pausar/controlar reprodução, spotify.search apenas para buscar sem tocar, calendar.list), ou null caso não seja aplicável.${toolsSummary}
 
 Responda ESTRITAMENTE o JSON no formato:
 {"kind":"conversation"|"operational"|"complex","goal":"descrição concisa","tool":null,"confidence":0.9}`;

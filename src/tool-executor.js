@@ -22,6 +22,7 @@ import {
   validateExecutionRecord,
 } from './agent-contracts.js';
 import { validateToolArguments } from './tool-registry.js';
+import { createToolMetrics } from './tool-metrics.js';
 
 const FILE_NAME = 'executions.json';
 const FILE_VERSION = 1;
@@ -58,6 +59,7 @@ export function createToolExecutor({
   now = () => Date.now(),
   limit = EXECUTIONS_LIMIT,
   onLoadError = message => console.error(message),
+  metrics = null, // instância de createToolMetrics() para observabilidade
 } = {}) {
   if (!registry || typeof registry.get !== 'function') throw new Error('createToolExecutor: registry é obrigatório.');
   if (!dataDir || typeof dataDir !== 'string') throw new Error('createToolExecutor: dataDir é obrigatório.');
@@ -146,6 +148,14 @@ export function createToolExecutor({
     const gateCheck = gate
       ? gate.check(tool)
       : (permissionRequiresConfirmation(tool.permissionLevel) ? { ok: false, reason: 'gate de permissões indisponível' } : { ok: true });
+    
+    // Record permission gate metrics
+    if (metrics) {
+      metrics.recordPermissionGate(tool.name, tool.permissionLevel, gateCheck.ok, {
+        requiredConfirmation: permissionRequiresConfirmation(tool.permissionLevel),
+      });
+    }
+    
     if (!gateCheck.ok) {
       const record = recordDenial(tool, {
         origin,
@@ -163,6 +173,14 @@ export function createToolExecutor({
     // A confirmação de uso único é consumida aqui, depois dos argumentos: pedido
     // inválido não queima a confirmação do usuário.
     const authorization = gate ? gate.authorize(tool, confirmation) : { ok: true };
+    
+    // Record authorization metrics
+    if (metrics) {
+      metrics.recordPermissionGate(tool.name, tool.permissionLevel, authorization.ok, {
+        requiredConfirmation: true, // authorization is for confirmation-required tools
+      });
+    }
+    
     if (!authorization.ok) {
       const record = recordDenial(tool, {
         origin,
@@ -235,6 +253,19 @@ export function createToolExecutor({
     }
 
     const record = append(outcome.record);
+    
+    // Record metrics
+    if (metrics) {
+      const success = outcome.ok;
+      const isTimeout = outcome.record?.status === 'timeout';
+      metrics.recordToolExecution(tool.name, record.durationMs, success, {
+        timeout: isTimeout,
+        permissionLevel: tool.permissionLevel,
+      });
+      // Record verification separately
+      metrics.recordToolVerification(tool.name, record.verified, record.durationMs);
+    }
+    
     return outcome.ok ? { ok: true, record, result: outcome.result } : { ok: false, record };
   }
 

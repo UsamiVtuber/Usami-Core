@@ -129,7 +129,8 @@ export function createN8nCommandQueue(options = {}) {
 
   // clientId null = comando sem dono (n8n sem header, proatividade): fanout
   // para quem pollou recentemente ou fica pendente até o primeiro poll.
-  const enqueue = (command, { clientId = null } = {}) => {
+  const enqueue = (command, options = {}) => {
+    const { clientId = null } = options || {};
     prune();
     if (clientId) {
       pushEntry(clientId, command);

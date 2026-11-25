@@ -99,7 +99,9 @@ export function validatePlaybackCommand(args = {}) {
   }
 
   if (action === 'play') {
-    if (typeof args.uri === 'string' && args.uri.trim()) {
+    if (Array.isArray(args.uris) && args.uris.length > 0) {
+      out.uris = args.uris.map(u => String(u || '').trim()).filter(u => SPOTIFY_URI_RE.test(u)).slice(0, 50);
+    } else if (typeof args.uri === 'string' && args.uri.trim()) {
       const uri = args.uri.trim();
       if (!SPOTIFY_URI_RE.test(uri)) {
         throw new Error('URI Spotify inválida (esperado spotify:track|album|artist|playlist:<id>).');

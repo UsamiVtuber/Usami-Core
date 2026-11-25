@@ -3,6 +3,8 @@
  *
  * Reaproveita o `memory-store` (fatos por seção, recentes e resumos) em vez de
  * criar outro índice. A busca ignora caixa e acento e casa todos os termos.
+ * Com um `episodicStore` disponível, completa o resultado com turnos antigos
+ * recuperados por similaridade semântica.
  * O vault fica de fora: é conteúdo privado e só entra em ferramenta própria
  * com autorização explícita.
  */
@@ -16,7 +18,12 @@ const normalize = value => String(value ?? '')
   .replace(/[\u0300-\u036f]/g, '')
   .toLowerCase();
 
-export function createMemorySearchTool({ memoryStore, defaultLimit = DEFAULT_LIMIT, maxLimit = MAX_LIMIT } = {}) {
+export function createMemorySearchTool({
+  memoryStore,
+  episodicStore = null,
+  defaultLimit = DEFAULT_LIMIT,
+  maxLimit = MAX_LIMIT,
+} = {}) {
   if (!memoryStore || typeof memoryStore.getSections !== 'function') {
     throw new Error('createMemorySearchTool: memoryStore é obrigatório.');
   }
@@ -36,10 +43,10 @@ export function createMemorySearchTool({ memoryStore, defaultLimit = DEFAULT_LIM
     schema: AGENT_SCHEMAS.tool,
     name: 'memory.search',
     version: '1.0.0',
-    description: 'Busca fatos, lembretes recentes e resumos da memória da Usami, sem alterar nada.',
+    description: 'Busca fatos, lembretes recentes, resumos e o histórico de conversas para lembrar o que já foi dito, sem alterar nada.',
     origin: 'runtime',
     permissionLevel: 1,
-    timeoutMs: 1000,
+    timeoutMs: 3000,
     parameters: [
       { name: 'query', type: 'string', required: true, description: 'Texto procurado (ignora caixa e acento).' },
       { name: 'limit', type: 'number', required: false, description: `Máximo de resultados (1 a ${maxLimit}; padrão ${defaultLimit}).` },
@@ -51,7 +58,7 @@ export function createMemorySearchTool({ memoryStore, defaultLimit = DEFAULT_LIM
         && result.count === result.results.length
         && result.results.every(item => item && typeof item.text === 'string' && item.text.length > 0);
     },
-    execute(args) {
+    async execute(args) {
       const query = String(args.query).trim();
       if (!query) throw new Error('query: informe ao menos um termo');
 
@@ -67,6 +74,25 @@ export function createMemorySearchTool({ memoryStore, defaultLimit = DEFAULT_LIM
           return terms.every(term => haystack.includes(term));
         })
         .slice(0, limit);
+
+      // Complemento semântico: turnos antigos que a busca lexical não alcança.
+      if (episodicStore && results.length < limit) {
+        try {
+          const episodes = await episodicStore.search({ query, limit: limit - results.length });
+          for (const episode of episodes) {
+            if (results.length >= limit) break;
+            results.push({
+              source: 'episode',
+              date: (episode.isoDate || '').slice(0, 10),
+              text: episode.text,
+              score: episode.score,
+            });
+          }
+        } catch {
+          // memória episódica é opcional: segue com o resultado lexical
+        }
+      }
+
       return { query, results, count: results.length };
     },
   };

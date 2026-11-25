@@ -2,16 +2,28 @@
   "schema": "usami.agent.skill.v1",
   "id": "document-creator",
   "name": "Document Creator",
-  "version": "1.0.0",
-  "description": "Redige rascunhos Markdown e grava documentos locais dentro da pasta permitida com política estrita de escrita e confirmação humana.",
+  "version": "2.0.0",
+  "description": "Criação e gestão de documentos Markdown/TXT com versionamento, templates, busca, tags e estatísticas. Store dedicado (documents.json) com lazy loading.",
   "state": "installed",
   "origin": "dev",
   "createdAt": "2026-11-11T00:00:00.000Z",
   "tools": [
     "document.draft",
-    "document.write"
+    "document.write",
+    "document.list",
+    "document.get",
+    "document.search",
+    "document.history",
+    "document.version",
+    "document.delete",
+    "document.template.list",
+    "document.template.get",
+    "document.template.upsert",
+    "document.template.delete",
+    "document.tags",
+    "document.stats"
   ],
-  "permissions": [1, 4],
+  "permissions": [1, 2, 3, 4],
   "dependencies": [],
   "parameters": [
     {
@@ -24,7 +36,8 @@
       "name": "format",
       "type": "string",
       "required": false,
-      "description": "Modelo: note, checklist, adr ou summary."
+      "description": "Modelo: note, checklist, adr ou summary.",
+      "enum": ["note", "checklist", "adr", "summary"]
     },
     {
       "name": "filename",
@@ -33,10 +46,9 @@
       "description": "Nome do arquivo (.md ou .txt) dentro da pasta permitida."
     }
   ],
-  "instructions": "Crie rascunhos com document.draft antes de gravar. Só grave arquivos usando document.write dentro da pasta permitida de documentos e após confirmação explícita (nível 4). Nunca grave fora da pasta autorizada nem sobre symlinks.",
+  "instructions": "Crie rascunhos com document.draft antes de gravar. Use document.write (nível 4) para gravar na pasta autorizada. Gerencie documentos via store: list, get, search, history, version, delete. Templates: list, get, upsert, delete. Tags e stats disponíveis.",
   "tests": {
     "files": ["test/document-creator.test.mjs"],
     "timeoutMs": 10000
   }
 }
-
