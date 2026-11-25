@@ -21,9 +21,25 @@ import urllib.request
 import uuid
 
 DEFAULT_SPACE_HOST = 'https://plachta-seed-vc.hf.space'
+ALLOWED_SPACE_HOSTS = frozenset(
+    h.strip().lower()
+    for h in os.environ.get('SEED_VC_ALLOWED_HOSTS', 'plachta-seed-vc.hf.space').split(',')
+    if h.strip()
+)
+
+
+def validate_space_url(url, allowed_hosts=ALLOWED_SPACE_HOSTS):
+    parsed = urllib.parse.urlparse(str(url or '').strip())
+    if parsed.scheme != 'https' or not parsed.hostname:
+        raise ValueError(f'Host Seed-VC invalido (exige https): {url}')
+    hostname = parsed.hostname.lower()
+    if hostname not in allowed_hosts:
+        raise PermissionError(f'Host Seed-VC fora da allowlist: {hostname}')
+    return f'https://{parsed.netloc}'
 
 
 def upload_wav_to_gradio(host, file_path, timeout=60):
+    host = validate_space_url(host)
     boundary = f'----UsamiSeedVCBoundary{uuid.uuid4().hex}'
     filename = os.path.basename(file_path)
     with open(file_path, 'rb') as fh:
@@ -65,6 +81,13 @@ def convert_singing_seed_vc(
     auto_f0_adjust=False,
     timeout_sec=110,
 ):
+    host = validate_space_url(host)
+    source_wav = os.path.realpath(source_wav)
+    reference_wav = os.path.realpath(reference_wav)
+    output_wav = os.path.realpath(output_wav)
+    for wav_p in (source_wav, reference_wav, output_wav):
+        if not wav_p.lower().endswith('.wav'):
+            raise ValueError(f'Apenas arquivos .wav sao permitidos: {wav_p}')
     if not os.path.isfile(source_wav):
         raise FileNotFoundError(f'Guia vocal nao encontrada: {source_wav}')
     if not os.path.isfile(reference_wav):
@@ -140,6 +163,9 @@ def convert_singing_seed_vc(
         dl_url = f'{host.rstrip("/")}/gradio_api/file={quoted}'
     if not dl_url:
         raise RuntimeError(f'URL de download ausente no retorno do Seed-VC: {full_audio_obj}')
+    dl_parsed = urllib.parse.urlparse(dl_url)
+    if dl_parsed.scheme != 'https' or (dl_parsed.hostname or '').lower() not in ALLOWED_SPACE_HOSTS:
+        raise PermissionError(f'URL de download fora da allowlist Seed-VC: {dl_url}')
 
     os.makedirs(os.path.dirname(os.path.abspath(output_wav)), exist_ok=True)
     dl_req = urllib.request.Request(dl_url, headers={'User-Agent': 'UsamiSingingBridge/1.0'})

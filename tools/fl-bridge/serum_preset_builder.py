@@ -273,9 +273,16 @@ def create_serum_preset(
     }
     hdr_bytes = json.dumps(new_hdr, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
-    out_dir = os.path.join(presets_root, 'User', clean_bank)
+    real_root = os.path.realpath(presets_root)
+    real_user_dir = os.path.realpath(os.path.join(real_root, 'User'))
+    out_dir = os.path.join(real_user_dir, clean_bank)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f'{clean_name}.SerumPreset')
+    real_out_dir = os.path.realpath(out_dir)
+    if os.path.islink(out_dir) or os.path.commonpath([real_user_dir, real_out_dir]) != real_user_dir:
+        raise PermissionError('Diretorio de destino Serum 2 invalido ou fora de Presets/User.')
+    out_path = os.path.join(real_out_dir, f'{clean_name}.SerumPreset')
+    if os.path.islink(out_path) or os.path.commonpath([real_user_dir, os.path.abspath(out_path)]) != real_user_dir:
+        raise PermissionError('Caminho de preset Serum 2 invalido ou fora de Presets/User.')
 
     full_bytes = (
         XFER_MAGIC

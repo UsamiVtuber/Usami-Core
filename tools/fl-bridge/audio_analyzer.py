@@ -241,12 +241,21 @@ def capture_wasapi_loopback(duration_sec=2.5):
         _com_release(enum_ptr)
 
 
-def load_wav_file(file_path):
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError('Arquivo WAV nao encontrado: %s' % file_path)
+def load_wav_file(file_path, allowed_root=None):
+    if not file_path or not isinstance(file_path, str):
+        raise ValueError('Caminho WAV invalido.')
+    real_path = os.path.realpath(file_path)
+    if not real_path.lower().endswith('.wav'):
+        raise ValueError('Apenas arquivos .wav sao permitidos.')
+    if allowed_root:
+        real_root = os.path.realpath(allowed_root)
+        if os.path.commonpath([real_root, real_path]) != real_root:
+            raise PermissionError('Caminho WAV fora do diretorio permitido.')
+    if not os.path.isfile(real_path):
+        raise FileNotFoundError('Arquivo WAV nao encontrado: %s' % real_path)
 
     # Suporta PCM 8/16/24/32 bits e IEEE Float 32 bits sem depender de scipy
-    with open(file_path, 'rb') as fh:
+    with open(real_path, 'rb') as fh:
         riff = fh.read(12)
         if len(riff) < 12 or riff[:4] != b'RIFF' or riff[8:12] != b'WAVE':
             raise ValueError('Arquivo WAV invalido (cabecalho RIFF/WAVE ausente).')
@@ -518,12 +527,13 @@ def main():
     parser.add_argument('--source', choices=['loopback', 'file'], default='loopback')
     parser.add_argument('--duration', type=float, default=2.5)
     parser.add_argument('--file', dest='file_path', default='')
+    parser.add_argument('--allowed-root', dest='allowed_root', default=os.environ.get('USAMI_ALLOWED_WAV_ROOT', ''))
     parser.add_argument('--genre', default='future_bass')
     args = parser.parse_args()
 
     try:
         if args.source == 'file':
-            audio, sr = load_wav_file(args.file_path)
+            audio, sr = load_wav_file(args.file_path, allowed_root=args.allowed_root or None)
         else:
             audio, sr = capture_wasapi_loopback(args.duration)
         report = analyze_audio(audio, sr, genre_hint=args.genre)
