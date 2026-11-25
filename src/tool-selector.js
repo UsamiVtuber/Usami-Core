@@ -15,6 +15,20 @@ const SYNONYM_GROUPS = Object.freeze([
   ['pesquisa', 'web', 'internet', 'buscar', 'procurar', 'noticias', 'site', 'tinyfish', 'firecrawl'],
   ['memoria', 'lembrar', 'historico', 'rag', 'vault', 'obsidian'],
   ['musica', 'spotify', 'tocar', 'playlist', 'faixa', 'som'],
+  ['fl', 'flstudio', 'daw'],
+  ['bpm', 'andamento', 'metronomo', 'transport'],
+  ['mixer', 'pan', 'mute', 'solo', 'clipping', 'picos'],
+  ['sidechain', 'roteamento', 'routing', 'submix', 'bus', 'send'],
+  ['eq', 'equalizador', 'mono', 'estereo', 'stereo', 'largura', 'lama'],
+  ['escuta', 'escutar', 'ouvir', 'lufs', 'espectro', 'fase', 'loopback'],
+  ['steps', 'sequencer', 'batida', 'groove', 'kick', 'snare', 'hihat', 'halftime'],
+  ['plugin', 'synth', 'serum', 'vital', 'sylenth', 'sylenth1', 'knob', 'macro', 'parametro', 'preset', 'cutoff', 'wavetable', 'ott', 'unison', 'detune', 'warp', 'distortion', 'lfo', 'ajusta', 'ajustar'],
+  ['serumpreset', 'xfer', 'spectral', 'granular'],
+  ['harmor', 'sytrus', 'sakura', 'ogun', 'kepler', 'instanciar', 'inserir', 'print', 'janela', 'killswitch'],
+  ['vocal', 'vocais', 'cantar', 'canta', 'cante', 'cantando', 'letra', 'openutau', 'utau', 'ustx', 'ust', 'acapella', 'voicebank', 'diffsinger', 'neurosama', 'seedvc', 'rvc', 'converter'],
+  ['timbre', 'patch', 'vocodex', 'patcher', 'convolver', 'growl', 'screech', 'square4', 'comb', 'receita', 'producao'],
+  ['midi', 'mid', 'piano', 'roll', 'acorde', 'acordes', 'progressao', 'voicing', 'supersaw', 'kawaii', 'kawai', 'cauai', 'future', 'dubstep', 'riddim', 'ridim', 'brostep', 'colour', 'color', 'melodic', 'arp', 'arpejo'],
+  ['undo', 'redo', 'desfazer', 'refazer'],
   ['workspace', 'fluxo', 'flow', 'meta', 'automacao', 'rota'],
   ['timer', 'temporizador', 'pomodoro', 'lembrete', 'lembretes', 'lembrar', 'aviso', 'avisar', 'alarme', 'foco', 'pausa', 'descanso', 'cronometro'],
 ]);
@@ -24,6 +38,15 @@ function tokenize(text) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(?:f\s+l|efe\s+ele)\s+(?:studio|estudio)\b/g, 'flstudio')
+    .replace(/\bfl\s+estudio\b/g, 'flstudio')
+    .replace(/\b(?:side\s+chain|said\s*chein|saide\s*chein)\b/g, 'sidechain')
+    .replace(/\b(?:open[\s-]*utau|open[\s-]*utal|oupen[\s-]*utau|utau|utal)\b/g, 'openutau')
+    .replace(/\b(?:diff[\s-]*singer|dif[\s-]*singer)\b/g, 'diffsinger')
+    .replace(/\b(?:neuro[\s-]*sama|neurosama)\b/g, 'neurosama')
+    .replace(/\b(?:seed[\s-]*vc|sid[\s-]*vc)\b/g, 'seedvc')
+    .replace(/\b(?:l\s+u\s+f\s+s|lufis)\b/g, 'lufs')
+    .replace(/\bb\s+p\s+m\b/g, 'bpm')
     .replace(/[^a-z0-9_.-]+/g, ' ')
     .trim();
   if (!normalized) return [];

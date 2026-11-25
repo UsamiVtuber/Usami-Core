@@ -18,10 +18,32 @@ const AMBIGUITY_CONFIDENCE_THRESHOLD = 0.7;
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const iso = ms => new Date(ms).toISOString();
 const collapseText = value => String(value ?? '').trim().replace(/\s+/g, ' ');
-const normalizeText = value => collapseText(value)
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase();
+function normalizeSpokenProducerTerms(text) {
+  return text
+    .replace(/\b(?:f\s+l|efe\s+ele)\s+(?:studio|estudio)\b/g, 'fl studio')
+    .replace(/\bfl\s+estudio\b/g, 'fl studio')
+    .replace(/\b(?:side\s+chain|said\s*chein|saide\s*chein)\b/g, 'sidechain')
+    .replace(/\b(?:super\s+saw|supersol)\b/g, 'supersaw')
+    .replace(/\b(?:color\s+bass|colou?r\s+beis)\b/g, 'colour bass')
+    .replace(/\bfuture\s+beis\b/g, 'future bass')
+    .replace(/\b(?:kawai|cauai)\b/g, 'kawaii')
+    .replace(/\bridim\b/g, 'riddim')
+    .replace(/\bbro\s+step\b/g, 'brostep')
+    .replace(/\bdub\s+step\b/g, 'dubstep')
+    .replace(/\b(?:piano\s+rol|piano\s+rou)\b/g, 'piano roll')
+    .replace(/\b(?:open[\s-]*utau|open[\s-]*utal|oupen[\s-]*utau|utau|utal)\b/g, 'openutau')
+    .replace(/\b(?:diff[\s-]*singer|dif[\s-]*singer)\b/g, 'diffsinger')
+    .replace(/\b(?:neuro[\s-]*sama|neurosama)\b/g, 'neurosama')
+    .replace(/\b(?:seed[\s-]*vc|sid[\s-]*vc)\b/g, 'seedvc')
+    .replace(/\bb\s+p\s+m\b/g, 'bpm')
+    .replace(/\b(?:l\s+u\s+f\s+s|lufis)\b/g, 'lufs');
+}
+const normalizeText = value => normalizeSpokenProducerTerms(
+  collapseText(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase(),
+);
 
 const CALENDAR_LIST_RE = /\b(?:list\w*|mostr\w*|ver|v[eê]|veja|consult\w*|chec\w*|confer\w*|olh\w*|abr\w*|quais|tenho|tem|como\s+(?:esta|ta)|o\s+que\s+(?:tem|tenho|ha))\b(?!.*\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*|marcacao)\b).*\b(?:google calendar|calendario|eventos?(?:\s+da\s+agenda)?|compromissos?(?:\s+(?:na|da)\s+agenda|\s+hoje|\s+amanha|\s+essa\s+semana)?|minha\s+agenda|agenda\s+(?:de\s+)?(?:hoje|amanha|semana))\b/;
 const CALENDAR_CREATE_RE = /\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*|salva\w*)\b.*\b(?:google calendar|calendario|evento|compromisso|agenda)\b|\b(?:no\s+calendario|na\s+agenda)\b.*\b(?:cria\w*|adiciona\w*|coloc\w*|agendar|agende|agendo|agendei|marca\w*)\b/;
@@ -105,7 +127,24 @@ const SPOTIFY_STATS_RE = /\b(?:last\.?fm|scrobbles?|estatisticas?\s+(?:do\s+)?sp
 const SPOTIFY_PLAYLISTS_RE = /\b(?:minhas?|ver|mostr\w*|list\w*)\s+playlists?\b|\bspotify\b.*\bplaylists?\b/i;
 const SPOTIFY_SEARCH_RE = /\b(?:busca|buscar|procura|procurar|pesquisa|pesquisar)\b.*\b(?:no\s+spotify|spotify|musica|faixa|artista|album|playlist)\b/i;
 const SPOTIFY_CONTROL_RE = /\b(?:toca|tocar|toque|coloca|colocar|coloque|poe|por|da play|play|pausa|pausar|pause|para|parar|retoma|retomar|continua|continuar|proxima|proximo|pula|pular|avanca|avancar|volta|voltar|anterior|volume|abaixa|aumenta|aleatorio|shuffle)\b.*\b(?:spotify|musica|faixa|som|playlist|volume)\b|\bspotify\b.*\b(?:toca|tocar|play|pausa|pausar|pause|proxima|pular|anterior|volta|volume|shuffle)\b|\b(?:pausa|pausar|proxima|pula|anterior)\s+(?:a\s+)?(?:musica|faixa)\b/i;
-const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|explic\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|arquitetura|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que (?:voce|vc|tu) (?:tem|faz|sabe fazer|consegue fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status|sua arquitetura)\b/;
+const FL_CONTEXT_RE = /\b(?:fl\s*studio|flstudio|(?:no|do|pro|para\s+o|o)\s+fl|daw|channel\s+rack|step\s+sequencer|piano\s+roll)\b/i;
+const FL_UNDO_RE = /\b(?:desfaz\w*|undo|refaz\w*|redo)\b.*\b(?:fl\s*studio|flstudio|fl|daw|mixer|step|canal)\b|\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b.*\b(?:desfaz\w*|undo|refaz\w*|redo)\b/i;
+const FL_LEARN_RE = /\b(?:anota\w*|salva\w*|guarda\w*|memoriza\w*|aprende\w*)\b.*\b(?:no\s+estudio|na\s+base\s+de\s+producao|(?:dica|receita|tecnica)\s+de\s+producao|meu\s+template\s+(?:do\s+fl|musical|de\s+producao))\b|\b(?:lista\w*|mostra\w*|quais)\b.*\bnotas?\s+de\s+(?:producao|estudio)\b/i;
+const FL_SERUM_RE = /\b(?:busca\w*|procura\w*|acha\w*|lista\w*|quais|separa\w*|copia\w*|cria\w*|gera\w*|faz|faca|monta\w*|salva\w*)\b.*\bpresets?\b.*\bserum\b|\b(?:cria\w*|gera\w*|faz|faca|monta\w*)\b.*\bpreset\b(?:\s+de\s+(?:growl|supersaws?|riddim|colour\s*bass|kawaii|reese|dubstep))?|\bserum\s*2?\b.*\b(?:busca\w*|procura\w*|acha\w*|presets?|categorias?|banco|cria\w*|gera\w*)\b/i;
+const FL_UI_RE = /\b(?:adiciona\w*|insere\w*|inserir|instancia\w*|carrega\w*|coloca\s+um\s+novo|abre\s+um(?:\s+novo)?)\b.*\b(?:serum\s*2?|vital|sylenth\s*1?|harmor|sytrus|sakura|ogun|kepler(?:\s+exo)?|3x\s*osc|slicex|patcher|flex|granulizer)\b|\b(?:tira\s+(?:um\s+)?print|captura\s+(?:a\s+)?janela)\b.*\b(?:fl\s*studio|flstudio|(?:do|no)\s+fl|serum|vital|sylenth)\b/i;
+const FL_VOCAL_RE = /\b(?:openutau|diffsinger|seedvc|\.ustx\b|\.ust\b|voicebank)\b|\b(?:cria\w*|gera\w*|compo\w*|monta\w*|exporta\w*|faz|faca)\b.*\b(?:melodia\s+vocal|linha\s+vocal|projeto\s+vocal|vocal\s+(?:kawaii|future\s*bass|colour\s*bass|melodic|de\s+drop|neural|realista)|acapella)\b|\b(?:faz|faca|coloca|bota|quero\s+ver)\s+(?:a\s+usami|voce|vc|ela)\s+cantar\b|\bcantando\s+["'“”a-zA-Z0-9]|\b(?:converte\w*|converter|transforma\w*)\b.*\b(?:guia\s+vocal|vocal|acapella|\.wav\b)\b.*\b(?:voz\s+da\s+usami|timbre\s+da\s+usami|usami|seedvc)\b/i;
+const FL_GUIDE_RE = /\b(?:como\s+(?:eu\s+)?(?:faco|fazer|monto|montar|crio|criar|produz\w*|mixo|mixar|uso|usar)|qual\s+(?:e\s+)?o\s+segredo|dicas?\s+(?:de|para|pra)|receitas?\s+(?:de|para|pra)|explica\w*)\b.*\b(?:future\s*bass|kawaii|dubstep|riddim|brostep|colour\s*bass|melodic\s*dubstep|supersaws?|vocodex|convolver|square\s*4|growls?|screeches?|comb\s*filter|royal\s+road|sound\s*design|harmor|ogun|sytrus|sakura|serum\s*2?)\b/i;
+const FL_LISTEN_RE = /\b(?:escuta\w*|ouve|ouvir|ouca|analisa\w*|mede|medir)\b.*\b(?:minha\s+mix|o\s+mix|a\s+mix|mixagem|master|drop|sub|espectro|lufs|audio\s+do\s+fl|som\s+do\s+fl|fl\s*studio|flstudio|(?:no|do)\s+fl)\b|\b(?:como\s+(?:esta|ta)|checa\w*|verifica\w*)\b.*\b(?:lufs|espectro|correlacao|fase\s+do\s+sub)\b/i;
+const FL_ROUTING_RE = /\bsidechain\b|\b(?:roteia\w*|rotear|manda\s+pro\s+bus|agrupa\s+no\s+bus|submix)\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl|mixer|track|kick|snare|sub|supersaw|bus)\b/i;
+const FL_EQ_RE = /\b(?:sub_mono_clean|supersaw_air|mud_cut)\b|\b(?:deixa|coloca|poe|forca)\b.*\b(?:em\s+mono|100%\s*mono)\b|\b(?:abre|alarga)\s+(?:o\s+)?estereo\b|\b(?:eq|equaliza\w*|corta\s+(?:a\s+)?lama)\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl|mixer|track|sub|supersaw|kick|snare)\b/i;
+const FL_MIDI_FILE_RE = /\b(?:gera\w*|cria\w*|exporta\w*|salva\w*|monta\w*)\b.*\b(?:arquivo\s+midi|\.mid\b|midi\s+(?:de|para|pro)|chops?\s+de\s+future\s*bass|arp(?:ejo)?\s+kawaii|colour\s*bass|melodic\s*dubstep|riddim|brostep)\b|\b(?:piano\s+roll)\b.*\b(?:gera\w*|cria\w*|exporta\w*|\.mid\b|midi)\b/i;
+const FL_STEPS_RE = /\b(?:four[\s_-]*on[\s_-]*the[\s_-]*floor|trap[\s_-]*hi[\s_-]*hat|offbeat[\s_-]*hat|boom[\s_-]*bap[\s_-]*kick|dem[\s_-]*bow|halftime[\s_-]*snare|riddim[\s_-]*(?:kick|stomp|triplet[\s_-]*hat)|brostep[\s_-]*kick|melodic[\s_-]*dubstep[\s_-]*kick|colour[\s_-]*bass[\s_-]*kick|future[\s_-]*bass[\s_-]*kick|kawaii[\s_-]*(?:bounce[\s_-]*kick|perc))\b|\b(?:step\s*sequencer|channel\s+rack)\b|\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b.*\b(?:steps?|sequencer|groove|batida|half[\s-]*time|padrao\s+de\s+(?:kick|snare|hat|bateria|riddim|brostep|future\s*bass|kawaii)|coloca\s+(?:steps?|kick|snare|hat))\b|\b(?:steps?|sequencer|groove|batida|padrao\s+de\s+(?:kick|snare|hat|bateria|riddim|brostep|future\s*bass|kawaii))\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b/i;
+const FL_PLUGIN_RE = /\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b.*\b(?:plugins?|synths?|serum|vital|sylenth\s*1?|phase\s*plant|vst|parametros?|knobs?|macros?|cutoff|resonance|presets?|wavetable|ott|unison|detune|warp|distortion)\b|\b(?:plugins?|synths?|serum|vital|sylenth\s*1?|phase\s*plant|vst|parametros?|knobs?|macros?|cutoff|resonance|presets?)\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b|\b(?:ajusta\w*|muda\w*|coloca\w*|seta\w*|define\w*|mexe\w*|altera\w*|lista\w*)\b.*\b(?:serum\s*2?|vital|sylenth\s*1?|harmor|sytrus|ott|wavetable|cutoff|resonance|macro\s*\d|parametros?)\b/i;
+const FL_MIDI_RE = /\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b.*\b(?:acordes?|notas?|arpej\w*|midi|progressao|royal\s+road|supersaws?|colour\s*bass)\b|\b(?:acordes?|notas?|arpej\w*|midi|progressao|royal\s+road)\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b|\b(?:toca|toque|manda|envia|monta|cria|faz|faca|coloca|poe|gera)\b.*\b(?:acordes?|arpej\w*|royal\s+road|supersaws?)\b(?!.*\bspotify\b)/i;
+const FL_MIXER_RE = /\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b.*\b(?:mixer|track|canal|volume|abaixa|aumenta|pan|muta\w*|mute|desmuta\w*|sola\w*|solo|renome\w*)\b|\b(?:mixer|track|canal|volume|abaixa|aumenta|pan|muta\w*|mute|desmuta\w*|sola\w*|solo|renome\w*)\b.*\b(?:fl\s*studio|flstudio|(?:no|do)\s+fl)\b|\b(?:muta\w*|desmuta\w*|sola\w*)\s+(?:o|a)?\s*(?:track|canal|kick|snare|hat|bass|vocal|master)\b/i;
+const FL_TRANSPORT_RE = /\b(?:fl\s*studio|flstudio|(?:no|do|o)\s+fl)\b.*\b(?:play|pause|pausa|stop|para|parar|record|grava\w*|loop|pattern\s*mode|song\s*mode|metronomo|bpm|andamento|marcador\w*)\b|\b(?:da\s+play|play|pause|pausa|stop|para|parar|record|grava\w*|metronomo|pattern\s*mode|song\s*mode|marcador\w*)\b.*\b(?:fl\s*studio|flstudio|(?:no|do|o)\s+fl)\b|\b(?:muda|coloca|ajusta|define|altera|seta)\b.*\bbpm\b|\bbpm\s+(?:em|para|pra)\s+\d+/i;
+const FL_STATE_RE = /\b(?:fl\s*studio|flstudio|(?:no|do|o)\s+fl)\b.*\b(?:estado|status|como\s+(?:esta|ta)|bpm|canais|tracks|mixer|picos?|clip\w*|projeto)\b|\b(?:estado|status|como\s+(?:esta|ta)|quais|mostra|ver)\b.*\b(?:fl\s*studio|flstudio|(?:no|do|o)\s+fl)\b|\b(?:clipando|picos?\s+do\s+mixer)\b/i;
+const SELF_DESCRIBE_RE = /\b(?:quais|lista\w*|mostr\w*|descrev\w*|resum\w*|explic\w*|sab\w*|conhec\w*|tem|ganh\w*|receb\w*)\b.*\b(?:ferramentas?|skills?|habilidades?|modulos?|limitacoes?|integracoes?|capacidades?|arquitetura|novidades?|erros?\s+recentes?)\b|\b(?:novas?|novos?|recentes?)\s+(?:skills?|habilidades?|ferramentas?|capacidades?|integracoes?)\b|\b(?:skills?|habilidades?|ferramentas?)\s+(?:novas?|novos?|atuais|disponiveis|ativas|instaladas)\b|\b(?:o que\s+(?:(?:voce|vc|tu)\s+)?(?:tem|faz|(?:sabe|consegue|pode)\s+fazer)|o que mudou(?:\s+em\s+(?:voce|vc|tu))?|suas? limitacoes?|seu status|sua arquitetura)\b/;
 
 const COMPLEX_PATTERNS = [
   /\b(planej\w*|cronograma|roteiro|plano|etapas?|passo a passo|checklist|decompor|roadmap)\b/,
@@ -145,6 +184,22 @@ const OPERATIONAL_PATTERNS = [
   SPOTIFY_PLAYLISTS_RE,
   SPOTIFY_SEARCH_RE,
   SPOTIFY_CONTROL_RE,
+  FL_UNDO_RE,
+  FL_LEARN_RE,
+  FL_SERUM_RE,
+  FL_UI_RE,
+  FL_VOCAL_RE,
+  FL_GUIDE_RE,
+  FL_LISTEN_RE,
+  FL_ROUTING_RE,
+  FL_EQ_RE,
+  FL_MIDI_FILE_RE,
+  FL_STEPS_RE,
+  FL_PLUGIN_RE,
+  FL_MIDI_RE,
+  FL_MIXER_RE,
+  FL_TRANSPORT_RE,
+  FL_STATE_RE,
   /\bexecuta\w*\s+(?:a\s+)?ferramenta\b/,
 ];
 
@@ -233,7 +288,7 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
       if (/\blimitacoes?\b/.test(normalized)) return { focus: 'limitations' };
       if (/\b(skills?|habilidades?|capacidades?|novidades?|mudou)\b/.test(normalized)) return { focus: 'skills' };
       if (/\bmodulos?\b/.test(normalized)) return { focus: 'modules' };
-      if (/\bferramentas?\b/.test(normalized)) return { focus: 'tools' };
+      if (/\bferramentas?\b|\b(?:fl\s*studio|flstudio|\bno\s+fl\b)\b/.test(normalized)) return { focus: 'tools' };
       return { focus: 'all' };
     },
   },
@@ -434,8 +489,464 @@ export const DEFAULT_TOOL_MATCHERS = Object.freeze([
     },
   },
   {
+    toolName: 'fl.undo',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_UNDO_RE.test(normalized),
+    buildArgs: (_message, normalized) => ({
+      direction: /\b(?:refaz\w*|redo)\b/.test(normalized || normalizeText(_message)) ? 'redo' : 'undo',
+    }),
+  },
+  {
+    toolName: 'fl.learn',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_LEARN_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      let genre = 'general';
+      if (/\bkawaii\b/.test(norm)) genre = 'kawaii';
+      else if (/\bcolour\s*bass\b/.test(norm)) genre = 'colour_bass';
+      else if (/\bmelodic\s*dubstep\b/.test(norm)) genre = 'melodic_dubstep';
+      else if (/\briddim\b/.test(norm)) genre = 'riddim';
+      else if (/\bbrostep\b/.test(norm)) genre = 'brostep';
+      else if (/\bfuture\s*bass\b/.test(norm)) genre = 'future_bass';
+      else if (/\bdubstep\b/.test(norm)) genre = 'dubstep';
+
+      if (/\b(?:lista\w*|mostra\w*|quais)\b/.test(norm) && !/\b(?:anota\w*|salva\w*|guarda\w*|memoriza\w*|aprende\w*)\b/.test(norm)) {
+        return { action: 'list', ...(genre !== 'general' ? { genre } : {}) };
+      }
+      const body = clean
+        .replace(/^(?:(?:usami|ei|oi|por\s+favor)[,\s]+)*(?:anota\w*|salva\w*|guarda\w*|memoriza\w*|aprende\w*)(?:\s+no\s+estudio|\s+na\s+base\s+de\s+producao)?(?:\s+que|\s*:\s*)?\s*/i, '')
+        .trim();
+      const title = (body.slice(0, 56) || 'Preferencia de Estudio').trim();
+      return {
+        action: 'save',
+        genre,
+        topic: /\b(?:mixer|corte|eq|sidechain|lufs|sub|bus)\b/.test(norm) ? 'mixing' : 'sound_design',
+        title,
+        content: body || clean,
+        source: 'user',
+      };
+    },
+  },
+  {
+    toolName: 'fl.serum',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_SERUM_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      if (/\bcategorias?\b/.test(norm)) return { action: 'categories' };
+      if (/\b(?:cria\w*|gera\w*|faz|faca|monta\w*|salva\w*)\b.*\bpreset\b/.test(norm)) {
+        let style = 'supersaw';
+        if (/\bgrowl\b|\bdubstep\b|\bbrostep\b/.test(norm)) style = 'growl';
+        else if (/\briddim\b|\bsquare\s*4\b/.test(norm)) style = 'riddim_square4';
+        else if (/\bcolour\s*bass\b/.test(norm)) style = 'colour_bass';
+        else if (/\bkawaii\b|\bpluck\b/.test(norm)) style = 'kawaii_pluck';
+        else if (/\breese\b/.test(norm)) style = 'reese';
+        const nameMatch = /["'“]([^"'”]{2,48})["'”]/.exec(clean);
+        const outCreate = {
+          action: 'create',
+          style,
+          presetName: nameMatch?.[1]?.trim() || `Usami - ${style.replace(/_/g, ' ')}`,
+        };
+        if (/\bdetune\s+pesado\b/.test(norm)) outCreate.detune = 0.45;
+        return outCreate;
+      }
+      const action = /\b(?:separa\w*|copia\w*|banco)\b/.test(norm) ? 'stage' : 'search';
+      let category = null;
+      if (/\bbass\b/.test(norm)) category = 'Bass';
+      else if (/\bleads?\b/.test(norm)) category = 'Leads';
+      else if (/\bpads?\b/.test(norm)) category = 'Pads';
+      else if (/\bplucks?\b/.test(norm)) category = 'Plucked';
+      else if (/\barps?\b/.test(norm)) category = 'Arp';
+      else if (/\bchords?\b/.test(norm)) category = 'Chords';
+
+      let tag = null;
+      if (/\bspectral\b/.test(norm)) tag = 'Spectral';
+      else if (/\bgranular\b/.test(norm)) tag = 'Granular';
+
+      const kwMatch = /\b(?:growl|acid|reese|sub|wobble|pluck|bell|supersaw|saw|kawaii|riddim|metallic|lead|pad|arp)\b/i.exec(norm);
+      const out = { action, limit: 10 };
+      if (kwMatch) out.query = kwMatch[0];
+      if (category) out.category = category;
+      if (tag) out.tag = tag;
+      if (action === 'stage' && !out.query && !out.category) out.query = 'bass';
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.ui',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_UI_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      if (/\b(?:print|captura)\b/.test(norm)) {
+        return { action: 'capture_window' };
+      }
+      let pluginName = 'Serum 2';
+      if (/\bvital\b/.test(norm)) pluginName = 'Vital';
+      else if (/\bsylenth\s*1?\b/.test(norm)) pluginName = 'Sylenth1';
+      else if (/\bharmor\b/.test(norm)) pluginName = 'Harmor';
+      else if (/\bsytrus\b/.test(norm)) pluginName = 'Sytrus';
+      else if (/\bsakura\b/.test(norm)) pluginName = 'Sakura';
+      else if (/\bogun\b/.test(norm)) pluginName = 'Ogun';
+      else if (/\bkepler\s+exo\b/.test(norm)) pluginName = 'Kepler Exo';
+      else if (/\bkepler\b/.test(norm)) pluginName = 'Kepler';
+      else if (/\b3x\s*osc\b/.test(norm)) pluginName = '3x Osc';
+      else if (/\bslicex\b/.test(norm)) pluginName = 'Slicex';
+      else if (/\bpatcher\b/.test(norm)) pluginName = 'Patcher';
+      else if (/\bflex\b/.test(norm)) pluginName = 'FLEX';
+      else if (/\bgranulizer\b/.test(norm)) pluginName = 'Fruity Granulizer';
+      return { action: 'add_plugin', pluginName };
+    },
+  },
+  {
+    toolName: 'fl.vocal',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_VOCAL_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      if (/\b(?:status|instalad\w*|como\s+(?:esta|ta))\b.*\b(?:openutau|diffsinger)\b/.test(norm)) {
+        return { action: 'status' };
+      }
+      if (/^(?:abre|abrir|abra)\s+(?:o\s+)?openutau\b/.test(norm)) {
+        return { action: 'open' };
+      }
+      if (/\b(?:converte\w*|converter|transforma\w*|passa\s+no\s+seedvc)\b/.test(norm) && /\b(?:wav|guia|vocal|acapella|seedvc|voz\s+da\s+usami|timbre\s+da\s+usami)\b/.test(norm)) {
+        const outConv = { action: 'convert' };
+        const wavMatch = /([a-zA-Z]:[\\/][^\s"'”]+\.wav|[^\s"'”]+\.wav)/i.exec(clean);
+        if (wavMatch?.[1]) outConv.sourceWav = wavMatch[1];
+        const shiftMatch = /([+-]?\d{1,2})\s*semitons?/i.exec(norm);
+        if (shiftMatch) outConv.pitchShift = Math.max(-24, Math.min(24, Number(shiftMatch[1])));
+        return outConv;
+      }
+
+      const useDiffSinger = /\b(?:diffsinger|neurosama|neural|human[ao]|realista|evelyn)\b/.test(norm);
+      let style = 'kawaii_hook';
+      if (/\bmelodic\s*dubstep\b/.test(norm)) style = 'melodic_dubstep_soar';
+      else if (/\bcolour\s*bass\b/.test(norm)) style = 'colour_bass_chop';
+      else if (/\b(?:dubstep|riddim|brostep|pre[\s-]*drop)\b/.test(norm)) style = 'dubstep_pre_drop';
+      else if (/\bfuture\s*bass\b/.test(norm) && !/\bkawaii\b/.test(norm)) style = 'future_bass_anthem';
+
+      const out = {
+        action: 'compose',
+        engine: useDiffSinger ? 'diffsinger' : 'classic',
+        style,
+      };
+      const quoted = /["'“]([^"'”]{2,200})["'”]/.exec(clean);
+      if (quoted?.[1]) {
+        out.lyrics = quoted[1].trim();
+      } else {
+        const afterCantando = /\b(?:cantando|letra(?:\s+dizendo)?)\s+(.+)$/i.exec(clean);
+        if (afterCantando?.[1]) {
+          const stripped = afterCantando[1]
+            .replace(/\s+\b(?:em\s+[A-G][#b]?m?|a\s+\d{2,3}\s*bpm|no\s+open\s*utau|pro\s+open\s*utau|no\s+fl(?:\s*studio)?)\b.*$/i, '')
+            .trim();
+          if (stripped) out.lyrics = stripped;
+        }
+      }
+
+      const keyMatch = /\b(?:em|tonalidade|tom)\s+([A-G][#b]?m?)\b/.exec(clean);
+      if (keyMatch?.[1]) out.key = keyMatch[1];
+      const bpmMatch = /\b(\d{2,3})\s*bpm\b/i.exec(norm);
+      if (bpmMatch) out.bpm = Math.min(300, Math.max(40, Number(bpmMatch[1])));
+      if (/\b(?:abre|abrir|abra)\b.*\bopenutau\b/.test(norm)) out.openInUtau = true;
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.guide',
+    matches: normalized => !/\bspotify\b/.test(normalized) && !FL_MIDI_FILE_RE.test(normalized) && FL_GUIDE_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      let genre = null;
+      if (/\bkawaii\b/.test(norm)) genre = 'kawaii';
+      else if (/\bcolour\s*bass\b/.test(norm)) genre = 'colour_bass';
+      else if (/\bmelodic\s*dubstep\b/.test(norm)) genre = 'melodic_dubstep';
+      else if (/\briddim\b|\bsquare\s*4\b/.test(norm)) genre = 'riddim';
+      else if (/\bbrostep\b|\bgrowls?\b|\bscreeches?\b/.test(norm)) genre = 'brostep';
+      else if (/\bfuture\s*bass\b|\bsupersaws?\b/.test(norm)) genre = 'future_bass';
+      else if (/\bdubstep\b/.test(norm)) genre = 'dubstep';
+
+      let topic = 'all';
+      if (/\b(?:vocodex|convolver|patcher|slicex|3x\s*osc)\b/.test(norm)) topic = 'fl_tricks';
+      else if (/\b(?:timbre|synth|patch|sound\s*design|serum|vital|osc|comb|wobble|growl|supersaw)\b/.test(norm)) topic = 'sound_design';
+      else if (/\b(?:bateria|kick|snare|hat|percussao|drums?)\b/.test(norm)) topic = 'drums';
+      else if (/\b(?:acordes?|harmonia|escala|royal\s+road|progressao)\b/.test(norm)) topic = 'harmony';
+      else if (/\b(?:mix\w*|sidechain|lufs|mono|eq)\b/.test(norm)) topic = 'mixing';
+      else if (/\b(?:arranjo|estrutura|buildup|drop)\b/.test(norm)) topic = 'arrangement';
+
+      const out = { topic, query: clean.slice(0, 160) };
+      if (genre) out.genre = genre;
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.listen',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_LISTEN_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      let genre = 'future_bass';
+      if (/\bkawaii\b/.test(norm)) genre = 'kawaii';
+      else if (/\bcolour\s*bass\b/.test(norm)) genre = 'colour_bass';
+      else if (/\bmelodic\s*dubstep\b/.test(norm)) genre = 'melodic_dubstep';
+      else if (/\briddim\b/.test(norm)) genre = 'riddim';
+      else if (/\bbrostep\b/.test(norm)) genre = 'brostep';
+      else if (/\bdubstep\b/.test(norm)) genre = 'dubstep';
+      const secMatch = /\b(\d(?:\.\d)?)\s*(?:s|seg|segundos?)\b/.exec(norm);
+      const durationSec = secMatch ? Math.min(8, Math.max(0.5, Number(secMatch[1]))) : 2.5;
+      return { source: 'loopback', durationSec, genre };
+    },
+  },
+  {
+    toolName: 'fl.routing',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_ROUTING_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      const mode = /\b(?:desconecta|remove|tira)\b/.test(norm)
+        ? 'disconnect'
+        : (/\b(?:bus|submix|agrupa)\b/.test(norm) && !/\bsidechain\b/.test(norm) ? 'bus_only' : 'sidechain');
+      const pairMatch = /\b(?:do|da|de)\s+([a-zA-Z0-9_-]{2,24})\s+(?:pro|para\s+o|para\s+a|pra|no|na)\s+([a-zA-Z0-9_,\s-]{2,60})$/i.exec(
+        clean
+          .replace(/\b(?:f\s+l|efe\s+ele)\s+(?:studio|est[uú]dio)\b/gi, 'FL Studio')
+          .replace(/\bfl\s+est[uú]dio\b/gi, 'FL Studio')
+          .replace(/\b(?:super\s+saw|supersol)\b/gi, 'Supersaw'),
+      );
+      if (pairMatch) {
+        const srcName = pairMatch[1].trim();
+        const rawDst = pairMatch[2]
+          .replace(/\bno\s+fl(?:\s*studio)?\b.*$/i, '')
+          .split(/\s*,\s*|\s+e\s+/i)
+          .map(s => s.trim())
+          .filter(Boolean);
+        if (rawDst.length > 1) {
+          return { mode, sourceTrackName: srcName, destTrackNames: rawDst };
+        }
+        if (rawDst.length === 1) {
+          return { mode, sourceTrackName: srcName, destTrackName: rawDst[0] };
+        }
+      }
+      return { mode, sourceTrackName: 'Kick', destTrackName: 'Supersaw' };
+    },
+  },
+  {
+    toolName: 'fl.eq',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_EQ_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(clean);
+      const out = {};
+      const nameMatch = /\b(?:sub|supersaw|chords?|growl|bass|kick|snare|lead|arp|master)\b/i.exec(clean);
+      if (nameMatch) out.trackName = nameMatch[0];
+      if (/\bsub_mono_clean\b/.test(norm) || (/\bsub\b/.test(norm) && /\bmono\b/.test(norm))) {
+        out.preset = 'sub_mono_clean';
+      } else if (/\bsupersaw_air\b/.test(norm) || (/\bsupersaw\b/.test(norm) && /\b(?:estereo|abre|ar|brilho)\b/.test(norm))) {
+        out.preset = 'supersaw_air';
+      } else if (/\bmud_cut\b/.test(norm) || /\blama\b/.test(norm)) {
+        out.preset = 'mud_cut';
+      } else if (/\bmono\b/.test(norm)) {
+        out.mono = true;
+      } else if (/\b(?:abre|alarga)\s+(?:o\s+)?estereo\b/.test(norm)) {
+        out.stereoWidth = 35;
+      } else {
+        out.preset = 'flat';
+      }
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.midi_file',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_MIDI_FILE_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const clean = collapseText(message);
+      let style = 'future_bass_pump';
+      let progression = null;
+      let voicing = null;
+      if (/\bkawaii\b/.test(norm)) {
+        style = /\b(?:pump|chop|supersaw|stack)\b/.test(norm) ? 'future_bass_pump' : 'kawaii_arp';
+        progression = /\bsparkle\b/.test(norm) ? 'kawaii_sparkle' : 'kawaii_royal_road';
+      } else if (/\bcolour\s*bass\b/.test(norm)) {
+        style = 'sustained';
+        progression = 'colour_bass_prism';
+        voicing = 'colour_bass';
+      } else if (/\bmelodic\s*dubstep\b/.test(norm)) {
+        style = 'melodic_dubstep_stack';
+        progression = 'melodic_dubstep_epic';
+        voicing = 'supersaw';
+      } else if (/\briddim\b/.test(norm)) {
+        style = 'riddim_bass';
+        progression = 'riddim_dark';
+      } else if (/\bbrostep\b/.test(norm)) {
+        style = 'brostep_riff';
+        progression = 'brostep_drop';
+      } else if (/\broyal\s+road\b/.test(norm)) {
+        progression = 'kawaii_royal_road';
+      }
+
+      const out = { style };
+      if (progression) out.progression = progression;
+      if (voicing) out.voicing = voicing;
+      const keyMatch = /\b(?:em|tonalidade|tom)\s+([A-G][#b]?m?)\b/.exec(clean);
+      if (keyMatch?.[1]) out.key = keyMatch[1];
+      const bpmMatch = /\b(\d{2,3})\s*bpm\b/i.exec(norm);
+      if (bpmMatch) out.bpm = Math.min(522, Math.max(20, Number(bpmMatch[1])));
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.steps',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_STEPS_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      let preset = null;
+      if (/four[\s_-]*on[\s_-]*the[\s_-]*floor/.test(norm)) preset = 'four_on_the_floor';
+      else if (/half[\s_-]*time.*(?:snare|caixa|clap)|snare.*half[\s_-]*time/.test(norm)) preset = 'halftime_snare';
+      else if (/\briddim\b.*\b(?:hat|chimbal|tercina)/.test(norm)) preset = 'riddim_triplet_hat';
+      else if (/\briddim\b.*\b(?:stomp|clap)/.test(norm)) preset = 'riddim_stomp';
+      else if (/\briddim\b/.test(norm)) preset = 'riddim_kick';
+      else if (/\bbrostep\b/.test(norm)) preset = 'brostep_kick';
+      else if (/\bmelodic[\s_-]*dubstep\b/.test(norm)) preset = 'melodic_dubstep_kick';
+      else if (/\bcolour[\s_-]*bass\b/.test(norm)) preset = 'colour_bass_kick';
+      else if (/\bkawaii\b.*\b(?:perc|chime|foley)/.test(norm)) preset = 'kawaii_perc';
+      else if (/\bkawaii\b/.test(norm)) preset = 'kawaii_bounce_kick';
+      else if (/\bfuture[\s_-]*bass\b/.test(norm)) preset = 'future_bass_kick';
+      else if (/\bbackbeat\b/.test(norm)) preset = 'backbeat';
+      else if (/trap[\s_-]*hi[\s_-]*hat/.test(norm)) preset = 'trap_hihat';
+      else if (/offbeat[\s_-]*hat/.test(norm)) preset = 'offbeat_hat';
+      else if (/boom[\s_-]*bap[\s_-]*kick/.test(norm)) preset = 'boom_bap_kick';
+      else if (/dem[\s_-]*bow/.test(norm)) preset = 'dem_bow';
+
+      const chMatch = /\b(?:no|na|canal|channel)\s+([a-zA-Z0-9_-]{2,24})\b/i.exec(collapseText(message));
+      const candidateName = chMatch?.[1] && !/^(?:fl|studio|pattern|step|sequencer|channel|rack)$/i.test(chMatch[1])
+        ? chMatch[1]
+        : null;
+      const mode = /\b(?:limpa|zera|clear|apaga)\b/.test(norm)
+        ? 'clear'
+        : (/\b(?:adiciona|add)\b/.test(norm) ? 'add' : (/\b(?:le|mostra|ver|quais)\b/.test(norm) && !preset ? 'read' : 'replace'));
+
+      const out = { mode };
+      if (candidateName) out.channelName = candidateName;
+      if (preset) out.preset = preset;
+      else if (mode === 'replace' || mode === 'add') out.steps = [0, 8];
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.plugin',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_PLUGIN_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      if (/\b(?:proximo|next)\s+preset\b/.test(norm)) return { target: 'channel', action: 'next_preset' };
+      if (/\b(?:preset\s+anterior|prev\s+preset|volta\s+preset)\b/.test(norm)) return { target: 'channel', action: 'prev_preset' };
+      if (/\b(?:abre|abrir|foca|focar|mostra\s+janela)\b/.test(norm)) return { target: 'channel', action: 'focus' };
+      const valMatch = /\b(\d{1,3})\s*%/.exec(norm);
+      const paramMatch = /\b(?:cutoff|resonance|reso|mix|attack|decay|sustain|release|drive|gain|feedback|unison|detune|warp|level|ott|wt\s*pos|wavetable)\b/i.exec(norm);
+      if (paramMatch && valMatch && /\b(?:ajusta\w*|muda\w*|coloca\w*|poe|seta\w*|define\w*|altera\w*)\b/.test(norm)) {
+        return {
+          target: 'channel',
+          action: 'set_param',
+          paramName: paramMatch[0],
+          value: Math.min(1, Math.max(0, Number(valMatch[1]) / 100)),
+        };
+      }
+      const filterMatch = /\b(?:ott|wavetable|cutoff|filter|dist|distortion|lfo|macro|unison|warp|env)\b/i.exec(norm);
+      return {
+        target: 'channel',
+        action: 'list_params',
+        ...(filterMatch ? { filter: filterMatch[0] } : {}),
+        limit: 20,
+      };
+    },
+  },
+  {
+    toolName: 'fl.midi',
+    matches: normalized => !/\bspotify\b/.test(normalized) && !FL_MIDI_FILE_RE.test(normalized) && FL_MIDI_RE.test(normalized),
+    buildArgs: message => {
+      const clean = collapseText(message);
+      const norm = normalizeText(message);
+      const arpeggio = /\barpej\w*/i.test(clean);
+      const voicing = /\bcolour\s*bass\b/.test(norm)
+        ? 'colour_bass'
+        : (/\bsupersaw|future\s*bass|melodic\b/.test(norm) ? 'supersaw' : 'close');
+      const keyMatch = /\b(?:em|tonalidade|tom)\s+([A-G][#b]?m?)\b/.exec(clean);
+      if (/\broyal\s+road\b/.test(norm)) {
+        return {
+          progression: 'kawaii_royal_road',
+          key: keyMatch?.[1] || 'F',
+          voicing: voicing === 'close' ? 'supersaw' : voicing,
+          arpeggio,
+          durationMs: 450,
+        };
+      }
+      const chordMatches = [...clean.matchAll(/\b([A-G][#b]?(?:maj11|m7b5|min7|maj9|maj7|add11|add9|9sus4|7sus4|dim7|sus2|sus4|maj|min|dim|aug|m11|m9|m7|m6|69|11|m|9|7|6|5)?)\b/g)]
+        .map(m => m[1])
+        .filter(tok => !/^(?:A|E)$/.test(tok) || /\b(?:acordes?|progressao|toca|toque)\b/i.test(clean));
+      const chords = chordMatches.slice(0, 8);
+      if (chords.length > 0) {
+        return { chords, voicing, arpeggio, durationMs: 450 };
+      }
+      return { progression: 'future_bass_anthem', key: keyMatch?.[1] || 'C', voicing: 'supersaw', arpeggio, durationMs: 450 };
+    },
+  },
+  {
+    toolName: 'fl.mixer',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_MIXER_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const clean = collapseText(message);
+      const out = {};
+      const trackIdxMatch = /\btrack\s+(\d{1,3})\b/i.exec(norm);
+      if (trackIdxMatch) {
+        out.track = Number(trackIdxMatch[1]);
+      } else {
+        const nameMatch = /\b(?:do|da|na|no|track|canal)\s+([a-zA-Z0-9_-]{2,24})\b/i.exec(clean);
+        if (nameMatch?.[1] && !/^(?:fl|studio|mixer|volume|som|audio|mute|solo)$/i.test(nameMatch[1])) {
+          out.trackName = nameMatch[1];
+        } else if (/\bmaster\b/i.test(norm)) {
+          out.track = 0;
+        }
+      }
+      if (/\bdesmuta\w*\b/.test(norm)) out.mute = false;
+      else if (/\bmuta\w*|\bmute\b/.test(norm)) out.mute = true;
+      if (/\b(?:tira|remove|desliga)\s+solo\b/.test(norm)) out.solo = false;
+      else if (/\bsola\w*|\bsolo\b/.test(norm)) out.solo = true;
+      const pctMatch = /\b(\d{1,3})\s*%/.exec(norm);
+      if (pctMatch) {
+        out.volumePercent = Math.min(125, Math.max(0, Number(pctMatch[1])));
+      } else if (out.mute === undefined && out.solo === undefined) {
+        out.volumePercent = /\b(?:abaixa|reduz|diminui)\b/.test(norm) ? 65 : 90;
+      }
+      return out;
+    },
+  },
+  {
+    toolName: 'fl.transport',
+    matches: normalized => !/\bspotify\b/.test(normalized) && FL_TRANSPORT_RE.test(normalized),
+    buildArgs: message => {
+      const norm = normalizeText(message);
+      const bpmMatch = /\b(\d{2,3}(?:[.,]\d+)?)\s*(?:de\s+)?bpm\b|\bbpm\b(?:\s+(?:do|no|da)\s+fl(?:\s*studio)?)?(?:\s+(?:em|para|pra|=|:))?\s*(\d{2,3}(?:[.,]\d+)?)\b/i.exec(norm);
+      if (bpmMatch) {
+        const rawNum = String(bpmMatch[1] || bpmMatch[2]).replace(',', '.');
+        return { action: 'set_bpm', bpm: Math.min(522, Math.max(20, Number(rawNum))) };
+      }
+      if (/\b(?:pausa|pausar|pause)\b/.test(norm)) return { action: 'pause' };
+      if (/\b(?:stop|para|parar)\b/.test(norm)) return { action: 'stop' };
+      if (/\b(?:record|grava|gravar|gravacao)\b/.test(norm)) return { action: 'record' };
+      if (/\bmetronomo\b/.test(norm)) return { action: 'metronome' };
+      if (/\bpattern\s*mode\b/.test(norm)) return { action: 'pattern_mode' };
+      if (/\bsong\s*mode\b/.test(norm)) return { action: 'song_mode' };
+      if (/\bmarcador\b/.test(norm)) return { action: 'add_marker' };
+      return { action: 'play' };
+    },
+  },
+  {
+    toolName: 'fl.state',
+    matches: normalized => !/\bspotify\b/.test(normalized) && !FL_TRANSPORT_RE.test(normalized) && FL_STATE_RE.test(normalized),
+    buildArgs: () => ({ onlyActive: true }),
+  },
+  {
     toolName: 'spotify.control',
-    matches: normalized => SPOTIFY_CONTROL_RE.test(normalized),
+    matches: normalized => !FL_CONTEXT_RE.test(normalized) && SPOTIFY_CONTROL_RE.test(normalized),
     buildArgs: (message, normalized) => {
       if (/\b(?:pausa|pausar|pause|para|parar)\b/.test(normalized)) return { action: 'pause' };
       if (/\b(?:proxima|proximo|pula|pular|avanca|avancar)\b/.test(normalized)) return { action: 'next' };
@@ -1310,6 +1821,21 @@ function formatCodeInspectForPrompt(result) {
   };
 }
 
+function formatFlStateForPrompt(result) {
+  if (!isPlainObject(result)) return null;
+  return {
+    transport: result.transport,
+    pattern: result.pattern,
+    channelCount: result.channelCount,
+    channels: Array.isArray(result.channels)
+      ? result.channels.slice(0, 12).map(c => ({ index: c.index, name: c.name, selected: c.selected, muted: c.muted, mixerTrack: c.mixerTrack }))
+      : [],
+    mixerTracks: Array.isArray(result.mixerTracks)
+      ? result.mixerTracks.slice(0, 12).map(t => ({ index: t.index, name: t.name, volume: t.volume, muted: t.muted, solo: t.solo, clipping: t.clipping }))
+      : [],
+  };
+}
+
 export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
   if (!turn || typeof turn !== 'object' || turn.route !== 'tool' || !turn.tool) return '';
   if (Array.isArray(turn.multi) && turn.multi.length > 1) {
@@ -1335,7 +1861,9 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
                         ? (formatCodeInspectForPrompt(sub.result) ?? sub.result ?? {})
                         : toolName === 'code.propose'
                           ? (formatCodeProposeForPrompt(sub.result) ?? sub.result ?? {})
-                          : (sub.result ?? {});
+                          : toolName === 'fl.state'
+                            ? (formatFlStateForPrompt(sub.result) ?? sub.result ?? {})
+                            : (sub.result ?? {});
         let serialized = '';
         try {
           serialized = JSON.stringify(payload);
@@ -1368,19 +1896,23 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
                     ? (formatCodeInspectForPrompt(turn.result) ?? turn.result ?? {})
                     : turn.tool === 'code.propose'
                       ? (formatCodeProposeForPrompt(turn.result) ?? turn.result ?? {})
-                      : (turn.result ?? {});
+                      : turn.tool === 'fl.state'
+                        ? (formatFlStateForPrompt(turn.result) ?? turn.result ?? {})
+                        : (turn.result ?? {});
     let serialized = '';
     try {
       serialized = JSON.stringify(payload);
     } catch {
       serialized = String(turn.result ?? '');
     }
-    const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect';
+    const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect' || turn.tool === 'fl.guide';
     const effectiveMaxChars = isDetailedIntrospection ? Math.max(maxChars, 4000) : maxChars;
     const clean = redactSecrets(serialized).slice(0, effectiveMaxChars);
     let toolInstruction = '';
     if (turn.tool === 'self.describe') {
       toolInstruction = ' EXCEÇÃO DE TAMANHO PARA ESTE TURNO: ignore qualquer regra anterior de 1-2 frases curtas. Entregue uma explicação completa e organizada (entre 400 e 1400 caracteres) detalhando: 1) Visão geral dos módulos em src/ (core, agent, voice, memory, animation, ui); 2) Lista real das skills ativas pelo nome; 3) Exemplos das ferramentas ativas; 4) Limitações reais conhecidas (nunca invente nada nem peça ao usuário para contar o que mudou).';
+    } else if (turn.tool === 'fl.guide') {
+      toolInstruction = ' EXCEÇÃO DE CONTEÚDO: use os dados técnicos de produção acima para responder como coprodutora especialista, citando os parâmetros concretos (ex.: vozes/detune no Serum/Vital, configuração exata de Vocodex/Patcher/EQ, frequências em Hz, LUFS e eventuais notas aprendidas do estúdio do usuário).';
     } else if (turn.tool === 'code.propose') {
       toolInstruction = ' A proposta de código JÁ FOI ENVIADA com sucesso agora para o Code Agent/GitHub. Confirme o título e envio diretamente. NUNCA diga que você vai inspecionar, olhar ou programar o código agora, pois quem implementa é o Code Agent!';
     } else if (turn.tool === 'code.proposals') {
@@ -1393,6 +1925,8 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       toolInstruction = ' Informe a branch e alterações pendentes com base nos dados obtidos acima.';
     } else if (turn.tool === 'code.inspect') {
       toolInstruction = ' Avalie e comente diretamente o conteúdo do código inspecionado acima.';
+    } else if (turn.tool.startsWith('fl.')) {
+      toolInstruction = ' A operação no FL Studio/OpenUTAU JÁ FOI CONCLUÍDA COM SUCESSO agora (status: ok). Confirme diretamente ao usuário o valor aplicado com base nos dados reais acima, ignorando qualquer falha antiga do histórico.';
     }
     const lengthRule = isDetailedIntrospection
       ? 'Responda IMEDIATAMENTE entregando os fatos reais obtidos acima de forma clara e detalhada (citando módulos, skills/ferramentas, integrações e limitações reais, sem inventar dados).'
@@ -1546,6 +2080,96 @@ export function formatExecutedTurnFallbackReply(turn) {
     return list.length
       ? `As propostas registradas são: ${list.join('; ')}.`
       : 'Não encontrei nenhuma proposta de código pendente ou enviada recentemente.';
+  }
+  if (turn.tool === 'fl.state' && r.transport) {
+    const status = r.transport.playing ? 'tocando' : 'parado';
+    const clips = Array.isArray(r.mixerTracks) ? r.mixerTracks.filter(t => t.clipping).map(t => t.name) : [];
+    const clipNote = clips.length ? ` Clipping em: ${clips.join(', ')}.` : '';
+    return `FL Studio ${status} a ${r.transport.bpm} BPM (${r.channels?.length || 0} canais visiveis).${clipNote}`;
+  }
+  if (turn.tool === 'fl.transport') {
+    return `Transport do FL Studio (${r.action || 'comando'}) executado a ${r.bpm ?? '-'} BPM.`;
+  }
+  if (turn.tool === 'fl.mixer') {
+    return `Mixer atualizado na track "${r.name || r.index}": volume ${Math.round((r.volume ?? 0.8) * 125)}%.`;
+  }
+  if (turn.tool === 'fl.routing') {
+    const count = Array.isArray(r.applied) ? r.applied.length : (Array.isArray(r.routes) ? r.routes.length : 0);
+    return `Roteamento (${r.mode || 'sidechain'}) aplicado a partir de "${r.sourceName || r.sourceTrack}" (${count} destino(s)).`;
+  }
+  if (turn.tool === 'fl.eq') {
+    return `EQ/Estereo atualizado na track "${r.trackName || r.track}"${r.preset ? ` (preset ${r.preset})` : ''}.`;
+  }
+  if (turn.tool === 'fl.listen') {
+    if (r.silent) return 'Escutei a saida do PC, mas esta em silencio agora — de play no FL Studio!';
+    const warnText = Array.isArray(r.warnings) && r.warnings.length ? ` Alerta: ${r.warnings[0]}` : ' Espectro equilibrado!';
+    return `Escutei ${r.durationSec}s: ${r.lufsApprox} LUFS, pico ${r.peakDbfs} dBFS, correlacao do Sub ${r.stereo?.subCorrelation ?? 1}.${warnText}`;
+  }
+  if (turn.tool === 'fl.guide' && Array.isArray(r.playbooks)) {
+    const first = r.playbooks[0];
+    if (!first) return 'Consultei o guia de producao, mas nao encontrei entradas para esse filtro.';
+    const firstTip = Object.values(first.sections || {}).flat()[0] || '';
+    return `Guia ${first.name} (${first.bpmRange?.join('-')} BPM, alvo ${first.targetLufsDrop?.join(' a ')} LUFS): ${firstTip.slice(0, 150)}`;
+  }
+  if (turn.tool === 'fl.learn') {
+    if (r.action === 'save' && r.note) {
+      return `Anotei na minha memoria de estudio (${r.note.genre}): "${r.note.title}".`;
+    }
+    if (r.action === 'list') {
+      return r.count > 0 ? `Tenho ${r.count} nota(s) de producao salva(s) no estudio.` : 'Ainda nao ha notas personalizadas salvas no estudio.';
+    }
+    return `Atualizei as notas de estudio (${r.action}).`;
+  }
+  if (turn.tool === 'fl.serum') {
+    if (r.action === 'create') {
+      return `Criei o preset "${r.presetName}" (${r.style}) para o Serum 2 em Presets/User/${r.bankName || 'Usami'}!`;
+    }
+    if (r.action === 'categories') {
+      return `Catalogo Serum 2: ${r.totalPresets || 0} presets encontrados.`;
+    }
+    if (r.action === 'stage') {
+      return `Separei ${r.stagedCount || 0} preset(s) do Serum 2 na pasta User/${r.bankName || 'Usami'}.`;
+    }
+    const names = Array.isArray(r.presets) ? r.presets.slice(0, 4).map(p => p.presetName) : [];
+    return names.length
+      ? `Achei ${r.matchedCount} preset(s) no Serum 2, como: ${names.join(', ')}.`
+      : 'Nao encontrei presets no Serum 2 para esse filtro.';
+  }
+  if (turn.tool === 'fl.ui') {
+    if (r.action === 'add_plugin') {
+      return `Carreguei o plugin "${r.pluginName}" no FL Studio via Plugin Picker.`;
+    }
+    if (r.action === 'capture_window') {
+      return `Capturei a janela "${r.window}" (${r.width}x${r.height}) em ${r.filePath}.`;
+    }
+    return `Automacao de interface do FL Studio (${r.action}) concluida.`;
+  }
+  if (turn.tool === 'fl.vocal') {
+    if (r.action === 'status') {
+      return `OpenUTAU: ${r.openUtauInstalled ? 'instalado' : 'ausente'}, Usami_CV: ${r.voicebankInstalled ? 'pronto' : 'ausente'}, DiffSinger: ${r.diffSingerInstalled ? 'pronto' : 'ausente'}.`;
+    }
+    if (r.action === 'convert') {
+      return `Converti a guia vocal para o timbre cantado da Usami via Seed-VC em ${r.outputWav} (${r.elapsedSec}s).`;
+    }
+    if (r.action === 'open') {
+      return `Abri o projeto vocal no OpenUTAU (${r.ustxPath || 'novo projeto'}).`;
+    }
+    return `Gerei o projeto vocal "${r.fileName}" (${r.engine || 'classic'}, ${r.style}, ${r.bpm} BPM, tom ${r.key}, ${r.noteCount} silabas) para o OpenUTAU + MIDI.`;
+  }
+  if (turn.tool === 'fl.steps') {
+    return `Steps atualizados em "${r.channelName || r.channel}": [${(r.activeSteps || []).join(', ')}].`;
+  }
+  if (turn.tool === 'fl.plugin') {
+    return `Plugin "${r.pluginName || 'Plugin'}" atualizado/inspecionado no FL Studio.`;
+  }
+  if (turn.tool === 'fl.midi') {
+    return `Enviei ${r.notesSent || 0} nota(s) MIDI ao vivo para o FL Studio.`;
+  }
+  if (turn.tool === 'fl.midi_file') {
+    return `Gerei o arquivo MIDI "${r.fileName}" (${r.style}, ${r.bpm} BPM, ${r.noteCount} notas) em ${r.filePath}.`;
+  }
+  if (turn.tool === 'fl.undo') {
+    return `Acao ${r.direction === 'redo' ? 'refeita' : 'desfeita'} no FL Studio.`;
   }
   if (typeof r.summary === 'string' && r.summary.trim()) {
     return redactSecrets(r.summary).slice(0, 210);

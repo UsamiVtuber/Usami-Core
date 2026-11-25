@@ -15,6 +15,8 @@ let activeWorker = null;
 let workerQueue = Promise.resolve();
 let workerSeq = 0;
 
+export const WHISPER_INITIAL_PROMPT = 'Usami, skills, módulos, ferramentas, GitHub, API, desktop, Rust, Node.js, FL Studio, OpenUTAU, UTAU, USTX, DiffSinger, Seed-VC, RVC, Neuro-sama, vocal, acapella, BPM, LUFS, Mixer, Piano Roll, Channel Rack, Step Sequencer, MIDI, sidechain, supersaw, Future Bass, Kawaii, Dubstep, Riddim, Brostep, Colour Bass, Melodic Dubstep, Royal Road, Serum 2, Vital, Sylenth1, Harmor, Sytrus, Sakura, Ogun, Kepler Exo, Vocodex, Patcher, OTT, cutoff, preset, Kick, Snare, Sub.';
+
 function buildWorkerScript() {
   return [
     'import json, os, sys',
@@ -40,7 +42,7 @@ function buildWorkerScript() {
     '    try:',
     '        req = json.loads(line)',
     '        req_id = req.get("id")',
-    '        segments, _ = model.transcribe(req["audioPath"], language=req.get("language", "pt"), beam_size=int(req.get("beamSize", 1)), vad_filter=True, condition_on_previous_text=False, initial_prompt="Usami, skills, módulos, ferramentas, GitHub, API, desktop, Rust, Node.js.")',
+    `        segments, _ = model.transcribe(req["audioPath"], language=req.get("language", "pt"), beam_size=int(req.get("beamSize", 1)), vad_filter=True, condition_on_previous_text=False, initial_prompt=${JSON.stringify(WHISPER_INITIAL_PROMPT)})`,
     '        text = " ".join(segment.text for segment in segments).strip()',
     '        sys.stdout.write(json.dumps({"id": req_id, "ok": True, "text": text}) + "\\n")',
     '    except Exception as exc:',

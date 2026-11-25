@@ -49,6 +49,7 @@ import { createResearchAgentTools, publishResearchAgentSkill } from './src/resea
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createSpotifyAuthClient, createSpotifyConnectorHandler } from './src/spotify-auth.js';
 import { createSpotifyTools, publishSpotifySkill } from './src/spotify-skill.js';
+import { createFlStudioClient, createFlStudioTools, publishFlStudioSkill } from './src/fl-studio-skill.js';
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
@@ -423,6 +424,7 @@ for (const [label, publishFn] of [
   ['research-agent', publishResearchAgentSkill],
   ['git-assistant', publishGitAssistantSkill],
   ['spotify-player', publishSpotifySkill],
+  ['fl-studio', publishFlStudioSkill],
 ]) {
   try {
     publishFn({ dataDir: resolveDataDir() });
@@ -432,6 +434,7 @@ for (const [label, publishFn] of [
 }
 
 const installSpotifyAuth = createSpotifyAuthClient({ dataDir: resolveDataDir() });
+const installFlStudioClient = createFlStudioClient();
 
 for (const skillTool of [
   ...createStudyCompanionTools({
@@ -456,6 +459,20 @@ for (const skillTool of [
     onTelemetry: evt => sendObservabilityEvent({
       kind: 'spotify_tool',
       source: 'usami-spotify',
+      route: `/tools/${evt.tool}`,
+      statusCode: evt.ok ? 200 : 500,
+      durationMs: evt.durationMs,
+      isError: Boolean(evt.isError),
+      errorMessage: evt.errorMessage || null,
+      metadata: { tool: evt.tool, action: evt.action || null },
+    }),
+  }),
+  ...createFlStudioTools({
+    flClient: installFlStudioClient,
+    dataDir: resolveDataDir,
+    onTelemetry: evt => sendObservabilityEvent({
+      kind: 'fl_studio_tool',
+      source: 'usami-fl-studio',
       route: `/tools/${evt.tool}`,
       statusCode: evt.ok ? 200 : 500,
       durationMs: evt.durationMs,
