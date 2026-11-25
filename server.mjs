@@ -1596,6 +1596,7 @@ export function createChatHandler(options = {}) {
       };
 
       let hedged = false;
+      const liveExecutedTools = [];
       if (useNvidia()) {
         // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
         try {
@@ -1663,9 +1664,13 @@ export function createChatHandler(options = {}) {
             publishActivity({ phase: 'tool', tool: resolvedName, tools: [resolvedName] });
             try {
               const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'agent' });
-              return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
+              const res = exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
+              liveExecutedTools.push({ tool: resolvedName, args, result: res });
+              return res;
             } catch (error) {
-              return { ok: false, error: String(error?.message || error) };
+              const errRes = { ok: false, error: String(error?.message || error) };
+              liveExecutedTools.push({ tool: resolvedName, args, result: errRes });
+              return errRes;
             } finally {
               publishActivity({ phase: 'thinking' });
             }
@@ -1673,6 +1678,7 @@ export function createChatHandler(options = {}) {
           const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', async () => {
             const sys = withCapabilities(promptOverride ?? system, capabilities);
             if (useTools && openAiTools.length) {
+              const toolBudgetMs = options.nvidiaToolBudgetMs ?? Math.max(NVIDIA_BUDGET_MS, 90000);
               const res = await generateReplyWithTools(sys, parsedBody.message, {
                 model: chatModel,
                 tools: openAiTools,
@@ -1681,7 +1687,7 @@ export function createChatHandler(options = {}) {
                 maxTokens: 1800,
                 maxIterations: 8,
                 replyCharLimit,
-                signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+                signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(toolBudgetMs)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
               });
               if (!res.ok) {
@@ -1856,6 +1862,25 @@ export function createChatHandler(options = {}) {
           mark('animation');
         } catch (error) {
           nvidiaFailed = true;
+          if (!executedAgentTurn && liveExecutedTools.length > 0) {
+            const lastExec = liveExecutedTools[liveExecutedTools.length - 1];
+            executedAgentTurn = {
+              id: `turn-${now()}`,
+              status: 'executed',
+              tool: lastExec.tool,
+              tools: liveExecutedTools.map(t => t.tool),
+              result: lastExec.result,
+              executedTools: liveExecutedTools,
+            };
+            agentTurn = {
+              id: executedAgentTurn.id,
+              kind: 'operational',
+              route: 'tool',
+              status: 'executed',
+              tool: lastExec.tool,
+              tools: executedAgentTurn.tools,
+            };
+          }
           if (turn.signal.aborted) return;
           // O fallback já foi tentado (em paralelo ou depois da falha): repetir
           // a chamada ao mesmo provedor só gastaria tokens.
@@ -1921,7 +1946,19 @@ export function createChatHandler(options = {}) {
             }
           }
           if (!parsed || !parsed.ok) {
-            return send(lastAltError?.httpStatus || 502, { error: lastAltError?.message || 'Todos os provedores alternativos falharam.' });
+            if (executedAgentTurn) {
+              parsed = {
+                ok: true,
+                reply: formatExecutedTurnFallbackReply(executedAgentTurn),
+                gesture: 'nod',
+                actions: [],
+                remember: null,
+                classification,
+                source: 'offline',
+              };
+            } else {
+              return send(lastAltError?.httpStatus || 502, { error: lastAltError?.message || 'Todos os provedores alternativos falharam.' });
+            }
           }
           // Contribuição da animação no caminho do balão: aqui só o pós-processamento
           // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget
