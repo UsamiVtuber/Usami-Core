@@ -1679,7 +1679,7 @@ export function createChatHandler(options = {}) {
                 executeTool: executeToolForChat,
                 temperature,
                 maxTokens: 1800,
-                maxIterations: 4,
+                maxIterations: 8,
                 replyCharLimit,
                 signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
@@ -1721,8 +1721,12 @@ export function createChatHandler(options = {}) {
           };
 
           // Sem provedor alternativo não há corrida: correr sozinho não acelera.
+          // Quando já existe intenção operacional deferida para tool calling nativo
+          // (intentHintTool), também não corremos contra `alternate` sem tools para
+          // evitar que o fallback alucine "feito" e aborte as ferramentas em andamento.
           const effectiveHedgeMs = isFastTier ? 500 : hedgeAfterMs;
-          parsed = alternate
+          const allowHedgeRace = Boolean(alternate) && !(useTools && intentHintTool);
+          parsed = allowHedgeRace
             ? await raceProviders({
               hedgeMs: effectiveHedgeMs,
               startPrimary: startNvidia,
