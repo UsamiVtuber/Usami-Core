@@ -1079,18 +1079,21 @@ export function createFlStudioTools({
     schema: AGENT_SCHEMAS.tool,
     name: 'fl.routing',
     version: '1.2.0',
-    description: 'Configura Sidechain ghost (level 0), Submix Bus (bus_only sem Master), Send paralelo, desconexao ou inspecao de rotas entre tracks do Mixer.',
+    description: 'Configura Sidechain ghost (level 0), Submix Bus (bus_only sem Master), Send paralelo, desconexao, inspecao de rotas ou atribuicao Channel Rack -> Mixer (mode="channel_to_mixer").',
     origin: 'skill',
     permissionLevel: 2,
     timeoutMs: 8000,
     parameters: [
-      { name: 'mode', type: 'string', required: false, enum: [...ROUTING_MODES], description: 'sidechain (padrao), bus_only, send, disconnect ou inspect.' },
+      { name: 'mode', type: 'string', required: false, enum: [...ROUTING_MODES], description: 'sidechain (padrao), bus_only, send, disconnect, inspect ou channel_to_mixer.' },
       { name: 'sourceTrack', type: 'number', required: false, description: 'Indice da track de origem (ex.: Kick).' },
       { name: 'sourceTrackName', type: 'string', required: false, description: 'Nome da track de origem (ex.: Kick, Snare).' },
       { name: 'destTrack', type: 'number', required: false, description: 'Indice da track de destino (ex.: Supersaw, Bass Bus).' },
       { name: 'destTrackName', type: 'string', required: false, description: 'Nome da track de destino.' },
       { name: 'destTracks', type: 'array', required: false, description: 'Lista de indices de destino para aplicar de uma vez.' },
       { name: 'destTrackNames', type: 'array', required: false, description: 'Lista de nomes de destino (ex.: ["Supersaw","Sub","Arp"]).' },
+      { name: 'assignments', type: 'array', required: false, description: 'Para mode="channel_to_mixer": lista de { channel ou channelName, track ou trackName } (ate 16 por chamada).' },
+      { name: 'channel', type: 'number', required: false, description: 'Indice do canal no Channel Rack para mode="channel_to_mixer".' },
+      { name: 'channelName', type: 'string', required: false, description: 'Nome do canal no Channel Rack para mode="channel_to_mixer".' },
       { name: 'levelPercent', type: 'number', required: false, description: 'Nivel de envio em % para send/bus_only (0 a 125; 100 = 0 dB).' },
       { name: 'level', type: 'number', required: false, description: 'Nivel de envio normalizado (0.0 a 1.0).' },
     ],
@@ -1098,7 +1101,7 @@ export function createFlStudioTools({
       return isPlainObject(result)
         && result.ok === true
         && result.schema === FL_STUDIO_SCHEMA
-        && Number.isInteger(result.sourceTrack);
+        && (Number.isInteger(result.sourceTrack) || (result.mode === 'channel_to_mixer' && Array.isArray(result.applied)));
     },
     async execute(args = {}) {
       const cmdArgs = validateRoutingArgs(args);

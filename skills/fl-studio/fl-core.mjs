@@ -57,7 +57,7 @@ export const STEPS_MODES = Object.freeze(['replace', 'add', 'clear', 'read']);
 export const PLUGIN_TARGETS = Object.freeze(['channel', 'mixer']);
 export const PLUGIN_ACTIONS = Object.freeze(['list_params', 'set_param', 'next_preset', 'prev_preset', 'focus']);
 export const UNDO_DIRECTIONS = Object.freeze(['undo', 'redo']);
-export const ROUTING_MODES = Object.freeze(['sidechain', 'bus_only', 'send', 'disconnect', 'inspect']);
+export const ROUTING_MODES = Object.freeze(['sidechain', 'bus_only', 'send', 'disconnect', 'inspect', 'channel_to_mixer']);
 export const EQ_PRESETS = Object.freeze(['sub_mono_clean', 'supersaw_air', 'mud_cut', 'flat']);
 export const LISTEN_SOURCES = Object.freeze(['loopback', 'file']);
 export const LISTEN_GENRES = Object.freeze([
@@ -1020,6 +1020,58 @@ export function validateRoutingArgs(args = {}) {
   const mode = String(args.mode || 'sidechain').trim().toLowerCase();
   if (!ROUTING_MODES.includes(mode)) {
     throw new Error(`mode invalido: "${mode}". Use um de: ${ROUTING_MODES.join(', ')}.`);
+  }
+
+  if (mode === 'channel_to_mixer') {
+    const rawList = Array.isArray(args.assignments) && args.assignments.length > 0
+      ? args.assignments
+      : [{
+          channel: args.channel,
+          channelName: args.channelName,
+          track: args.track ?? args.destTrack,
+          trackName: args.trackName ?? args.destTrackName,
+        }];
+    if (rawList.length > 16) {
+      throw new Error('assignments suporta no maximo 16 canais por chamada.');
+    }
+    const assignments = rawList.map((item, idx) => {
+      if (!item || typeof item !== 'object') {
+        throw new Error(`assignment[${idx}] invalido.`);
+      }
+      const entry = {};
+      if (item.channel !== undefined) {
+        if (!Number.isInteger(item.channel) || item.channel < 0 || item.channel > 255) {
+          throw new Error(`assignment[${idx}].channel deve ser inteiro entre 0 e 255.`);
+        }
+        entry.channel = item.channel;
+      }
+      if (item.channelName !== undefined) {
+        const chName = String(item.channelName).trim();
+        if (!chName) throw new Error(`assignment[${idx}].channelName nao pode ser vazio.`);
+        entry.channelName = chName.slice(0, 64);
+      }
+      if (entry.channel === undefined && !entry.channelName) {
+        throw new Error(`assignment[${idx}] precisa de channel ou channelName.`);
+      }
+      const tr = item.track ?? item.destTrack;
+      const trName = item.trackName ?? item.destTrackName;
+      if (tr !== undefined) {
+        if (!Number.isInteger(tr) || tr < 0 || tr > 126) {
+          throw new Error(`assignment[${idx}].track deve ser inteiro entre 0 e 126.`);
+        }
+        entry.track = tr;
+      }
+      if (trName !== undefined) {
+        const cleanTr = String(trName).trim();
+        if (!cleanTr) throw new Error(`assignment[${idx}].trackName nao pode ser vazio.`);
+        entry.trackName = cleanTr.slice(0, 64);
+      }
+      if (entry.track === undefined && !entry.trackName) {
+        throw new Error(`assignment[${idx}] precisa de track ou trackName.`);
+      }
+      return entry;
+    });
+    return { mode, assignments };
   }
 
   const out = { mode };

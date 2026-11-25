@@ -468,8 +468,58 @@ def _handle_undo(args):
     }
 
 
+def _resolve_channel(args):
+    ch_idx = args.get('channel')
+    if ch_idx is not None:
+        idx = int(ch_idx)
+        total = int(_safe(channels.channelCount, 0) or 0)
+        if idx < 0 or (total > 0 and idx >= total):
+            raise ValueError('Canal %d fora do intervalo (0..%d).' % (idx, max(0, total - 1)))
+        return idx
+    ch_name = str(args.get('channelName') or '').strip().lower()
+    if ch_name:
+        total = int(_safe(channels.channelCount, 0) or 0)
+        for i in range(total):
+            name = (_safe(lambda i=i: channels.getChannelName(i), '') or '').strip().lower()
+            if name == ch_name:
+                return i
+        for i in range(total):
+            name = (_safe(lambda i=i: channels.getChannelName(i), '') or '').strip().lower()
+            if ch_name in name:
+                return i
+        raise ValueError('Canal "%s" nao encontrado no Channel Rack.' % args.get('channelName'))
+    return int(_safe(channels.selectedChannel, 0) or 0)
+
+
 def _handle_routing(args):
     mode = str(args.get('mode') or 'sidechain').strip().lower()
+    if mode == 'channel_to_mixer':
+        if not hasattr(channels, 'setTargetFxTrack'):
+            raise RuntimeError('API channels.setTargetFxTrack indisponivel nesta versao do FL Studio.')
+        raw_items = args.get('assignments')
+        if not isinstance(raw_items, list) or not raw_items:
+            raw_items = [{
+                'channel': args.get('channel'),
+                'channelName': args.get('channelName'),
+                'track': args.get('track', args.get('destTrack')),
+                'trackName': args.get('trackName', args.get('destTrackName')),
+            }]
+        applied = []
+        for item in raw_items:
+            ch_idx = _resolve_channel(item)
+            tr_idx = _resolve_track({'track': item.get('track'), 'trackName': item.get('trackName')})
+            channels.setTargetFxTrack(ch_idx, tr_idx)
+            applied.append({
+                'channel': ch_idx,
+                'channelName': str(_safe(lambda c=ch_idx: channels.getChannelName(c), 'Channel %d' % ch_idx) or ''),
+                'track': tr_idx,
+                'trackName': str(_safe(lambda t=tr_idx: mixer.getTrackName(t), 'Insert %d' % tr_idx) or ''),
+            })
+        return {
+            'mode': 'channel_to_mixer',
+            'applied': applied,
+        }
+
     src = _resolve_track({'track': args.get('sourceTrack'), 'trackName': args.get('sourceTrackName')})
 
     if mode == 'inspect':
