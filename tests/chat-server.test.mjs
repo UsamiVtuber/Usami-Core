@@ -464,10 +464,12 @@ test('parseProviderRaw: rejeita tokens em CJK e fragmentos espúrios de raciocí
   assert.equal(parseProviderRaw(jsonWithCjk).ok, false);
 });
 
-test('parseProviderRaw: rubrica de roleplay nunca chega ao reply', () => {
+test('parseProviderRaw: rubrica de roleplay nunca chega ao reply e negrito markdown preserva o texto', () => {
   // O balão e o /api/tts falam o texto cru: "*bufa*" virava voz.
   assert.equal(parseProviderRaw('{"reply":"Hmph... *bufa, braços cruzados* Não diga que é fofo."}').reply, 'Hmph... Não diga que é fofo.');
-  assert.equal(parseProviderRaw('{"reply":"**engasga** Q-que?!"}').reply, 'Q-que?!');
+  // Negrito Markdown (**texto**) preserva o conteúdo e remove apenas os asteriscos
+  // (evita apagar nomes de itens em listas como "1. **sleep-mode** — ...").
+  assert.equal(parseProviderRaw('{"reply":"1. **sleep-mode** — modo sono de verdade!"}').reply, '1. sleep-mode — modo sono de verdade!');
   // Órfão (sem fechamento) também sai — continuaria sendo lido.
   assert.equal(parseProviderRaw('{"reply":"*desvia o olhar N-nada..."}').reply, 'desvia o olhar N-nada...');
   // Só rubrica não é fala: erro amigável em vez de balão vazio.
@@ -541,6 +543,14 @@ test('parseProviderRaw: reply longo é cortado em fronteira de sentença, sem el
   // sem pontuação nem espaço: corte duro no limite
   const hard = parseProviderRaw(JSON.stringify({ reply: 'a'.repeat(300) }));
   assert.equal(hard.reply.length, 220);
+
+  // não corta deixando dois-pontos pendurado no final
+  const withColon = parseProviderRaw(JSON.stringify({
+    reply: 'Primeiro item completo aqui com explicação detalhada e fechamento normal. Segundo item com introdução longa para testar dois-pontos: continuação que passaria muito do teto de duzentos e vinte caracteres do balão.',
+  }));
+  assert.equal(withColon.ok, true);
+  assert.ok(!withColon.reply.endsWith(':'), `não deveria terminar em dois-pontos: ${withColon.reply}`);
+  assert.ok(withColon.reply.endsWith('.'), `deveria parar no ponto final anterior: ${withColon.reply}`);
 });
 
 test('handler: 200 com reply recuperado de JSON truncado, sem vazar o payload bruto', async () => {

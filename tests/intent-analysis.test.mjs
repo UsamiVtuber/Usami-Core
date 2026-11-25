@@ -220,3 +220,75 @@ test('generateReplyWithTools: encadeia múltiplas ferramentas em sequência (mul
     else delete process.env.NVIDIA_API_KEY;
   }
 });
+
+test('generateReplyWithTools: preserva resposta longa (>220 chars) e títulos em negrito quando ferramentas foram executadas', async () => {
+  const prevKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'mock-key';
+
+  const longReply = [
+    'Três blueprints prontinhos, Lucas!',
+    '',
+    '1. **sleep-mode** — o modo sono de verdade: voz sussurrada, respiração guiada, historinhas de coelho e desligamento programado.',
+    '',
+    '2. **coop-games** — pra gente jogar junto: leitura de tela, comentários ao vivo e dicas durante a partida.',
+    '',
+    '3. **study-buddy** — foco total com pomodoro, revisão espaçada e lembretes gentis.',
+  ].join('\n');
+
+  let turn = 0;
+  const mockClient = {
+    chatCompletions: async () => {
+      turn += 1;
+      if (turn === 1) {
+        return {
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: 'call_bp_1',
+                type: 'function',
+                function: { name: 'architect_blueprint', arguments: '{"idea":"sleep-mode"}' },
+              }],
+            },
+          }],
+        };
+      }
+      return {
+        choices: [{
+          message: {
+            content: JSON.stringify({ reply: longReply, gesture: 'tilt', actions: [] }),
+          },
+        }],
+      };
+    },
+  };
+
+  try {
+    const res = await generateReplyWithTools(
+      'Você é a Usami.',
+      'escolhe as próximas skills',
+      {
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'architect_blueprint',
+            description: 'Cria blueprint de skill',
+            parameters: { type: 'object', properties: { idea: { type: 'string' } } },
+          },
+        }],
+        executeTool: async () => ({ ok: true, id: 'bp-1' }),
+        client: mockClient,
+        maxIterations: 4,
+      },
+    );
+
+    assert.equal(res.ok, true);
+    assert.ok(res.reply.length > 220, `esperava reply completo >220 chars, veio ${res.reply.length}`);
+    assert.match(res.reply, /1\. sleep-mode —/);
+    assert.match(res.reply, /2\. coop-games —/);
+    assert.match(res.reply, /3\. study-buddy —/);
+  } finally {
+    if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
+    else delete process.env.NVIDIA_API_KEY;
+  }
+});

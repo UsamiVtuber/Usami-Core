@@ -1320,8 +1320,7 @@ export function createChatHandler(options = {}) {
       // hedge e pelo fallback sequencial (NVIDIA desligada ou falha sem corrida).
       let alternateUsed = false;
       let routerUsed = false;
-      const isDetailedIntrospectionRequest = executedAgentTurn?.tool === 'self.describe'
-        || executedAgentTurn?.tool === 'code.inspect'
+      const isDetailedIntrospectionRequest = Boolean(executedAgentTurn?.tool)
         || /\b(?:descrev\w*|resum\w*|explic\w*|lista\w*)\b.*\b(?:m[óo]dulos|ferramentas|habilidades|skills|arquitetura|limita[çc][õo]es)\b/i.test(String(parsedBody.message || ''));
       const replyCharLimit = isDetailedIntrospectionRequest ? 1800 : undefined;
       const alternateProviderReply = (config, signal) => {
@@ -1410,7 +1409,7 @@ export function createChatHandler(options = {}) {
             // está rodando — o cliente mostra "executando <tool>".
             publishActivity({ phase: 'tool', tool: resolvedName, tools: [resolvedName] });
             try {
-              const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'chat' });
+              const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'agent' });
               return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
             } catch (error) {
               return { ok: false, error: String(error?.message || error) };
@@ -1428,6 +1427,7 @@ export function createChatHandler(options = {}) {
                 temperature,
                 maxTokens: 1800,
                 maxIterations: 4,
+                replyCharLimit,
                 signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
               });

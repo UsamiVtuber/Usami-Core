@@ -15,7 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractAllJsonCandidates } from './json-salvage.js';
-import { parseJsonLoosely, parseProviderRaw } from './provider-parse.js';
+import { parseJsonLoosely, parseProviderRaw, stripToolCallMarkup } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
@@ -214,6 +214,7 @@ export async function generateReplyWithTools(
     maxIterations = 4,
     temperature = 0.7,
     maxTokens = 1800,
+    replyCharLimit,
     client = sharedClient,
     signal,
     blurtReply,
@@ -284,17 +285,42 @@ export async function generateReplyWithTools(
     }
 
     // Resposta final (texto). Parseia como JSON de reply.
+    // Quando houve execução de ferramentas, a resposta sintetiza dados/listas
+    // estruturadas e não deve ser truncada no teto curto de 220 chars.
+    const effectiveReplyCharLimit = replyCharLimit ?? (executedTools.length > 0 ? 1800 : undefined);
     const text = typeof msg.content === 'string' ? msg.content : '';
-    const parsed = parseProviderRaw(text);
+    const parsed = parseProviderRaw(text, { replyCharLimit: effectiveReplyCharLimit });
     if (parsed.ok) {
       return { ...parsed, source: 'nvidia', executedTools };
     }
     const loose = parseJsonLoosely(text);
     if (loose.ok && loose.value && typeof loose.value === 'object' && loose.value.reply) {
-      return { ...loose.value, source: 'nvidia', executedTools };
+      const reparsed = parseProviderRaw(JSON.stringify(loose.value), { replyCharLimit: effectiveReplyCharLimit });
+      if (reparsed.ok) {
+        return { ...reparsed, source: 'nvidia', executedTools };
+      }
     }
-    // Sem JSON recuperável: devolve o texto como reply (nunca o bruto truncado).
-    return { ok: true, reply: text.slice(0, 300) || '...', gesture: 'neutral', actions: [], executedTools, source: 'nvidia' };
+    const cleanFallbackText = stripToolCallMarkup(text);
+    if (!cleanFallbackText) {
+      return {
+        ok: false,
+        status: 502,
+        error: parsed.error || 'O modelo retornou uma resposta inválida.',
+        gesture: 'neutral',
+        actions: [],
+        executedTools,
+        source: 'nvidia',
+      };
+    }
+    // Sem JSON recuperável, mas com texto legível limpo (nunca markup bruto de tool_call).
+    return {
+      ok: true,
+      reply: cleanFallbackText.slice(0, effectiveReplyCharLimit || 300),
+      gesture: 'neutral',
+      actions: [],
+      executedTools,
+      source: 'nvidia',
+    };
   }
 
   // Esgotou iterações sem resposta final.

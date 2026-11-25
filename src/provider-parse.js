@@ -94,7 +94,11 @@ export function filterActionsByCatalog(actions, capabilities) {
 // gesture), então o texto descritivo não tem para onde ir além de sair.
 export function stripStageDirections(reply) {
   return String(reply ?? '')
-    .replace(/\*+[^*\n]*\*+/g, ' ')
+    // Negrito Markdown (**texto**): mantém o conteúdo e remove os marcadores
+    // para não apagar títulos/itens de listas nem mandar asteriscos ao TTS.
+    .replace(/(?<!\*)\*\*([^*\n]+)\*\*(?!\*)/g, '$1')
+    // Rubrica de roleplay em itálico (*bufa, braços cruzados*): remove inteiro.
+    .replace(/\*[^*\n]*\*/g, ' ')
     .replace(/\*/g, '')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
@@ -104,7 +108,7 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
   if (reply.length <= limit) return reply;
   const window = reply.slice(0, limit);
   for (let i = window.length - 1; i >= 0; i -= 1) {
-    if ('.!?;:'.includes(window[i])) return window.slice(0, i + 1).trimEnd();
+    if ('.!?…'.includes(window[i])) return window.slice(0, i + 1).trimEnd();
   }
   const space = window.lastIndexOf(' ');
   return (space > 0 ? window.slice(0, space) : window).trimEnd();
@@ -113,8 +117,16 @@ function capReplyLength(reply, limit = REPLY_CHAR_LIMIT) {
 // Única limpeza de JSON vazado do projeto (B14). Era copiada em server.mjs,
 // streaming-parser.js (duas vezes) e nos parsers de técnica/media com drift;
 // aqui é a fonte e o restante importa daqui.
+export function stripToolCallMarkup(text) {
+  return String(text ?? '')
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, ' ')
+    .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, ' ')
+    .replace(/<\/?(?:tool_call|function|parameter)(?:=[^>]*)?>/gi, ' ')
+    .trim();
+}
+
 export function stripLeakedJson(reply) {
-  return String(reply ?? '')
+  return stripToolCallMarkup(reply)
     // Remove vazamento com separadores literais ou pipes, ex.: `.|gesture":"nod`, `.| gesture ": "nod` ou `,"gesture":"nod`
     .replace(/(?:[\s,;|]+|\s*\.\s*[|]|\s*\.\s*(?=["']?gesture))\s*\\?["']?\b(?:gesture|actions|remember|speechTags|set_expression|play_clip|set_morph|set_mesh_visible|play_sequence|play_vrma)\b\s*\\?["']?\s*[:=][\s\S]*$/i, '')
     // Remove qualquer vazamento de chaves do schema JSON dentro ou no fim do reply
@@ -285,14 +297,15 @@ export function parseProviderRaw(raw, { replyCharLimit = REPLY_CHAR_LIMIT } = {}
         const salvagedGesture = salvageLeakedGesture(trimmed) || 'neutral';
         return { ok: true, reply: cleaned.display, gesture: salvagedGesture, actions: [], remember: null, ...(cleaned.tags.length ? { speechTags: cleaned.tags } : {}) };
       }
-      // Rejeita texto bruto com caracteres CJK ou debris de raciocínio/código
+      // Rejeita texto bruto com caracteres CJK, debris de raciocínio/código ou XML puro de tool_call
       const hasCjk = /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/.test(trimmed);
       const isReasoningDebris = /^(!\s*|\d+\.\s*|csal_|\/\/|\/\*|```|Thinking\s*Process)/i.test(trimmed);
-      if (hasCjk || isReasoningDebris) {
+      const withoutToolCall = stripToolCallMarkup(trimmed);
+      if (hasCjk || isReasoningDebris || !withoutToolCall) {
         return { ok: false, status: 502, error: 'O modelo retornou uma resposta inválida.' };
       }
-      // Caso contrário, trata o texto bruto como resposta livre
-      result = { reply: trimmed, gesture: 'neutral' };
+      // Caso contrário, trata o texto bruto limpo como resposta livre
+      result = { reply: withoutToolCall, gesture: 'neutral' };
     }
   }
   const replyText = extractReplyField(result);
