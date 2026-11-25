@@ -1524,8 +1524,7 @@ export function createChatHandler(options = {}) {
       // hedge e pelo fallback sequencial (NVIDIA desligada ou falha sem corrida).
       let alternateUsed = false;
       let routerUsed = false;
-      const isDetailedIntrospectionRequest = executedAgentTurn?.tool === 'self.describe'
-        || executedAgentTurn?.tool === 'code.inspect'
+      const isDetailedIntrospectionRequest = Boolean(executedAgentTurn?.tool)
         || /\b(?:descrev\w*|resum\w*|explic\w*|lista\w*)\b.*\b(?:m[óo]dulos|ferramentas|habilidades|skills|arquitetura|limita[çc][õo]es)\b/i.test(String(parsedBody.message || ''));
       const replyCharLimit = isDetailedIntrospectionRequest ? 1800 : undefined;
       const alternateProviderReply = (config, signal) => {
@@ -1664,6 +1663,7 @@ export function createChatHandler(options = {}) {
                 temperature,
                 maxTokens: 1800,
                 maxIterations: 4,
+                replyCharLimit,
                 signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
               });
