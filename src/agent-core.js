@@ -2103,8 +2103,6 @@ export function formatAgentTurnPromptContext(turn, { maxChars = 1800 } = {}) {
       serialized = String(turn.result ?? '');
     }
     const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect' || turn.tool === 'fl.guide';
-    const effectiveMaxChars = isDetailedIntrospection ? Math.max(maxChars, 4000) : maxChars;
-    const isDetailedIntrospection = turn.tool === 'self.describe' || turn.tool === 'code.inspect';
     const effectiveMaxChars = isDetailedIntrospection
       ? Math.max(maxChars, 4000)
       : (turn.tool === 'research.fetch' ? Math.max(maxChars, 2600) : maxChars);
