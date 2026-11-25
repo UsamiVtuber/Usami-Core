@@ -54,6 +54,7 @@ import { createResearchAgentTools, publishResearchAgentSkill } from './src/resea
 import { createGitAssistantClient, createGitAssistantTools, publishGitAssistantSkill } from './src/git-assistant-skill.js';
 import { createSpotifyAuthClient, createSpotifyConnectorHandler } from './src/spotify-auth.js';
 import { createSpotifyTools, publishSpotifySkill } from './src/spotify-skill.js';
+import { createFlStudioClient, createFlStudioTools, publishFlStudioSkill } from './src/fl-studio-skill.js';
 import { createCodeAgentBridge, createAgentBridgeHandler } from './src/code-agent-bridge.js';
 import { createSelfDescribeTool, createSelfIntrospection, DEFAULT_ERROR_LIMIT, formatSelfAwarenessPrompt, MAX_ERROR_LIMIT } from './src/self-introspection.js';
 import { createMetaAgentTools, createMetaTransactionManager } from './src/meta-workspace.js';
@@ -535,6 +536,7 @@ for (const [label, publishFn] of [
   ['research-agent', publishResearchAgentSkill],
   ['git-assistant', publishGitAssistantSkill],
   ['spotify-player', publishSpotifySkill],
+  ['fl-studio', publishFlStudioSkill],
   ['pr-checklist-generator', publishPrChecklistGeneratorSkill],
 ]) {
   try {
@@ -545,6 +547,7 @@ for (const [label, publishFn] of [
 }
 
 const installSpotifyAuth = createSpotifyAuthClient({ dataDir: resolveDataDir() });
+const installFlStudioClient = createFlStudioClient();
 
 for (const skillTool of [
   ...createStudyCompanionTools({
@@ -569,6 +572,20 @@ for (const skillTool of [
     onTelemetry: evt => sendObservabilityEvent({
       kind: 'spotify_tool',
       source: 'usami-spotify',
+      route: `/tools/${evt.tool}`,
+      statusCode: evt.ok ? 200 : 500,
+      durationMs: evt.durationMs,
+      isError: Boolean(evt.isError),
+      errorMessage: evt.errorMessage || null,
+      metadata: { tool: evt.tool, action: evt.action || null },
+    }),
+  }),
+  ...createFlStudioTools({
+    flClient: installFlStudioClient,
+    dataDir: resolveDataDir,
+    onTelemetry: evt => sendObservabilityEvent({
+      kind: 'fl_studio_tool',
+      source: 'usami-fl-studio',
       route: `/tools/${evt.tool}`,
       statusCode: evt.ok ? 200 : 500,
       durationMs: evt.durationMs,
@@ -1579,6 +1596,7 @@ export function createChatHandler(options = {}) {
       };
 
       let hedged = false;
+      const liveExecutedTools = [];
       if (useNvidia()) {
         // Fluxo NVIDIA: UMA chamada gera a fala junto das ações do avatar.
         try {
@@ -1646,9 +1664,13 @@ export function createChatHandler(options = {}) {
             publishActivity({ phase: 'tool', tool: resolvedName, tools: [resolvedName] });
             try {
               const exec = await installToolExecutor.execute(resolvedName, args, { origin: 'agent' });
-              return exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
+              const res = exec?.result ?? exec ?? { ok: false, error: 'sem resultado' };
+              liveExecutedTools.push({ tool: resolvedName, args, result: res });
+              return res;
             } catch (error) {
-              return { ok: false, error: String(error?.message || error) };
+              const errRes = { ok: false, error: String(error?.message || error) };
+              liveExecutedTools.push({ tool: resolvedName, args, result: errRes });
+              return errRes;
             } finally {
               publishActivity({ phase: 'thinking' });
             }
@@ -1656,15 +1678,16 @@ export function createChatHandler(options = {}) {
           const invokeNvidia = (promptOverride = null, { temperature = 0.7, skipBlurt = false } = {}) => timeStage('llm', async () => {
             const sys = withCapabilities(promptOverride ?? system, capabilities);
             if (useTools && openAiTools.length) {
+              const toolBudgetMs = options.nvidiaToolBudgetMs ?? Math.max(NVIDIA_BUDGET_MS, 90000);
               const res = await generateReplyWithTools(sys, parsedBody.message, {
                 model: chatModel,
                 tools: openAiTools,
                 executeTool: executeToolForChat,
                 temperature,
                 maxTokens: 1800,
-                maxIterations: 4,
+                maxIterations: 8,
                 replyCharLimit,
-                signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(NVIDIA_BUDGET_MS)]),
+                signal: AbortSignal.any([turn.signal, nvidiaAbort.signal, AbortSignal.timeout(toolBudgetMs)]),
                 blurtReply: (!skipBlurt && surface.mode === 'say+think') ? surface.reply : null,
               });
               if (!res.ok) {
@@ -1704,8 +1727,12 @@ export function createChatHandler(options = {}) {
           };
 
           // Sem provedor alternativo não há corrida: correr sozinho não acelera.
+          // Quando já existe intenção operacional deferida para tool calling nativo
+          // (intentHintTool), também não corremos contra `alternate` sem tools para
+          // evitar que o fallback alucine "feito" e aborte as ferramentas em andamento.
           const effectiveHedgeMs = isFastTier ? 500 : hedgeAfterMs;
-          parsed = alternate
+          const allowHedgeRace = Boolean(alternate) && !(useTools && intentHintTool);
+          parsed = allowHedgeRace
             ? await raceProviders({
               hedgeMs: effectiveHedgeMs,
               startPrimary: startNvidia,
@@ -1835,6 +1862,25 @@ export function createChatHandler(options = {}) {
           mark('animation');
         } catch (error) {
           nvidiaFailed = true;
+          if (!executedAgentTurn && liveExecutedTools.length > 0) {
+            const lastExec = liveExecutedTools[liveExecutedTools.length - 1];
+            executedAgentTurn = {
+              id: `turn-${now()}`,
+              status: 'executed',
+              tool: lastExec.tool,
+              tools: liveExecutedTools.map(t => t.tool),
+              result: lastExec.result,
+              executedTools: liveExecutedTools,
+            };
+            agentTurn = {
+              id: executedAgentTurn.id,
+              kind: 'operational',
+              route: 'tool',
+              status: 'executed',
+              tool: lastExec.tool,
+              tools: executedAgentTurn.tools,
+            };
+          }
           if (turn.signal.aborted) return;
           // O fallback já foi tentado (em paralelo ou depois da falha): repetir
           // a chamada ao mesmo provedor só gastaria tokens.
@@ -1900,7 +1946,19 @@ export function createChatHandler(options = {}) {
             }
           }
           if (!parsed || !parsed.ok) {
-            return send(lastAltError?.httpStatus || 502, { error: lastAltError?.message || 'Todos os provedores alternativos falharam.' });
+            if (executedAgentTurn) {
+              parsed = {
+                ok: true,
+                reply: formatExecutedTurnFallbackReply(executedAgentTurn),
+                gesture: 'nod',
+                actions: [],
+                remember: null,
+                classification,
+                source: 'offline',
+              };
+            } else {
+              return send(lastAltError?.httpStatus || 502, { error: lastAltError?.message || 'Todos os provedores alternativos falharam.' });
+            }
           }
           // Contribuição da animação no caminho do balão: aqui só o pós-processamento
           // síncrono do provedor. O refino do diretor (quando há) é fire-and-forget

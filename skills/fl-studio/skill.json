@@ -1,0 +1,56 @@
+{
+  "schema": "usami.agent.skill.v1",
+  "id": "fl-studio",
+  "name": "FL Studio Controller",
+  "version": "1.6.0",
+  "description": "Coprodutora musical no FL Studio 2026 + OpenUTAU/DiffSinger + Seed-VC/RVC: MIDI/SysEx, Sidechain/EQ, Serum 2, automacao UI, canto estilo Vocaloid e Neuro-sama, .mid/Piano Roll e escuta WASAPI.",
+  "state": "installed",
+  "origin": "dev",
+  "createdAt": "2026-11-24T00:00:00.000Z",
+  "updatedAt": "2026-11-24T19:38:00.000Z",
+  "tools": [
+    "fl.state",
+    "fl.listen",
+    "fl.guide",
+    "fl.learn",
+    "fl.serum",
+    "fl.ui",
+    "fl.vocal",
+    "fl.transport",
+    "fl.mixer",
+    "fl.routing",
+    "fl.eq",
+    "fl.steps",
+    "fl.plugin",
+    "fl.midi",
+    "fl.midi_file",
+    "fl.undo"
+  ],
+  "permissions": [1, 2, 3],
+  "dependencies": [],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "required": false,
+      "description": "Acao em fl.transport, fl.plugin, fl.learn, fl.serum ou fl.ui."
+    },
+    {
+      "name": "pluginName",
+      "type": "string",
+      "required": false,
+      "description": "Nome do gerador em fl.ui add_plugin (ex.: Serum 2, Harmor, Sytrus, Sakura, Ogun, Kepler Exo)."
+    },
+    {
+      "name": "genre",
+      "type": "string",
+      "required": false,
+      "description": "Subgenero alvo: future_bass, kawaii, dubstep, riddim, brostep, colour_bass ou melodic_dubstep."
+    }
+  ],
+  "instructions": "Prefira sempre a camada mais precisa: 1) API MIDI/SysEx (fl.state, fl.transport, fl.mixer, fl.routing, fl.eq, fl.steps, fl.plugin, fl.midi); 2) Arquivos e presets (fl.midi_file + UsamiImportScore, fl.serum para buscar/preparar .SerumPreset); 3) Automacao de UI com kill-switch (fl.ui nivel 3: add_plugin via F8 para carregar Serum 2/Harmor/Sytrus/Sakura/Ogun, capture_window, shortcut e cliques/drags apenas quando necessario).",
+  "tests": {
+    "files": ["test/fl-studio.test.mjs"],
+    "timeoutMs": 10000
+  }
+}

@@ -15,8 +15,7 @@
 
 import { classifyEmotion } from './emotion-classifier.js';
 import { extractAllJsonCandidates } from './json-salvage.js';
-import { parseJsonLoosely, parseProviderRaw, stripToolCallMarkup } from './provider-parse.js';
-import { parseJsonLoosely, parseProviderRaw, parseXmlToolCalls, stripXmlToolCalls } from './provider-parse.js';
+import { parseJsonLoosely, parseProviderRaw, parseXmlToolCalls, stripToolCallMarkup, stripXmlToolCalls } from './provider-parse.js';
 import { sharedClient, sharedRateLimiter } from './nvidia-client.js';
 import { TECHNIQUE_SYSTEM_PROMPT } from './technique-schema.js';
 
