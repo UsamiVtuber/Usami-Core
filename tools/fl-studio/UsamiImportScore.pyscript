@@ -1,0 +1,47 @@
+import json
+import os
+import flpianoroll as flp
+
+# Caminho padrao preenchido pelo instalador install-fl-script.mjs
+DEFAULT_SCORE_JSON = '__USAMI_LATEST_SCORE_JSON__'
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Usami Import Score',
+        'Importa o ultimo score gerado pela Usami (Future Bass, Kawaii, Colour Bass, Dubstep) para o Piano Roll atual.',
+    )
+    form.AddInputCombo('Modo', ['Substituir notas atuais', 'Mesclar com notas atuais'], 0)
+    return form
+
+
+def apply(form):
+    clear_existing = (int(form.GetInputValue('Modo')) == 0)
+    score_path = DEFAULT_SCORE_JSON
+
+    if not os.path.isfile(score_path):
+        flp.Utils.ShowMessage('Nenhum score encontrado em: %s. Peca para a Usami gerar um MIDI primeiro.' % score_path)
+        return
+
+    try:
+        with open(score_path, 'r', encoding='utf-8') as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        flp.Utils.ShowMessage('Erro ao ler score da Usami: %s' % str(exc))
+        return
+
+    src_tpq = max(1, int(payload.get('tpq', 480)))
+    dst_ppq = max(1, int(getattr(flp.score, 'PPQ', 96)))
+    scale = float(dst_ppq) / float(src_tpq)
+
+    if clear_existing:
+        flp.score.clearNotes(True)
+
+    for item in payload.get('notes', []):
+        note = flp.Note()
+        note.number = max(0, min(127, int(item.get('pitch', 60))))
+        note.time = max(0, int(round(float(item.get('startTick', 0)) * scale)))
+        note.length = max(1, int(round(float(item.get('durationTicks', 120)) * scale)))
+        vel_127 = max(1, min(127, int(item.get('velocity', 100))))
+        note.velocity = round(vel_127 / 127.0, 4)
+        flp.score.addNote(note)

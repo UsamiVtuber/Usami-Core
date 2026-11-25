@@ -267,25 +267,6 @@ test('generateReplyWithTools: preserva resposta longa (>220 chars) e títulos em
             content: JSON.stringify({ reply: longReply, gesture: 'tilt', actions: [] }),
           },
         }],
-test('classifyIntentWithLlm: inclui todas as ferramentas além da 30ª com suas descrições', async () => {
-  const prevKey = process.env.NVIDIA_API_KEY;
-  process.env.NVIDIA_API_KEY = 'mock-key';
-  const manyTools = Array.from({ length: 35 }, (_, i) => ({
-    name: `dummy.tool_${i + 1}`,
-    description: `Ferramenta auxiliar ${i + 1}`,
-  }));
-  manyTools.push({
-    name: 'spotify.control',
-    description: 'Controla a reprodução no Spotify: play, pause, next, previous, volume ou shuffle.',
-  });
-
-  let capturedSystem = '';
-  const mockClient = {
-    chatJson: async ({ messages }) => {
-      capturedSystem = messages[0]?.content || '';
-      return {
-        content: '{"kind":"operational","goal":"Tocar Where the Wild Things Are","tool":"spotify.control","confidence":0.94}',
-        reasoning: '',
       };
     },
   };
@@ -314,6 +295,36 @@ test('classifyIntentWithLlm: inclui todas as ferramentas além da 30ª com suas 
     assert.match(res.reply, /1\. sleep-mode —/);
     assert.match(res.reply, /2\. coop-games —/);
     assert.match(res.reply, /3\. study-buddy —/);
+  } finally {
+    if (prevKey) process.env.NVIDIA_API_KEY = prevKey;
+    else delete process.env.NVIDIA_API_KEY;
+  }
+});
+
+test('classifyIntentWithLlm: inclui todas as ferramentas além da 30ª com suas descrições', async () => {
+  const prevKey = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'mock-key';
+  const manyTools = Array.from({ length: 35 }, (_, i) => ({
+    name: `dummy.tool_${i + 1}`,
+    description: `Ferramenta auxiliar ${i + 1}`,
+  }));
+  manyTools.push({
+    name: 'spotify.control',
+    description: 'Controla a reprodução no Spotify: play, pause, next, previous, volume ou shuffle.',
+  });
+
+  let capturedSystem = '';
+  const mockClient = {
+    chatJson: async ({ messages }) => {
+      capturedSystem = messages[0]?.content || '';
+      return {
+        content: '{"kind":"operational","goal":"Tocar Where the Wild Things Are","tool":"spotify.control","confidence":0.94}',
+        reasoning: '',
+      };
+    },
+  };
+
+  try {
     const res = await classifyIntentWithLlm({
       message: 'coloca where the wilds thing are pra mim pfv',
       tools: manyTools,
