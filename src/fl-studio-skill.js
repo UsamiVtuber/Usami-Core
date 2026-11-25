@@ -393,7 +393,25 @@ function writeSafeMidiArtifacts(baseDataDir, fileName, bytes, scorePayload) {
   if (!existsSync(latestJsonPath) || !lstatSync(latestJsonPath).isSymbolicLink()) {
     writeFileSync(latestJsonPath, JSON.stringify(scorePayload, null, 2), 'utf8');
   }
-  return { filePath: targetPath, latestScoreJsonPath: latestJsonPath };
+
+  // Espelha o .mid em Documents/Image-Line/FL Studio/Presets/Scores/Usami (se existir) para aparecer no Browser do FL
+  let flScoresPath = null;
+  try {
+    const flScoresRoot = resolve(homedir(), 'Documents', 'Image-Line', 'FL Studio', 'Presets', 'Scores');
+    if (existsSync(flScoresRoot) && !lstatSync(flScoresRoot).isSymbolicLink()) {
+      const usamiScoresDir = resolve(flScoresRoot, 'Usami');
+      if (!existsSync(usamiScoresDir) || !lstatSync(usamiScoresDir).isSymbolicLink()) {
+        mkdirSync(usamiScoresDir, { recursive: true });
+        const mirrored = resolve(usamiScoresDir, fileName);
+        if (!existsSync(mirrored) || !lstatSync(mirrored).isSymbolicLink()) {
+          writeFileSync(mirrored, Buffer.from(bytes));
+          flScoresPath = mirrored;
+        }
+      }
+    }
+  } catch { /* nao bloqueia geracao principal em data/midi */ }
+
+  return { filePath: targetPath, latestScoreJsonPath: latestJsonPath, flScoresPath };
 }
 
 function resolveOpenUtauStatus(baseDataDir, envProvider = name => readEnvValue(name)) {
@@ -1234,7 +1252,7 @@ export function createFlStudioTools({
     schema: AGENT_SCHEMAS.tool,
     name: 'fl.midi_file',
     version: '1.2.0',
-    description: 'Gera arquivo .mid polifonico e atualiza o score direto do Piano Roll (UsamiImportScore) para Future Bass, Kawaii, Colour Bass, Melodic Dubstep, Riddim e Brostep.',
+    description: 'Gera arquivo .mid polifonico no disco (data/midi e Browser > Scores > Usami) e atualiza latest_score.json para o UsamiImportScore.pyscript. Nao insere notas direto no Piano Roll sem importacao manual (Ctrl+M, arrastar ou UsamiImportScore) — nunca diga que ja esta no Piano Roll.',
     origin: 'skill',
     permissionLevel: 2,
     timeoutMs: 8000,
@@ -1272,7 +1290,7 @@ export function createFlStudioTools({
         throw new Error(`Arquivo MIDI invalido gerado internamente: ${check.reason}`);
       }
       const effectiveDataDir = typeof dataDir === 'function' ? dataDir() : dataDir;
-      const { filePath, latestScoreJsonPath } = writeSafeMidiArtifacts(
+      const { filePath, latestScoreJsonPath, flScoresPath } = writeSafeMidiArtifacts(
         effectiveDataDir,
         score.fileName,
         midiBytes,
@@ -1289,8 +1307,11 @@ export function createFlStudioTools({
       return {
         ok: true,
         schema: FL_STUDIO_SCHEMA,
+        inPianoRoll: false,
+        howToLoadInFl: 'Arraste de Browser > Scores > Usami para o canal, pressione Ctrl+M no Piano Roll selecionando filePath, ou rode Tools > Scripting > UsamiImportScore.',
         fileName: score.fileName,
         filePath,
+        flScoresPath,
         latestScoreJsonPath,
         style: score.style,
         bpm: score.bpm,
