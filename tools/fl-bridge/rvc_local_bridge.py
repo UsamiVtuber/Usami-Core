@@ -8,6 +8,7 @@ Usa:
   - `torchcrepe` para extracao de F0 em GPU (GTX 1660 SUPER)
 """
 import argparse
+import gc
 import json
 import math
 import os
@@ -481,7 +482,7 @@ def extract_f0_crepe(audio_16k, device, pitch_shift=0, f0_min=50.0, f0_max=1100.
         f0_min,
         f0_max,
         model='full',
-        batch_size=512,
+        batch_size=64,
         device=device,
         return_periodicity=True,
     )
@@ -505,10 +506,10 @@ def extract_f0_crepe(audio_16k, device, pitch_shift=0, f0_min=50.0, f0_max=1100.
 
 def load_wav_mono_16k(path):
     real_path = os.path.realpath(path)
-    if not real_path.lower().endswith('.wav'):
-        raise ValueError('Apenas arquivos .wav sao permitidos.')
+    if not real_path.lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
+        raise ValueError('Formato de audio nao suportado (use .wav, .mp3, .flac ou .ogg).')
     if not os.path.isfile(real_path):
-        raise FileNotFoundError(f'WAV nao encontrado: {real_path}')
+        raise FileNotFoundError(f'Arquivo de audio nao encontrado: {real_path}')
     audio, sr = sf.read(real_path, dtype='float32', always_2d=True)
     mono = audio.mean(axis=1)
     if sr != 16000:
@@ -539,67 +540,120 @@ def convert_rvc_local(
         raise ValueError('Saida precisa terminar em .wav')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ckpt = torch.load(real_model, map_location='cpu', weights_only=False)
-    tgt_sr = int(ckpt.get('sr', 40000))
-    net_g = SynthesizerTrnMs768NSFsid(*ckpt['config'])
-    net_g.load_state_dict(ckpt['weight'], strict=True)
-    net_g.eval().to(device)
-
-    hubert = HubertModel.from_pretrained('lengyue233/content-vec-best').eval().to(device)
-
-    faiss_index = None
-    big_npy = None
-    if index_path and os.path.isfile(os.path.realpath(index_path)) and index_rate > 0:
-        faiss_index = faiss.read_index(os.path.realpath(index_path))
-        big_npy = faiss_index.reconstruct_n(0, faiss_index.ntotal)
 
     audio_16k = load_wav_mono_16k(source_wav)
     if audio_16k.size < 1600:
         raise ValueError('Guia vocal muito curta (< 0.1s).')
 
-    # Chunking de 12s com overlap de 0.4s para caber com folga na GTX 1660 SUPER (6 GB)
-    chunk_samples = 16000 * 12
-    overlap_samples = 16000 * 0.4
+    # Chunking de 6s com overlap de 0.3s em pipeline sequencial para minimo pico de RAM/VRAM
+    chunk_samples = 16000 * 6
+    overlap_samples = 16000 * 0.3
     step_samples = int(chunk_samples - overlap_samples)
-    out_chunks = []
-
+    segments = []
     pos = 0
     while pos < len(audio_16k):
         seg = audio_16k[pos:pos + chunk_samples]
         if len(seg) < 1600:
             break
-        feats_in = torch.from_numpy(seg).float().unsqueeze(0).to(device)
-        with torch.no_grad():
-            feats = hubert(feats_in).last_hidden_state
-            feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2, mode='nearest').permute(0, 2, 1)
-
-        if faiss_index is not None and big_npy is not None and index_rate > 0:
-            npy = feats[0].cpu().numpy().astype('float32')
-            score, ix = faiss_index.search(npy, k=8)
-            weight = np.square(1.0 / np.maximum(score, 1e-6))
-            weight /= weight.sum(axis=1, keepdims=True)
-            reconstructed = np.sum(big_npy[ix] * np.expand_dims(weight, axis=2), axis=1)
-            npy = reconstructed * float(index_rate) + npy * (1.0 - float(index_rate))
-            feats = torch.from_numpy(npy).unsqueeze(0).to(device).float()
-
-        pitch_coarse, f0_np = extract_f0_crepe(seg, device, pitch_shift=pitch_shift)
-        p_len = min(feats.shape[1], len(f0_np))
-        feats = feats[:, :p_len, :]
-        pitch_t = torch.from_numpy(pitch_coarse[:p_len]).long().unsqueeze(0).to(device)
-        f0_t = torch.from_numpy(f0_np[:p_len]).float().unsqueeze(0).to(device)
-        len_t = torch.LongTensor([p_len]).to(device)
-        sid_t = torch.LongTensor([0]).to(device)
-
-        audio_out = net_g.infer(feats, len_t, pitch_t, f0_t, sid_t)[0, 0].cpu().numpy()
-        out_chunks.append(audio_out)
+        segments.append(seg)
         if pos + chunk_samples >= len(audio_16k):
             break
         pos += step_samples
+    del audio_16k
+
+    # Estagio 1: ContentVec (descarrega GPU/RAM ao concluir)
+    hubert = HubertModel.from_pretrained('lengyue233/content-vec-best').eval().to(device)
+    feats_list = []
+    with torch.no_grad():
+        for seg in segments:
+            feats_in = torch.from_numpy(seg).float().unsqueeze(0).to(device)
+            feats = hubert(feats_in).last_hidden_state
+            feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2, mode='nearest').permute(0, 2, 1)
+            feats_list.append(feats[0].cpu().numpy().astype('float32'))
+            del feats_in, feats
+    del hubert
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+
+    # Estagio 2: FAISS index (descarrega os ~305 MB ao concluir)
+    if index_path and os.path.isfile(os.path.realpath(index_path)) and index_rate > 0:
+        faiss_index = faiss.read_index(os.path.realpath(index_path))
+        if hasattr(faiss_index, 'make_direct_map'):
+            faiss_index.make_direct_map()
+        for idx_i, npy in enumerate(feats_list):
+            score, ix = faiss_index.search(npy, k=8)
+            valid = ix >= 0
+            safe_ix = np.where(valid, ix, 0)
+            weight = np.where(valid, np.square(1.0 / np.maximum(score, 1e-6)), 0.0)
+            w_sum = weight.sum(axis=1, keepdims=True)
+            weight = np.where(w_sum > 0, weight / np.maximum(w_sum, 1e-9), 0.0)
+            neighbors = faiss_index.reconstruct_batch(safe_ix.ravel()).reshape(len(npy), 8, -1)
+            reconstructed = np.sum(neighbors * np.expand_dims(weight, axis=2), axis=1)
+            has_match = (w_sum > 0).astype('float32')
+            eff_rate = float(index_rate) * has_match
+            feats_list[idx_i] = (reconstructed * eff_rate + npy * (1.0 - eff_rate)).astype('float32')
+        del faiss_index
+        gc.collect()
+
+    # Estagio 3: Extracao F0 (torchcrepe em GPU, libera VRAM ao concluir)
+    f0_list = []
+    for seg in segments:
+        f0_list.append(extract_f0_crepe(seg, device, pitch_shift=pitch_shift))
+    del segments
+    if hasattr(torchcrepe, 'infer') and hasattr(torchcrepe.infer, 'model'):
+        torchcrepe.infer.model = None
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+
+    # Estagio 4: Sintese HiFi-GAN NSF (Usami.pth) — carrega checkpoint so aqui para minimo pico de RAM
+    ckpt = torch.load(real_model, map_location='cpu', weights_only=False)
+    tgt_sr = int(ckpt.get('sr', 40000))
+    net_g = SynthesizerTrnMs768NSFsid(*ckpt['config'])
+    net_g.load_state_dict(ckpt['weight'], strict=True)
+    del ckpt
+    gc.collect()
+    synth_device = device
+    net_g.eval().to(synth_device)
+
+    out_chunks = []
+    for npy, (pitch_coarse, f0_np) in zip(feats_list, f0_list):
+        p_len = min(len(npy), len(f0_np))
+        try:
+            feats_t = torch.from_numpy(npy[:p_len]).unsqueeze(0).to(synth_device).float()
+            pitch_t = torch.from_numpy(pitch_coarse[:p_len]).long().unsqueeze(0).to(synth_device)
+            f0_t = torch.from_numpy(f0_np[:p_len]).float().unsqueeze(0).to(synth_device)
+            len_t = torch.LongTensor([p_len]).to(synth_device)
+            sid_t = torch.LongTensor([0]).to(synth_device)
+            audio_out = net_g.infer(feats_t, len_t, pitch_t, f0_t, sid_t)[0, 0].cpu().numpy()
+        except RuntimeError as exc:
+            if synth_device == 'cuda' and 'out of memory' in str(exc).lower():
+                torch.cuda.empty_cache()
+                synth_device = 'cpu'
+                net_g = net_g.to('cpu')
+                feats_t = torch.from_numpy(npy[:p_len]).unsqueeze(0).cpu().float()
+                pitch_t = torch.from_numpy(pitch_coarse[:p_len]).long().unsqueeze(0).cpu()
+                f0_t = torch.from_numpy(f0_np[:p_len]).float().unsqueeze(0).cpu()
+                len_t = torch.LongTensor([p_len])
+                sid_t = torch.LongTensor([0])
+                audio_out = net_g.infer(feats_t, len_t, pitch_t, f0_t, sid_t)[0, 0].numpy()
+            else:
+                raise
+        out_chunks.append(audio_out)
+        del feats_t, pitch_t, f0_t, len_t, sid_t
+        if synth_device == 'cuda':
+            torch.cuda.empty_cache()
+
+    del net_g
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
 
     if len(out_chunks) == 1:
         final_audio = out_chunks[0]
     else:
-        ov_out = int(0.4 * tgt_sr)
+        ov_out = int(0.3 * tgt_sr)
         final_audio = out_chunks[0]
         for nxt in out_chunks[1:]:
             ov = min(ov_out, len(final_audio), len(nxt))
