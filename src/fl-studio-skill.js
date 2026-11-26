@@ -113,6 +113,7 @@ const DEFAULT_AUDIO_ANALYZER_PATH = join(REPO_ROOT, 'tools', 'fl-bridge', 'audio
 const DEFAULT_UI_BRIDGE_PATH = join(REPO_ROOT, 'tools', 'fl-bridge', 'ui_bridge.py');
 const DEFAULT_SERUM_BUILDER_PATH = join(REPO_ROOT, 'tools', 'fl-bridge', 'serum_preset_builder.py');
 const DEFAULT_SINGING_VC_BRIDGE_PATH = join(REPO_ROOT, 'tools', 'fl-bridge', 'singing_vc_bridge.py');
+const DEFAULT_RVC_LOCAL_BRIDGE_PATH = join(REPO_ROOT, 'tools', 'fl-bridge', 'rvc_local_bridge.py');
 const DEFAULT_RVC_NOTEBOOK_PATH = join(REPO_ROOT, 'tools', 'rvc', 'train_and_sing_usami_rvc_v2.ipynb');
 
 const FORBIDDEN_AUDIO_PATH_RE = /(?:^|[\\/])(?:\.env(?:\..*)?|\.git|vault|secrets?|credentials?)(?:[\\/]|$)/i;
@@ -186,6 +187,7 @@ export function createFlStudioClient({
   uiBridgePath = DEFAULT_UI_BRIDGE_PATH,
   serumBuilderPath = DEFAULT_SERUM_BUILDER_PATH,
   singingVcBridgePath = DEFAULT_SINGING_VC_BRIDGE_PATH,
+  rvcLocalBridgePath = DEFAULT_RVC_LOCAL_BRIDGE_PATH,
   platform = process.platform,
 } = {}) {
   function resolveConfig() {
@@ -357,6 +359,42 @@ export function createFlStudioClient({
       return res;
     },
 
+    async convertRvcLocalAudio({
+      sourceWav,
+      modelPath,
+      indexPath = null,
+      outputWav,
+      pitchShift = 0,
+      indexRate = 0.7,
+    } = {}) {
+      const safeSource = resolveSafeWavPath(sourceWav);
+      const cliArgs = [
+        '--source',
+        safeSource,
+        '--model',
+        resolve(modelPath),
+        '--output',
+        resolve(outputWav),
+        '--pitch-shift',
+        String(pitchShift),
+        '--index-rate',
+        String(indexRate),
+      ];
+      if (indexPath) {
+        cliArgs.push('--index', resolve(indexPath));
+      }
+      const res = await runPythonJsonScript(
+        rvcLocalBridgePath,
+        cliArgs,
+        115000,
+        'Conversor local RVC v2 da Usami',
+      );
+      if (!res?.ok) {
+        throw new Error(res?.error || 'Falha na conversao local via RVC v2.');
+      }
+      return res;
+    },
+
     async createSerumPreset(payload = {}) {
       const res = await runPythonJsonScript(
         serumBuilderPath,
@@ -448,6 +486,8 @@ function resolveOpenUtauStatus(baseDataDir, envProvider = name => readEnvValue(n
   const diffSingerDir = diffSingerCandidates.find(d => existsSync(join(d, 'dsconfig.yaml'))) || null;
 
   const rvcDatasetZip = join(effectiveDataDir, 'rvc', 'usami_rvc_dataset_30min.zip');
+  const rvcModelPath = join(effectiveDataDir, 'rvc', 'Usami', 'Usami.pth');
+  const rvcIndexPath = join(effectiveDataDir, 'rvc', 'Usami', 'Usami.index');
   const defaultRefWav = join(effectiveDataDir, 'voice-samples', 'singing-sites', 'usami_voice_30s.wav');
 
   const vocalsDir = resolve(effectiveDataDir, 'vocals');
@@ -475,6 +515,9 @@ function resolveOpenUtauStatus(baseDataDir, envProvider = name => readEnvValue(n
     diffSingerDir,
     rvcDatasetReady: existsSync(rvcDatasetZip),
     rvcDatasetZip: existsSync(rvcDatasetZip) ? rvcDatasetZip : null,
+    rvcLocalReady: existsSync(rvcModelPath),
+    rvcModelPath: existsSync(rvcModelPath) ? rvcModelPath : null,
+    rvcIndexPath: existsSync(rvcIndexPath) ? rvcIndexPath : null,
     colabNotebookPath: existsSync(DEFAULT_RVC_NOTEBOOK_PATH) ? DEFAULT_RVC_NOTEBOOK_PATH : null,
     defaultReferenceWav: existsSync(defaultRefWav) ? defaultRefWav : null,
     vocalsDir,
@@ -872,7 +915,7 @@ export function createFlStudioTools({
           }
         }
         const refPath = validated.referenceWav || status.defaultReferenceWav;
-        if (!refPath) {
+        if (!status.rvcLocalReady && !refPath) {
           throw new Error('Amostra de referencia usami_voice_30s.wav nao encontrada. Rode scripts/export-voice-samples.py.');
         }
         mkdirSync(status.vocalsDir, { recursive: true });
@@ -883,6 +926,21 @@ export function createFlStudioTools({
         const relOut = relative(status.vocalsDir, outWav);
         if (!relOut || relOut.startsWith('..') || isAbsolute(relOut)) {
           throw new Error('Caminho de saida vocal invalido.');
+        }
+        if (status.rvcLocalReady && typeof flClient.convertRvcLocalAudio === 'function') {
+          const conv = await flClient.convertRvcLocalAudio({
+            sourceWav: srcPath,
+            modelPath: status.rvcModelPath,
+            indexPath: status.rvcIndexPath,
+            outputWav: outWav,
+            pitchShift: validated.pitchShift,
+          });
+          return {
+            ok: true,
+            schema: FL_STUDIO_SCHEMA,
+            action: 'convert',
+            ...conv,
+          };
         }
         const conv = await flClient.convertSingingAudio({
           sourceWav: srcPath,
